@@ -53,3 +53,17 @@ PATH="$(brew --prefix node@18)/bin:$PATH" npm run local:extension:chrome
 提交只聚焦一个变更。Pull Request 应说明目标浏览器、用户可见变化、关联 Issue
 （如有）、构建与手工验证结果；UI 改动附截图。保持 `dist/`、`node_modules/` 和
 凭据文件不进入提交。
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default five-label vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use the single-context layout. See `docs/agents/domain.md`.
