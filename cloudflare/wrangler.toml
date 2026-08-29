@@ -76,16 +76,12 @@ binding = "AI"
 
 [env.beta]
 name = "raindrop-api-beta"
-workers_dev = false
-
-[[env.beta.routes]]
-pattern = "api-beta.raindrop.io"
-custom_domain = true
+workers_dev = true
 
 [env.beta.vars]
 ENVIRONMENT = "beta"
 VERSION = "0.1.0-beta"
-API_ORIGIN = "https://api-beta.raindrop.io"
+API_ORIGIN = "https://raindrop-api-beta.shenyuan.workers.dev"
 APP_ORIGIN = "https://beta.raindrop.io"
 AI_PAGE_ORIGIN = "https://beta-ai.raindrop.io/ai"
 CORS_ORIGINS = "https://beta.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
@@ -93,7 +89,7 @@ CORS_ORIGINS = "https://beta.raindrop.io chrome-extension://ldgfbffkinooeloadekp
 [[env.beta.d1_databases]]
 binding = "DB"
 database_name = "raindrop-db-beta"
-database_id = "REPLACE_WITH_BETA_D1_DATABASE_ID"
+database_id = "4bad3000-d53b-451d-a6f7-b7030684c72d"
 migrations_dir = "migrations"
 
 [[env.beta.r2_buckets]]

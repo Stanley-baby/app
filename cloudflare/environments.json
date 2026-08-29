@@ -49,7 +49,7 @@
     },
     "beta": {
         "workerName": "raindrop-api-beta",
-        "apiOrigin": "https://api-beta.raindrop.io",
+        "apiOrigin": "https://raindrop-api-beta.shenyuan.workers.dev",
         "appOrigin": "https://beta.raindrop.io",
         "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
         "corsOrigins": [

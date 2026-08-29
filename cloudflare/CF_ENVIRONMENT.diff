@@ -913,3 +913,64 @@ index 471f26ce..8695cb22 100644
  migrations_dir = "migrations"
 
  [[env.preview.r2_buckets]]
+
+BETA_DEPLOY_ACCEPTANCE_DELTA (working tree versus HEAD)
+--------------------------------------------------------
+diff --git a/cloudflare/environments.json b/cloudflare/environments.json
+index e5957768..8699be7b 100644
+--- a/cloudflare/environments.json
++++ b/cloudflare/environments.json
+@@ -49,7 +49,7 @@
+     },
+     "beta": {
+         "workerName": "raindrop-api-beta",
+-        "apiOrigin": "https://api-beta.raindrop.io",
++        "apiOrigin": "https://raindrop-api-beta.shenyuan.workers.dev",
+         "appOrigin": "https://beta.raindrop.io",
+         "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
+         "corsOrigins": [
+diff --git a/cloudflare/wrangler.toml b/cloudflare/wrangler.toml
+index 8695cb22..0201db63 100644
+--- a/cloudflare/wrangler.toml
++++ b/cloudflare/wrangler.toml
+@@ -76,16 +76,12 @@ binding = "AI"
+
+ [env.beta]
+ name = "raindrop-api-beta"
+-workers_dev = false
+-
+-[[env.beta.routes]]
+-pattern = "api-beta.raindrop.io"
+-custom_domain = true
++workers_dev = true
+
+ [env.beta.vars]
+ ENVIRONMENT = "beta"
+ VERSION = "0.1.0-beta"
+-API_ORIGIN = "https://api-beta.raindrop.io"
++API_ORIGIN = "https://raindrop-api-beta.shenyuan.workers.dev"
+ APP_ORIGIN = "https://beta.raindrop.io"
+ AI_PAGE_ORIGIN = "https://beta-ai.raindrop.io/ai"
+ CORS_ORIGINS = "https://beta.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+@@ -93,7 +89,7 @@ CORS_ORIGINS = "https://beta.raindrop.io chrome-extension://ldgfbffkinooeloadekp
+ [[env.beta.d1_databases]]
+ binding = "DB"
+ database_name = "raindrop-db-beta"
+-database_id = "REPLACE_WITH_BETA_D1_DATABASE_ID"
++database_id = "4bad3000-d53b-451d-a6f7-b7030684c72d"
+ migrations_dir = "migrations"
+
+ [[env.beta.r2_buckets]]
+
+BETA_RUNTIME
+------------
+worker: raindrop-api-beta
+workers.dev: https://raindrop-api-beta.shenyuan.workers.dev
+deployment version: 38b7c47c-a04c-437e-92e3-61fcfe857b9c
+D1: raindrop-db-beta / 4bad3000-d53b-451d-a6f7-b7030684c72d
+R2: raindrop-content-beta
+R2: raindrop-backup-beta
+Queue: raindrop-tasks-beta / 909400a098ac45bba07fdea6df68f51a
+Queue: raindrop-tasks-dlq-beta / 2f3536970015417796d7358a1aa58a46
+custom-domain route: removed; workers_dev = true
+preview deployment: retained; production: not deployed

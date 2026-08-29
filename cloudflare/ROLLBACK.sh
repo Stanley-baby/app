@@ -6,6 +6,17 @@ case "$ROOT" in
     /|/*/..|*/../*) echo 'refusing unsafe root' >&2; exit 2 ;;
 esac
 
+restore_or_remove() {
+    path=$1
+    if [ -f "$ROOT/$path.orig" ]; then
+        /bin/mv "$ROOT/$path.orig" "$ROOT/$path"
+    elif /usr/bin/git -C "$ROOT" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+        /usr/bin/git -C "$ROOT" checkout -- "$path"
+    else
+        /bin/rm -f "$ROOT/$path"
+    fi
+}
+
 for path in \
     build/common.js \
     build/extension.js \
@@ -14,16 +25,8 @@ for path in \
     package.json \
     src/data/constants/app.js \
     src/index.ejs \
-    src/target/extension/manifest/index.js
-do
-    if [ -f "$ROOT/$path.orig" ]; then
-        mv "$ROOT/$path.orig" "$ROOT/$path"
-    elif git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git -C "$ROOT" checkout -- "$path"
-    fi
-done
-
-for path in \
+    src/target/extension/manifest/index.js \
+    build/environments.js \
     cloudflare/environments.json \
     cloudflare/package.json \
     cloudflare/src/index.js \
@@ -37,8 +40,7 @@ for path in \
     cloudflare/wrangler.toml \
     cloudflare/CF_ENVIRONMENT.diff \
     cloudflare/VERIFICATION.txt \
-    cloudflare/ROLLBACK.sh \
-    build/environments.js
+    cloudflare/ROLLBACK.sh
 do
-    rm -f "$ROOT/$path"
+    restore_or_remove "$path"
 done
