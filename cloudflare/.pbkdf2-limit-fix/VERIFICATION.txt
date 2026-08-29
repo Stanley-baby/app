@@ -1,0 +1,49 @@
+TARGET: Beta email registration PBKDF2 compatibility
+BRANCH: docs/add-repository-guidelines
+CHANGED_FIELD: cloudflare/src/index.js passwordIterations: 310000 -> 100000
+ORIGINAL_SHA256: 3cf32251bfa01f452c6e91b9b4ef9e8f5a2852fffc2dd15f468507a14b8ba1de
+MODIFIED_SHA256: b50e6c94110d1be9d7566c6773d5a439493357bce2061693839158f0d04e676a
+
+ARTIFACTS:
+MODIFIED_FILE=/Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.pbkdf2-limit-fix/MODIFIED_FILE
+DIFF_FILE=/Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.pbkdf2-limit-fix/DIFF_FILE
+VERIFICATION=/Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.pbkdf2-limit-fix/VERIFICATION.txt
+ROLLBACK=/Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.pbkdf2-limit-fix/ROLLBACK.sh
+
+BASELINE:
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: cloudflare/test/*.test.js against passwordIterations=310000
+LITERAL_RESULT: 8 tests, 8 pass, 0 fail
+EXIT_STATUS: 0
+LIVE_RESULT: POST /v1/auth/email/signup -> HTTP 500; Worker exception "NotSupportedError: Pbkdf2 failed: iteration counts above 100000 are not supported (requested 310000)."
+RESTORED_BEHAVIOR_STATUS: not restored at baseline
+
+MODIFIED:
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: cloudflare/test/*.test.js against passwordIterations=100000
+LITERAL_RESULT: 8 tests, 8 pass, 0 fail
+EXIT_STATUS: 0
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler deploy --config cloudflare/wrangler.toml --env beta
+INPUT: cloudflare/src/index.js passwordIterations=100000
+LITERAL_RESULT: Current Version ID: b4db3067-ac3e-4ba2-a975-888f200a0163
+EXIT_STATUS: 0
+COMMAND: curl POST https://raindrop-api-beta.shenyuan.workers.dev/v1/auth/email/signup
+INPUT: name=Stanley, email=stanley270034@outlook.com, password=<redacted>, betaAccessPassword=<redacted>
+LITERAL_OUTPUT: HTTP_STATUS=201 {"result":true,"email":"stanley270034@outlook.com","verified":false}
+EXIT_STATUS: 0
+COMMAND: wrangler d1 execute raindrop-db-beta --remote --command SELECT user by email
+INPUT: stanley270034@outlook.com
+LITERAL_OUTPUT: id=1, email=stanley270034@outlook.com, name=Stanley, email_verified_at=null, success=true
+EXIT_STATUS: 0
+COMMAND: curl POST https://raindrop-api-beta.shenyuan.workers.dev/v1/auth/email/login
+INPUT: email=stanley270034@outlook.com, password=<redacted>
+LITERAL_OUTPUT: HTTP_STATUS=200 {"result":true,"user":{"_id":"1","email":"stanley270034@outlook.com","name":"Stanley","email_verified":false}}; Set-Cookie rd_session present
+EXIT_STATUS: 0
+RESTORED_BEHAVIOR_STATUS: registration returns 201, login returns 200, session cookie issued
+
+ROLLBACK:
+COMMAND: cloudflare/.pbkdf2-limit-fix/ROLLBACK.sh (executed inside a disposable git repository copy)
+INPUT: disposable cloudflare/src/index.js with passwordIterations=100000
+LITERAL_OUTPUT: ROLLBACK_TEST=restored original behavior/status; exit=0
+EXIT_STATUS: 0
+RESTORED_BEHAVIOR_STATUS: disposable copy restored passwordIterations=310000 and original SHA-256 3cf32251bfa01f452c6e91b9b4ef9e8f5a2852fffc2dd15f468507a14b8ba1de; working MODIFIED_FILE remains changed

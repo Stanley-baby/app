@@ -1,0 +1,4 @@
+FILE: cloudflare/src/index.js
+BRANCH: docs/add-repository-guidelines
+-const passwordIterations = 310000
++const passwordIterations = 100000
