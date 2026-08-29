@@ -1,143 +1,134 @@
-Cloudflare environment isolation and client API/AI origin injection
-=======================================================================
+Cloudflare preview deployment and acceptance
+============================================
 
-Changed branch: docs/add-repository-guidelines
-Changed field: Cloudflare local/preview/beta/production bindings and
-build-time API_ORIGIN, AI_PAGE_ORIGIN, and APP_ORIGIN injection; the Worker
-health/version shell and unauthenticated /v1 login envelope; contract-test
-skeleton; and declarative remote custom-domain routes with deployment
-prerequisite documentation. Local CORS also permits the Web app's
-`http://127.0.0.1:2000` loopback origin.
+Changed branch
+--------------
+docs/add-repository-guidelines
+
+Changed field
+-------------
+Preview deployment now uses real Cloudflare resources and the temporary
+workers.dev origin because Cloudflare could not find a zone for
+api-preview.raindrop.io. Preview only; beta and production were not deployed.
 
 Artifacts
 ---------
-MODIFIED_FILE: cloudflare/wrangler.toml
-DIFF_FILE: cloudflare/CF_ENVIRONMENT.diff
-VERIFICATION.txt: cloudflare/VERIFICATION.txt
-ROLLBACK.sh: cloudflare/ROLLBACK.sh (executable)
+MODIFIED_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/wrangler.toml
+DIFF_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/CF_ENVIRONMENT.diff
+VERIFICATION.txt: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/VERIFICATION.txt
+ROLLBACK.sh: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/ROLLBACK.sh (executable)
+Additional changed source config: cloudflare/environments.json
+
+Resources
+---------
+D1: raindrop-db-preview / 7996b398-6a27-4916-b303-cd42180eaf3b
+R2: raindrop-content-preview
+R2: raindrop-backup-preview
+Queue: raindrop-tasks-preview (created with 60-second retention)
+Queue: raindrop-tasks-dlq-preview (created with 60-second retention)
 
 BASELINE
 --------
 Command:
-  PATH="$(brew --prefix node@18)/bin:$PATH" npm run build
+  base=$(mktemp -d /tmp/raindrop-baseline.XXXXXX); git archive --format=tar HEAD | tar -xf - -C "$base"; ln -s "$PWD/node_modules" "$base/node_modules"; (cd "$base" && PATH="$(brew --prefix node@18)/bin:$PATH" npm run test:contract)
 Input:
-  HEAD client source, before this change
+  HEAD client/Cloudflare implementation before preview deployment config changes
 Literal output/result:
-  webpack 5.105.4 compiled successfully in 18790 ms
-Exit status:
-  0
-
-Command:
-  PATH="$(brew --prefix node@18)/bin:$PATH" npm run build:extension:chrome
-Input:
-  HEAD client source, before this change
-Literal output/result:
-  webpack 5.105.4 compiled successfully in 18151 ms
-Exit status:
-  0
+  1..6
+  # tests 6
+  # pass 6
+  # fail 0
+Exit status: 0
 
 MODIFIED
 --------
 Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npx wrangler d1 create raindrop-db-preview
+Input:
+  Authenticated Wrangler account, preview resource name
+Literal output/result:
+  Successfully created DB 'raindrop-db-preview'; database_id 7996b398-6a27-4916-b303-cd42180eaf3b
+Exit status: 0
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npx wrangler r2 bucket create raindrop-content-preview; PATH="$(brew --prefix node@18)/bin:$PATH" npx wrangler r2 bucket create raindrop-backup-preview
+Input:
+  Preview content and backup bucket names
+Literal output/result:
+  Created bucket 'raindrop-content-preview'; created bucket 'raindrop-backup-preview'
+Exit status: 0
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npx wrangler queues create raindrop-tasks-preview --message-retention-period-secs 60 --delivery-delay-secs 0; PATH="$(brew --prefix node@18)/bin:$PATH" npx wrangler queues create raindrop-tasks-dlq-preview --message-retention-period-secs 60 --delivery-delay-secs 0
+Input:
+  Preview task and DLQ names
+Literal output/result:
+  Created queue 'raindrop-tasks-preview'; created queue 'raindrop-tasks-dlq-preview'
+Exit status: 0
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npx wrangler deploy --config cloudflare/wrangler.toml --env preview
+Input:
+  Initial preview config with custom_domain api-preview.raindrop.io
+Literal output/result:
+  Uploaded raindrop-api-preview; Could not find zone for `api-preview.raindrop.io`
+Exit status: 1
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npx wrangler deploy --config cloudflare/wrangler.toml --env preview
+Input:
+  Preview workers.dev config with API_ORIGIN=https://raindrop-api-preview.shenyuan.workers.dev
+Literal output/result:
+  Deployed raindrop-api-preview triggers
+  https://raindrop-api-preview.shenyuan.workers.dev
+  Current Version ID: 93a2fd96-0db6-486f-9d6a-8f0ad78e5c05
+Exit status: 0
+
+Command:
+  /usr/bin/curl -sS -o /tmp/raindrop-response -w 'HTTP %{http_code}\\n' https://raindrop-api-preview.shenyuan.workers.dev/health; /usr/bin/curl -sS -o /tmp/raindrop-response -w 'HTTP %{http_code}\\n' https://raindrop-api-preview.shenyuan.workers.dev/version; /usr/bin/curl -sS -o /tmp/raindrop-response -w 'HTTP %{http_code}\\n' https://raindrop-api-preview.shenyuan.workers.dev/v1/user
+Input:
+  Anonymous HTTP requests to the deployed preview Worker
+Literal output/result:
+  /health: HTTP 200 {"result":true,"status":"ok","environment":"preview","version":"0.1.0-preview"}
+  /version: HTTP 200 {"result":true,"environment":"preview","version":"0.1.0-preview"}
+  /v1/user: HTTP 401 {"result":false,"auth":false,"error":"auth_required","errorMessage":"Login is required","login":"https://preview.raindrop.io/account/login"}
+Exit status: 0
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npx webpack --config build/web.js --env environment=preview; PATH="$(brew --prefix node@18)/bin:$PATH" npx webpack --config build/extension.js --env vendor=chrome --env environment=preview
+Input:
+  Preview Web and Chrome builds
+Literal output/result:
+  Web: webpack 5.105.4 compiled successfully in 11809 ms
+  Chrome: webpack 5.105.4 compiled successfully in 10354 ms
+Exit status: 0
+
+Command:
+  rg -o 'https://raindrop-api-preview\\.shenyuan\\.workers\\.dev|https://ai-preview\\.raindrop\\.io/ai|https://preview\\.raindrop\\.io' dist/web/preview dist/chrome/preview; python3 - <<'PY' ... manifest.json ... PY
+Input:
+  Generated preview Web and Chrome bundles
+Literal output/result:
+  Both bundles contain https://raindrop-api-preview.shenyuan.workers.dev and https://ai-preview.raindrop.io/ai. Chrome manifest host_permissions is ["https://raindrop-api-preview.shenyuan.workers.dev/*"] and optional_host_permissions is ["*://*/*"].
+Exit status: 0
+
+Command:
   PATH="$(brew --prefix node@18)/bin:$PATH" npm run test:contract
 Input:
-  cloudflare/test/contract.test.js, cloudflare/test/build-config.test.js, and
-  cloudflare/src/index.js
+  Modified source/config, generated preview profiles
 Literal output/result:
-  6 tests passed; 0 failed
-Exit status:
-  0
+  1..6
+  # tests 6
+  # pass 6
+  # fail 0
+Exit status: 0
 
 Command:
-  PATH="$(brew --prefix node@18)/bin:$PATH" npx webpack --config build/web.js --env environment=local
+  git diff --check HEAD && /bin/sh -n cloudflare/ROLLBACK.sh && test -x cloudflare/ROLLBACK.sh
 Input:
-  local Web development profile
+  Modified tracked config and four Cloudflare artifacts
 Literal output/result:
-  webpack 5.105.4 compiled successfully in 9746 ms
-Exit status:
-  0
-
-Command:
-  PATH="$(brew --prefix node@18)/bin:$PATH" npx webpack --config build/extension.js --env vendor=chrome --env environment=local
-Input:
-  local Chrome development profile
-Literal output/result:
-  webpack 5.105.4 compiled successfully in 9185 ms
-Exit status:
-  0
-
-Command:
-  rg -o 'http://localhost:[0-9]+(?:/ai)?' dist/web/dev/assets/*.js | sort -u; rg -o 'http://localhost:[0-9]+(?:/ai)?' dist/chrome/dev/assets/app.js | sort -u
-Input:
-  generated local Web and Chrome development bundles
-Literal output/result:
-  http://localhost:5173/ai
-  http://localhost:8787
-  http://localhost:5173/ai
-  http://localhost:8787
-Exit status:
-  0
-
-Command:
-  PATH="$(brew --prefix node@18)/bin:$PATH" npm run build
-Input:
-  production Web profile
-Literal output/result:
-  webpack 5.105.4 compiled successfully in 17849 ms
-Exit status:
-  0
-
-Command:
-  PATH="$(brew --prefix node@18)/bin:$PATH" npm run build:extension:chrome
-Input:
-  production Chrome profile
-Literal output/result:
-  webpack 5.105.4 compiled successfully in 18361 ms
-Exit status:
-  0
-
-Command:
-  wrangler deploy --config cloudflare/wrangler.toml --dry-run --env=''; for env in preview beta production; do wrangler deploy --config cloudflare/wrangler.toml --dry-run --env="$env"; done
-Input:
-  local, preview, beta, and production Wrangler configurations
-Literal output/result:
-  each configuration listed its own bindings and ended with --dry-run: exiting now.
-Exit status:
-  0
-
-Command:
-  wrangler deploy --config cloudflare/wrangler.toml --dry-run --env=''
-Input:
-  local Wrangler configuration with loopback Web origin
-Literal output/result:
-  env.CORS_ORIGINS includes http://127.0.0.1:2000; --dry-run: exiting now.
-Exit status:
-  0
-
-REMOTE REACHABILITY
--------------------
-Command:
-  wrangler whoami
-Input:
-  local Wrangler authentication
-Literal output/result:
-  authentication check succeeded; no remote deployment was attempted
-Exit status:
-  0
-
-Remote custom-domain routes pass Wrangler dry-run parsing. A real deploy still
-requires an active Cloudflare zone, created per-environment D1/R2/Queue
-resources, actual D1 IDs, and per-environment secret values; none are stored
-in this repository.
-
-Command:
-  git diff --cached --check HEAD && sh -n cloudflare/ROLLBACK.sh && test -x cloudflare/ROLLBACK.sh
-Input:
-  final staged implementation
-Literal output/result:
-  staged source checks: ok
-Exit status:
-  0
+  checks passed; ROLLBACK.sh is executable
+Exit status: 0
 
 ROLLBACK
 --------
@@ -147,41 +138,48 @@ Command:
   root = pathlib.Path.cwd()
   tracked = '.gitignore build/common.js build/extension.js build/web.js package.json src/data/constants/app.js src/index.ejs src/target/extension/manifest/index.js'.split()
   new = 'build/environments.js cloudflare/.dev.vars.example cloudflare/CF_ENVIRONMENT.diff cloudflare/README.md cloudflare/contracts/openapi.yaml cloudflare/contracts/v1-routes.json cloudflare/environments.json cloudflare/migrations/0001_initial.sql cloudflare/package.json cloudflare/src/index.js cloudflare/test/build-config.test.js cloudflare/test/contract.test.js cloudflare/VERIFICATION.txt cloudflare/wrangler.toml cloudflare/ROLLBACK.sh'.split()
-  with tempfile.TemporaryDirectory() as directory:
+  with tempfile.TemporaryDirectory(prefix='raindrop-rollback-') as directory:
       copy = pathlib.Path(directory)
       for path in tracked:
           destination = copy / path
           destination.parent.mkdir(parents=True, exist_ok=True)
           shutil.copy2(root / path, destination)
-          destination.with_name(destination.name + '.orig').write_bytes(subprocess.check_output(['/usr/bin/git', 'show', f'HEAD:{path}']))
+          destination.with_name(destination.name + '.orig').write_bytes(subprocess.check_output(['/usr/bin/git', 'show', f'HEAD^:{path}']))
       for path in new:
           destination = copy / path
           destination.parent.mkdir(parents=True, exist_ok=True)
           shutil.copy2(root / path, destination)
-      result = subprocess.run(['/bin/sh', str(copy / 'cloudflare/ROLLBACK.sh'), str(copy)])
+      result = subprocess.run(['/bin/sh', str(copy / 'cloudflare/ROLLBACK.sh'), str(copy)], capture_output=True, text=True)
       if result.returncode: raise SystemExit(result.returncode)
-      restored = sum((copy / path).read_bytes() == subprocess.check_output(['/usr/bin/git', 'show', f'HEAD:{path}']) for path in tracked)
+      restored = sum((copy / path).read_bytes() == subprocess.check_output(['/usr/bin/git', 'show', f'HEAD^:{path}']) for path in tracked)
       removed = sum(not (copy / path).exists() for path in new)
       print(f'rollback copy artifacts before={len(tracked) + len(new)} restored_tracked={restored} removed_new={removed}')
   PY
 Input:
-  all changed tracked files plus all new Cloudflare artifacts
+  Copy of the modified branch; rollback was run only inside the temporary copy
 Literal output/result:
   rollback copy artifacts before=23 restored_tracked=8 removed_new=15
-Exit status:
-  0
+Exit status: 0
 
 Restored behavior/status
-------------------------
-The rollback test restored all 8 tracked files to their HEAD bytes and removed
-all 15 new implementation/artifact files from the temporary copy. The working
-tree remains on the modified branch with cloudflare/wrangler.toml and the
-client/API implementation changed.
+-----------------------
+The rollback test restored all 8 tracked files to their HEAD^ bytes and removed
+all 15 implementation/artifact files from the temporary copy. The working tree
+was left modified; the deployed preview Worker and Cloudflare resources remain
+in place. CONTEXT.md, docs/adr/, and docs/cf-backend-implementation-plan.md were
+not touched.
 
 Hashes
 ------
-Original tracked-file hashes are preserved by git HEAD. Current MODIFIED_FILE
-hash:
-  1dd9fc9c142c868f18fb8f279b5f7f269628a89cb1b45772fd4ec3d30638ee51  cloudflare/wrangler.toml
+Original tracked-file hashes remain in git history.
+Current MODIFIED_FILE hash:
+  cedf772a478ec950d9c48d6891ab83cb95738f5dfa06815ca5337e1424f8836e  cloudflare/wrangler.toml
 Current DIFF_FILE hash:
-  386d04ee799c82b668b39cf0b275ede8017ac4aaeb98ff758b9df852daedcc31  cloudflare/CF_ENVIRONMENT.diff
+  1ecaf8d7d3bd11428a2a4e6bed097e4788043501e72484e0a844d0f44a0fe677  cloudflare/CF_ENVIRONMENT.diff
+
+Manual follow-up
+----------------
+Current preview acceptance is complete on workers.dev. The custom domain needs
+an active Cloudflare zone before it can replace the temporary URL. Preview
+secret list is currently empty; real secret values are required before future
+routes use BETA_ACCESS_PASSWORD, SESSION_SECRET, or ENCRYPTION_KEY.

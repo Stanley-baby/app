@@ -865,3 +865,51 @@ index 047a8c83..275c0198 100644
 -}
 \ No newline at end of file
 +}
+
+DEPLOY_ACCEPTANCE_DELTA (working tree versus HEAD)
+--------------------------------------------------
+diff --git a/cloudflare/environments.json b/cloudflare/environments.json
+index 87b0ff73..e5957768 100644
+--- a/cloudflare/environments.json
++++ b/cloudflare/environments.json
+@@ -26,7 +26,7 @@
+     },
+     "preview": {
+         "workerName": "raindrop-api-preview",
+-        "apiOrigin": "https://api-preview.raindrop.io",
++        "apiOrigin": "https://raindrop-api-preview.shenyuan.workers.dev",
+         "appOrigin": "https://preview.raindrop.io",
+         "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
+         "corsOrigins": [
+diff --git a/cloudflare/wrangler.toml b/cloudflare/wrangler.toml
+index 471f26ce..8695cb22 100644
+--- a/cloudflare/wrangler.toml
++++ b/cloudflare/wrangler.toml
+@@ -39,16 +39,12 @@ binding = "AI"
+
+ [env.preview]
+ name = "raindrop-api-preview"
+-workers_dev = false
+-
+-[[env.preview.routes]]
+-pattern = "api-preview.raindrop.io"
+-custom_domain = true
++workers_dev = true
+
+ [env.preview.vars]
+ ENVIRONMENT = "preview"
+ VERSION = "0.1.0-preview"
+-API_ORIGIN = "https://api-preview.raindrop.io"
++API_ORIGIN = "https://raindrop-api-preview.shenyuan.workers.dev"
+ APP_ORIGIN = "https://preview.raindrop.io"
+ AI_PAGE_ORIGIN = "https://ai-preview.raindrop.io/ai"
+ CORS_ORIGINS = "https://preview.raindrop.io chrome-extension://*"
+@@ -56,7 +52,7 @@ CORS_ORIGINS = "https://preview.raindrop.io chrome-extension://*"
+ [[env.preview.d1_databases]]
+ binding = "DB"
+ database_name = "raindrop-db-preview"
+-database_id = "REPLACE_WITH_PREVIEW_D1_DATABASE_ID"
++database_id = "7996b398-6a27-4916-b303-cd42180eaf3b"
+ migrations_dir = "migrations"
+
+ [[env.preview.r2_buckets]]

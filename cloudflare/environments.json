@@ -26,7 +26,7 @@
     },
     "preview": {
         "workerName": "raindrop-api-preview",
-        "apiOrigin": "https://api-preview.raindrop.io",
+        "apiOrigin": "https://raindrop-api-preview.shenyuan.workers.dev",
         "appOrigin": "https://preview.raindrop.io",
         "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
         "corsOrigins": [
