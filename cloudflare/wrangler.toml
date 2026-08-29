@@ -1,0 +1,161 @@
+# The top-level (no --env) configuration is the isolated local environment.
+name = "raindrop-api-local"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[vars]
+ENVIRONMENT = "local"
+VERSION = "0.1.0-local"
+API_ORIGIN = "http://localhost:8787"
+APP_ORIGIN = "http://localhost:2000"
+AI_PAGE_ORIGIN = "http://localhost:5173/ai"
+CORS_ORIGINS = "http://localhost:2000 http://127.0.0.1:2000 http://localhost:3000 chrome-extension://*"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "raindrop-db-local"
+database_id = "REPLACE_WITH_LOCAL_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "CONTENT_BUCKET"
+bucket_name = "raindrop-content-local"
+
+[[r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "raindrop-backup-local"
+
+[[queues.producers]]
+binding = "TASK_QUEUE"
+queue = "raindrop-tasks-local"
+
+[[queues.producers]]
+binding = "TASK_DLQ"
+queue = "raindrop-tasks-dlq-local"
+
+[ai]
+binding = "AI"
+
+[env.preview]
+name = "raindrop-api-preview"
+workers_dev = false
+
+[[env.preview.routes]]
+pattern = "api-preview.raindrop.io"
+custom_domain = true
+
+[env.preview.vars]
+ENVIRONMENT = "preview"
+VERSION = "0.1.0-preview"
+API_ORIGIN = "https://api-preview.raindrop.io"
+APP_ORIGIN = "https://preview.raindrop.io"
+AI_PAGE_ORIGIN = "https://ai-preview.raindrop.io/ai"
+CORS_ORIGINS = "https://preview.raindrop.io chrome-extension://*"
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "raindrop-db-preview"
+database_id = "REPLACE_WITH_PREVIEW_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[env.preview.r2_buckets]]
+binding = "CONTENT_BUCKET"
+bucket_name = "raindrop-content-preview"
+
+[[env.preview.r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "raindrop-backup-preview"
+
+[[env.preview.queues.producers]]
+binding = "TASK_QUEUE"
+queue = "raindrop-tasks-preview"
+
+[[env.preview.queues.producers]]
+binding = "TASK_DLQ"
+queue = "raindrop-tasks-dlq-preview"
+
+[env.preview.ai]
+binding = "AI"
+
+[env.beta]
+name = "raindrop-api-beta"
+workers_dev = false
+
+[[env.beta.routes]]
+pattern = "api-beta.raindrop.io"
+custom_domain = true
+
+[env.beta.vars]
+ENVIRONMENT = "beta"
+VERSION = "0.1.0-beta"
+API_ORIGIN = "https://api-beta.raindrop.io"
+APP_ORIGIN = "https://beta.raindrop.io"
+AI_PAGE_ORIGIN = "https://beta-ai.raindrop.io/ai"
+CORS_ORIGINS = "https://beta.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+
+[[env.beta.d1_databases]]
+binding = "DB"
+database_name = "raindrop-db-beta"
+database_id = "REPLACE_WITH_BETA_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[env.beta.r2_buckets]]
+binding = "CONTENT_BUCKET"
+bucket_name = "raindrop-content-beta"
+
+[[env.beta.r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "raindrop-backup-beta"
+
+[[env.beta.queues.producers]]
+binding = "TASK_QUEUE"
+queue = "raindrop-tasks-beta"
+
+[[env.beta.queues.producers]]
+binding = "TASK_DLQ"
+queue = "raindrop-tasks-dlq-beta"
+
+[env.beta.ai]
+binding = "AI"
+
+[env.production]
+name = "raindrop-api-production"
+workers_dev = false
+
+[[env.production.routes]]
+pattern = "api.raindrop.io"
+custom_domain = true
+
+[env.production.vars]
+ENVIRONMENT = "production"
+VERSION = "0.1.0-production"
+API_ORIGIN = "https://api.raindrop.io"
+APP_ORIGIN = "https://app.raindrop.io"
+AI_PAGE_ORIGIN = "https://ai.raindrop.io/ai"
+CORS_ORIGINS = "https://app.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "raindrop-db-production"
+database_id = "REPLACE_WITH_PRODUCTION_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[env.production.r2_buckets]]
+binding = "CONTENT_BUCKET"
+bucket_name = "raindrop-content-production"
+
+[[env.production.r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "raindrop-backup-production"
+
+[[env.production.queues.producers]]
+binding = "TASK_QUEUE"
+queue = "raindrop-tasks-production"
+
+[[env.production.queues.producers]]
+binding = "TASK_DLQ"
+queue = "raindrop-tasks-dlq-production"
+
+[env.production.ai]
+binding = "AI"

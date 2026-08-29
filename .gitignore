@@ -8,6 +8,9 @@ yarn-error.log
 npm-debug.log
 .yarn
 
+# Cloudflare local secrets
+cloudflare/.dev.vars
+
 # Next
 dist
 
@@ -29,3 +32,4 @@ DerivedData
 *.ipa
 *.xcuserstate
 project.xcworkspace
+cloudflare/.wrangler/

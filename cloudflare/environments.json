@@ -1,0 +1,96 @@
+{
+    "local": {
+        "workerName": "raindrop-api-local",
+        "apiOrigin": "http://localhost:8787",
+        "appOrigin": "http://localhost:2000",
+        "aiPageOrigin": "http://localhost:5173/ai",
+        "corsOrigins": [
+            "http://localhost:2000",
+            "http://127.0.0.1:2000",
+            "http://localhost:3000",
+            "chrome-extension://*"
+        ],
+        "resourceNames": {
+            "DB": "raindrop-db-local",
+            "CONTENT_BUCKET": "raindrop-content-local",
+            "BACKUP_BUCKET": "raindrop-backup-local",
+            "TASK_QUEUE": "raindrop-tasks-local",
+            "TASK_DLQ": "raindrop-tasks-dlq-local"
+        },
+        "secretScope": "raindrop-api-local",
+        "secrets": [
+            "BETA_ACCESS_PASSWORD",
+            "SESSION_SECRET",
+            "ENCRYPTION_KEY"
+        ]
+    },
+    "preview": {
+        "workerName": "raindrop-api-preview",
+        "apiOrigin": "https://api-preview.raindrop.io",
+        "appOrigin": "https://preview.raindrop.io",
+        "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
+        "corsOrigins": [
+            "https://preview.raindrop.io",
+            "chrome-extension://*"
+        ],
+        "resourceNames": {
+            "DB": "raindrop-db-preview",
+            "CONTENT_BUCKET": "raindrop-content-preview",
+            "BACKUP_BUCKET": "raindrop-backup-preview",
+            "TASK_QUEUE": "raindrop-tasks-preview",
+            "TASK_DLQ": "raindrop-tasks-dlq-preview"
+        },
+        "secretScope": "raindrop-api-preview",
+        "secrets": [
+            "BETA_ACCESS_PASSWORD",
+            "SESSION_SECRET",
+            "ENCRYPTION_KEY"
+        ]
+    },
+    "beta": {
+        "workerName": "raindrop-api-beta",
+        "apiOrigin": "https://api-beta.raindrop.io",
+        "appOrigin": "https://beta.raindrop.io",
+        "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
+        "corsOrigins": [
+            "https://beta.raindrop.io",
+            "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+        ],
+        "resourceNames": {
+            "DB": "raindrop-db-beta",
+            "CONTENT_BUCKET": "raindrop-content-beta",
+            "BACKUP_BUCKET": "raindrop-backup-beta",
+            "TASK_QUEUE": "raindrop-tasks-beta",
+            "TASK_DLQ": "raindrop-tasks-dlq-beta"
+        },
+        "secretScope": "raindrop-api-beta",
+        "secrets": [
+            "BETA_ACCESS_PASSWORD",
+            "SESSION_SECRET",
+            "ENCRYPTION_KEY"
+        ]
+    },
+    "production": {
+        "workerName": "raindrop-api-production",
+        "apiOrigin": "https://api.raindrop.io",
+        "appOrigin": "https://app.raindrop.io",
+        "aiPageOrigin": "https://ai.raindrop.io/ai",
+        "corsOrigins": [
+            "https://app.raindrop.io",
+            "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+        ],
+        "resourceNames": {
+            "DB": "raindrop-db-production",
+            "CONTENT_BUCKET": "raindrop-content-production",
+            "BACKUP_BUCKET": "raindrop-backup-production",
+            "TASK_QUEUE": "raindrop-tasks-production",
+            "TASK_DLQ": "raindrop-tasks-dlq-production"
+        },
+        "secretScope": "raindrop-api-production",
+        "secrets": [
+            "BETA_ACCESS_PASSWORD",
+            "SESSION_SECRET",
+            "ENCRYPTION_KEY"
+        ]
+    }
+}

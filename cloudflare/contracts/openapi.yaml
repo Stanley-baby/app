@@ -1,0 +1,24 @@
+openapi: 3.0.3
+info:
+  title: Independent Bookmarking Service API
+  version: 1.0.0
+servers:
+  - url: https://api.raindrop.io
+paths:
+  /health:
+    get:
+      responses:
+        '200':
+          description: Worker is healthy.
+  /version:
+    get:
+      responses:
+        '200':
+          description: Deployed Worker version.
+  /v1/user:
+    get:
+      responses:
+        '200':
+          description: Authenticated User.
+        '401':
+          description: Login required.

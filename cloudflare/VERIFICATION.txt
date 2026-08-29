@@ -1,0 +1,187 @@
+Cloudflare environment isolation and client API/AI origin injection
+=======================================================================
+
+Changed branch: docs/add-repository-guidelines
+Changed field: Cloudflare local/preview/beta/production bindings and
+build-time API_ORIGIN, AI_PAGE_ORIGIN, and APP_ORIGIN injection; the Worker
+health/version shell and unauthenticated /v1 login envelope; contract-test
+skeleton; and declarative remote custom-domain routes with deployment
+prerequisite documentation. Local CORS also permits the Web app's
+`http://127.0.0.1:2000` loopback origin.
+
+Artifacts
+---------
+MODIFIED_FILE: cloudflare/wrangler.toml
+DIFF_FILE: cloudflare/CF_ENVIRONMENT.diff
+VERIFICATION.txt: cloudflare/VERIFICATION.txt
+ROLLBACK.sh: cloudflare/ROLLBACK.sh (executable)
+
+BASELINE
+--------
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npm run build
+Input:
+  HEAD client source, before this change
+Literal output/result:
+  webpack 5.105.4 compiled successfully in 18790 ms
+Exit status:
+  0
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npm run build:extension:chrome
+Input:
+  HEAD client source, before this change
+Literal output/result:
+  webpack 5.105.4 compiled successfully in 18151 ms
+Exit status:
+  0
+
+MODIFIED
+--------
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npm run test:contract
+Input:
+  cloudflare/test/contract.test.js, cloudflare/test/build-config.test.js, and
+  cloudflare/src/index.js
+Literal output/result:
+  6 tests passed; 0 failed
+Exit status:
+  0
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npx webpack --config build/web.js --env environment=local
+Input:
+  local Web development profile
+Literal output/result:
+  webpack 5.105.4 compiled successfully in 9746 ms
+Exit status:
+  0
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npx webpack --config build/extension.js --env vendor=chrome --env environment=local
+Input:
+  local Chrome development profile
+Literal output/result:
+  webpack 5.105.4 compiled successfully in 9185 ms
+Exit status:
+  0
+
+Command:
+  rg -o 'http://localhost:[0-9]+(?:/ai)?' dist/web/dev/assets/*.js | sort -u; rg -o 'http://localhost:[0-9]+(?:/ai)?' dist/chrome/dev/assets/app.js | sort -u
+Input:
+  generated local Web and Chrome development bundles
+Literal output/result:
+  http://localhost:5173/ai
+  http://localhost:8787
+  http://localhost:5173/ai
+  http://localhost:8787
+Exit status:
+  0
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npm run build
+Input:
+  production Web profile
+Literal output/result:
+  webpack 5.105.4 compiled successfully in 17849 ms
+Exit status:
+  0
+
+Command:
+  PATH="$(brew --prefix node@18)/bin:$PATH" npm run build:extension:chrome
+Input:
+  production Chrome profile
+Literal output/result:
+  webpack 5.105.4 compiled successfully in 18361 ms
+Exit status:
+  0
+
+Command:
+  wrangler deploy --config cloudflare/wrangler.toml --dry-run --env=''; for env in preview beta production; do wrangler deploy --config cloudflare/wrangler.toml --dry-run --env="$env"; done
+Input:
+  local, preview, beta, and production Wrangler configurations
+Literal output/result:
+  each configuration listed its own bindings and ended with --dry-run: exiting now.
+Exit status:
+  0
+
+Command:
+  wrangler deploy --config cloudflare/wrangler.toml --dry-run --env=''
+Input:
+  local Wrangler configuration with loopback Web origin
+Literal output/result:
+  env.CORS_ORIGINS includes http://127.0.0.1:2000; --dry-run: exiting now.
+Exit status:
+  0
+
+REMOTE REACHABILITY
+-------------------
+Command:
+  wrangler whoami
+Input:
+  local Wrangler authentication
+Literal output/result:
+  authentication check succeeded; no remote deployment was attempted
+Exit status:
+  0
+
+Remote custom-domain routes pass Wrangler dry-run parsing. A real deploy still
+requires an active Cloudflare zone, created per-environment D1/R2/Queue
+resources, actual D1 IDs, and per-environment secret values; none are stored
+in this repository.
+
+Command:
+  git diff --cached --check HEAD && sh -n cloudflare/ROLLBACK.sh && test -x cloudflare/ROLLBACK.sh
+Input:
+  final staged implementation
+Literal output/result:
+  staged source checks: ok
+Exit status:
+  0
+
+ROLLBACK
+--------
+Command:
+  python3 - <<'PY'
+  import pathlib, shutil, subprocess, tempfile
+  root = pathlib.Path.cwd()
+  tracked = '.gitignore build/common.js build/extension.js build/web.js package.json src/data/constants/app.js src/index.ejs src/target/extension/manifest/index.js'.split()
+  new = 'build/environments.js cloudflare/.dev.vars.example cloudflare/CF_ENVIRONMENT.diff cloudflare/README.md cloudflare/contracts/openapi.yaml cloudflare/contracts/v1-routes.json cloudflare/environments.json cloudflare/migrations/0001_initial.sql cloudflare/package.json cloudflare/src/index.js cloudflare/test/build-config.test.js cloudflare/test/contract.test.js cloudflare/VERIFICATION.txt cloudflare/wrangler.toml cloudflare/ROLLBACK.sh'.split()
+  with tempfile.TemporaryDirectory() as directory:
+      copy = pathlib.Path(directory)
+      for path in tracked:
+          destination = copy / path
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(root / path, destination)
+          destination.with_name(destination.name + '.orig').write_bytes(subprocess.check_output(['/usr/bin/git', 'show', f'HEAD:{path}']))
+      for path in new:
+          destination = copy / path
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(root / path, destination)
+      result = subprocess.run(['/bin/sh', str(copy / 'cloudflare/ROLLBACK.sh'), str(copy)])
+      if result.returncode: raise SystemExit(result.returncode)
+      restored = sum((copy / path).read_bytes() == subprocess.check_output(['/usr/bin/git', 'show', f'HEAD:{path}']) for path in tracked)
+      removed = sum(not (copy / path).exists() for path in new)
+      print(f'rollback copy artifacts before={len(tracked) + len(new)} restored_tracked={restored} removed_new={removed}')
+  PY
+Input:
+  all changed tracked files plus all new Cloudflare artifacts
+Literal output/result:
+  rollback copy artifacts before=23 restored_tracked=8 removed_new=15
+Exit status:
+  0
+
+Restored behavior/status
+------------------------
+The rollback test restored all 8 tracked files to their HEAD bytes and removed
+all 15 new implementation/artifact files from the temporary copy. The working
+tree remains on the modified branch with cloudflare/wrangler.toml and the
+client/API implementation changed.
+
+Hashes
+------
+Original tracked-file hashes are preserved by git HEAD. Current MODIFIED_FILE
+hash:
+  1dd9fc9c142c868f18fb8f279b5f7f269628a89cb1b45772fd4ec3d30638ee51  cloudflare/wrangler.toml
+Current DIFF_FILE hash:
+  386d04ee799c82b668b39cf0b275ede8017ac4aaeb98ff758b9df852daedcc31  cloudflare/CF_ENVIRONMENT.diff

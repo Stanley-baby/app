@@ -1,0 +1,867 @@
+diff --git a/.gitignore b/.gitignore
+index e74c8287..afb9d5b8 100755
+--- a/.gitignore
++++ b/.gitignore
+@@ -8,6 +8,9 @@ yarn-error.log
+ npm-debug.log
+ .yarn
+
++# Cloudflare local secrets
++cloudflare/.dev.vars
++
+ # Next
+ dist
+
+@@ -28,4 +31,5 @@ DerivedData
+ *.hmap
+ *.ipa
+ *.xcuserstate
+-project.xcworkspace
+\ No newline at end of file
++project.xcworkspace
++cloudflare/.wrangler/
+diff --git a/build/common.js b/build/common.js
+index baadcda0..5edf1095 100644
+--- a/build/common.js
++++ b/build/common.js
+@@ -6,11 +6,16 @@ const TerserJSPlugin = require('terser-webpack-plugin')
+ const MiniCssExtractPlugin = require('mini-css-extract-plugin')
+ const CssMinimizerPlugin = require('css-minimizer-webpack-plugin')
+ const SentryCliPlugin = require('@sentry/webpack-plugin')
++const { resolveEnvironment } = require('./environments')
+
+ //defaults
+ process.env.SENTRY_RELEASE = String(new Date().getTime())
+
+-module.exports = ({ production, filename='[name].[contenthash]', sentry={} }, { profile }) => ({
++module.exports = (options={}) => {
++    const { production, filename='[name].[contenthash]', sentry={} } = options
++    const buildEnvironment = resolveEnvironment(options)
++
++    return ({
+     mode:        production ? 'production' : 'development',
+     context:    path.resolve(__dirname, '../src'),
+     devtool:    production ? 'source-map' : 'eval-cheap-module-source-map',
+@@ -108,6 +113,10 @@ module.exports = ({ production, filename='[name].[contenthash]', sentry={} }, {
+
+         new webpack.DefinePlugin({
+             'process.env.NODE_ENV': JSON.stringify(production?'production':'development'),
++            'process.env.API_ORIGIN': JSON.stringify(buildEnvironment.apiOrigin),
++            'process.env.AI_PAGE_ORIGIN': JSON.stringify(buildEnvironment.aiPageOrigin),
++            'process.env.APP_ORIGIN': JSON.stringify(buildEnvironment.appOrigin),
++            'process.env.RAINDROP_BUILD_ENVIRONMENT': JSON.stringify(buildEnvironment.name),
+             RAINDROP_ENVIRONMENT: JSON.stringify('browser'),
+             'process.env.SENTRY_RELEASE': JSON.stringify(production && !sentry?.disabled? process.env.SENTRY_RELEASE : undefined)
+         }),
+@@ -116,6 +125,11 @@ module.exports = ({ production, filename='[name].[contenthash]', sentry={} }, {
+         new HtmlWebpackPlugin({
+             title: 'Raindrop.io',
+             template: './index.ejs',
++            templateParameters: {
++                apiOrigin: buildEnvironment.apiOrigin,
++                aiPageOrigin: buildEnvironment.aiPageOrigin,
++                appOrigin: buildEnvironment.appOrigin
++            },
+             scriptLoading: 'blocking',
+             inject: 'body',
+             excludeChunks: ['manifest', 'background']
+@@ -248,4 +262,5 @@ module.exports = ({ production, filename='[name].[contenthash]', sentry={} }, {
+             ],
+         }
+     ] }
+-})
+\ No newline at end of file
++    })
++}
+diff --git a/build/environments.js b/build/environments.js
+new file mode 100644
+index 00000000..2dc9131b
+--- /dev/null
++++ b/build/environments.js
+@@ -0,0 +1,24 @@
++const profiles = require('../cloudflare/environments.json')
++
++const trimTrailingSlash = value => String(value).replace(/\/+$/, '')
++
++const resolveEnvironment = (options={}) => {
++    const name = options.environment || (options.production ? 'production' : 'local')
++    const profile = profiles[name]
++
++    if (!profile)
++        throw new Error(`Unknown build environment: ${name}`)
++
++    return {
++        ...profile,
++        name,
++        apiOrigin: trimTrailingSlash(options.apiOrigin || process.env.API_ORIGIN || profile.apiOrigin),
++        appOrigin: trimTrailingSlash(options.appOrigin || process.env.APP_ORIGIN || profile.appOrigin),
++        aiPageOrigin: trimTrailingSlash(options.aiPageOrigin || process.env.AI_PAGE_ORIGIN || profile.aiPageOrigin)
++    }
++}
++
++module.exports = {
++    profiles,
++    resolveEnvironment
++}
+diff --git a/build/extension.js b/build/extension.js
+index 13aa5bec..3b71c415 100644
+--- a/build/extension.js
++++ b/build/extension.js
+@@ -2,15 +2,22 @@ const path = require('path')
+ const webpack = require('webpack')
+ const { merge } = require('webpack-merge')
+ const common = require('./common')
++const { resolveEnvironment } = require('./environments')
+
+ const HtmlWebpackPlugin = require('html-webpack-plugin')
+ const CopyPlugin = require('copy-webpack-plugin')
+ const ZipPlugin = require('zip-webpack-plugin')
+
+ module.exports = (env={}, args={}) => {
+-    const outputPath = path.resolve(__dirname, '..', 'dist', env.vendor, env.production?'prod':'dev')
++    const buildEnvironment = resolveEnvironment(env)
++    const outputDirectory = buildEnvironment.name == 'local' ? 'dev' : buildEnvironment.name == 'production' ? 'prod' : buildEnvironment.name
++    const outputPath = path.resolve(__dirname, '..', 'dist', env.vendor, outputDirectory)
+
+     env.filename = '[name]'
++    env.environment = buildEnvironment.name
++    env.apiOrigin = buildEnvironment.apiOrigin
++    env.aiPageOrigin = buildEnvironment.aiPageOrigin
++    env.appOrigin = buildEnvironment.appOrigin
+
+     //prevent mv3 review issues with remote code
+     env.sentry = { disabled: true }
+@@ -62,6 +69,11 @@ module.exports = (env={}, args={}) => {
+                 new HtmlWebpackPlugin({
+                     title: 'Raindrop.io',
+                     template: './index.ejs',
++                    templateParameters: {
++                        apiOrigin: buildEnvironment.apiOrigin,
++                        aiPageOrigin: buildEnvironment.aiPageOrigin,
++                        appOrigin: buildEnvironment.appOrigin
++                    },
+                     filename: 'sidepanel.html',
+                     scriptLoading: 'blocking',
+                     inject: 'body',
+@@ -107,4 +119,4 @@ module.exports = (env={}, args={}) => {
+             }
+         }
+     )
+-}
+\ No newline at end of file
++}
+diff --git a/build/web.js b/build/web.js
+index b51b0a2f..6ecfc7fd 100644
+--- a/build/web.js
++++ b/build/web.js
+@@ -2,16 +2,19 @@ const path = require('path')
+ const webpack = require('webpack')
+ const { merge } = require('webpack-merge')
+ const common = require('./common')
++const { resolveEnvironment } = require('./environments')
+
+ const WebpackPwaManifest = require('webpack-pwa-manifest')
+ const CopyPlugin = require('copy-webpack-plugin')
+
+-module.exports = (env={}, args={}) =>
+-    merge(
++module.exports = (env={}, args={}) => {
++    const buildEnvironment = resolveEnvironment(env)
++
++    return merge(
+         common(env, args),
+         {
+             output: {
+-                path: path.resolve(__dirname, '..', 'dist', 'web', env.production?'prod':'dev'),
++                path: path.resolve(__dirname, '..', 'dist', 'web', buildEnvironment.name == 'local' ? 'dev' : buildEnvironment.name == 'production' ? 'prod' : buildEnvironment.name),
+                 publicPath: '/'
+             },
+
+@@ -118,4 +121,5 @@ module.exports = (env={}, args={}) =>
+                 })
+             ]
+         }
+-    )
+\ No newline at end of file
++    )
++}
+diff --git a/cloudflare/.dev.vars.example b/cloudflare/.dev.vars.example
+new file mode 100644
+index 00000000..a023080a
+--- /dev/null
++++ b/cloudflare/.dev.vars.example
+@@ -0,0 +1,4 @@
++# Copy to cloudflare/.dev.vars for local Worker development. Keep values out of git.
++BETA_ACCESS_PASSWORD=
++SESSION_SECRET=
++ENCRYPTION_KEY=
+diff --git a/cloudflare/README.md b/cloudflare/README.md
+new file mode 100644
+index 00000000..a4996fa6
+--- /dev/null
++++ b/cloudflare/README.md
+@@ -0,0 +1,23 @@
++# Cloudflare API worker
++
++`wrangler.toml` keeps the top-level (default) configuration for `local` and
++defines separate `preview`, `beta`, and `production` environments. Every
++environment has its own Worker name, D1 database, R2 buckets, queues, origins,
++and secret namespace. Replace the placeholder D1 IDs before a remote deploy.
++Remote custom-domain deployment also requires an active Cloudflare zone for
++the configured API hostnames; a dry-run validates syntax and bindings but does
++not provision resources or verify zone ownership.
++
++```sh
++wrangler dev --config cloudflare/wrangler.toml
++wrangler deploy --config cloudflare/wrangler.toml --env preview
++wrangler secret put SESSION_SECRET --config cloudflare/wrangler.toml --env beta
++```
++
++Before each remote deploy, create the environment's D1/R2/Queue resources,
++put the actual D1 ID in the matching block, and set each secret with the same
++`--env` value. The repository intentionally contains no resource IDs or
++secret values.
++
++The client build selects the same profiles with `--env environment=preview`.
++The contract test skeleton runs with `npm run test:contract`.
+diff --git a/cloudflare/contracts/openapi.yaml b/cloudflare/contracts/openapi.yaml
+new file mode 100644
+index 00000000..f3c9de06
+--- /dev/null
++++ b/cloudflare/contracts/openapi.yaml
+@@ -0,0 +1,24 @@
++openapi: 3.0.3
++info:
++  title: Independent Bookmarking Service API
++  version: 1.0.0
++servers:
++  - url: https://api.raindrop.io
++paths:
++  /health:
++    get:
++      responses:
++        '200':
++          description: Worker is healthy.
++  /version:
++    get:
++      responses:
++        '200':
++          description: Deployed Worker version.
++  /v1/user:
++    get:
++      responses:
++        '200':
++          description: Authenticated User.
++        '401':
++          description: Login required.
+diff --git a/cloudflare/contracts/v1-routes.json b/cloudflare/contracts/v1-routes.json
+new file mode 100644
+index 00000000..6917b35d
+--- /dev/null
++++ b/cloudflare/contracts/v1-routes.json
+@@ -0,0 +1,11 @@
++{
++    "version": "1.0.0",
++    "routes": [
++        {
++            "method": "GET",
++            "path": "/v1/user",
++            "authentication": "required",
++            "responses": [200, 401]
++        }
++    ]
++}
+diff --git a/cloudflare/environments.json b/cloudflare/environments.json
+new file mode 100644
+index 00000000..87b0ff73
+--- /dev/null
++++ b/cloudflare/environments.json
+@@ -0,0 +1,96 @@
++{
++    "local": {
++        "workerName": "raindrop-api-local",
++        "apiOrigin": "http://localhost:8787",
++        "appOrigin": "http://localhost:2000",
++        "aiPageOrigin": "http://localhost:5173/ai",
++        "corsOrigins": [
++            "http://localhost:2000",
++            "http://127.0.0.1:2000",
++            "http://localhost:3000",
++            "chrome-extension://*"
++        ],
++        "resourceNames": {
++            "DB": "raindrop-db-local",
++            "CONTENT_BUCKET": "raindrop-content-local",
++            "BACKUP_BUCKET": "raindrop-backup-local",
++            "TASK_QUEUE": "raindrop-tasks-local",
++            "TASK_DLQ": "raindrop-tasks-dlq-local"
++        },
++        "secretScope": "raindrop-api-local",
++        "secrets": [
++            "BETA_ACCESS_PASSWORD",
++            "SESSION_SECRET",
++            "ENCRYPTION_KEY"
++        ]
++    },
++    "preview": {
++        "workerName": "raindrop-api-preview",
++        "apiOrigin": "https://api-preview.raindrop.io",
++        "appOrigin": "https://preview.raindrop.io",
++        "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
++        "corsOrigins": [
++            "https://preview.raindrop.io",
++            "chrome-extension://*"
++        ],
++        "resourceNames": {
++            "DB": "raindrop-db-preview",
++            "CONTENT_BUCKET": "raindrop-content-preview",
++            "BACKUP_BUCKET": "raindrop-backup-preview",
++            "TASK_QUEUE": "raindrop-tasks-preview",
++            "TASK_DLQ": "raindrop-tasks-dlq-preview"
++        },
++        "secretScope": "raindrop-api-preview",
++        "secrets": [
++            "BETA_ACCESS_PASSWORD",
++            "SESSION_SECRET",
++            "ENCRYPTION_KEY"
++        ]
++    },
++    "beta": {
++        "workerName": "raindrop-api-beta",
++        "apiOrigin": "https://api-beta.raindrop.io",
++        "appOrigin": "https://beta.raindrop.io",
++        "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
++        "corsOrigins": [
++            "https://beta.raindrop.io",
++            "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
++        ],
++        "resourceNames": {
++            "DB": "raindrop-db-beta",
++            "CONTENT_BUCKET": "raindrop-content-beta",
++            "BACKUP_BUCKET": "raindrop-backup-beta",
++            "TASK_QUEUE": "raindrop-tasks-beta",
++            "TASK_DLQ": "raindrop-tasks-dlq-beta"
++        },
++        "secretScope": "raindrop-api-beta",
++        "secrets": [
++            "BETA_ACCESS_PASSWORD",
++            "SESSION_SECRET",
++            "ENCRYPTION_KEY"
++        ]
++    },
++    "production": {
++        "workerName": "raindrop-api-production",
++        "apiOrigin": "https://api.raindrop.io",
++        "appOrigin": "https://app.raindrop.io",
++        "aiPageOrigin": "https://ai.raindrop.io/ai",
++        "corsOrigins": [
++            "https://app.raindrop.io",
++            "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
++        ],
++        "resourceNames": {
++            "DB": "raindrop-db-production",
++            "CONTENT_BUCKET": "raindrop-content-production",
++            "BACKUP_BUCKET": "raindrop-backup-production",
++            "TASK_QUEUE": "raindrop-tasks-production",
++            "TASK_DLQ": "raindrop-tasks-dlq-production"
++        },
++        "secretScope": "raindrop-api-production",
++        "secrets": [
++            "BETA_ACCESS_PASSWORD",
++            "SESSION_SECRET",
++            "ENCRYPTION_KEY"
++        ]
++    }
++}
+diff --git a/cloudflare/migrations/0001_initial.sql b/cloudflare/migrations/0001_initial.sql
+new file mode 100644
+index 00000000..33711a5b
+--- /dev/null
++++ b/cloudflare/migrations/0001_initial.sql
+@@ -0,0 +1 @@
++-- Initial schema is intentionally empty; service routes land in later phases.
+diff --git a/cloudflare/package.json b/cloudflare/package.json
+new file mode 100644
+index 00000000..44e4a84a
+--- /dev/null
++++ b/cloudflare/package.json
+@@ -0,0 +1,4 @@
++{
++    "private": true,
++    "type": "module"
++}
+diff --git a/cloudflare/src/index.js b/cloudflare/src/index.js
+new file mode 100644
+index 00000000..7f9fe6be
+--- /dev/null
++++ b/cloudflare/src/index.js
+@@ -0,0 +1,62 @@
++const json = (body, status, request, env) => {
++    const headers = new Headers({
++        'Content-Type': 'application/json; charset=utf-8',
++        'X-Request-ID': request.headers.get('X-Request-ID') || `${Date.now()}-${Math.random()}`
++    })
++    const origin = request.headers.get('Origin')
++    const allowedOrigins = String(env.CORS_ORIGINS || '').split(/\s+/).filter(Boolean)
++
++    const isAllowedOrigin = origin && allowedOrigins.some(allowed =>
++        allowed === origin || allowed.endsWith('*') && origin.startsWith(allowed.slice(0, -1)))
++
++    if (isAllowedOrigin) {
++        headers.set('Access-Control-Allow-Origin', origin)
++        headers.set('Access-Control-Allow-Credentials', 'true')
++        headers.set('Vary', 'Origin')
++    }
++
++    return new Response(JSON.stringify(body), { status, headers })
++}
++
++const cors = (request, env) => {
++    const headers = json({}, 204, request, env).headers
++    headers.delete('Content-Type')
++    headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
++    headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID')
++    headers.set('Access-Control-Max-Age', '600')
++    return new Response(null, { status: 204, headers })
++}
++
++const hasSession = request => Boolean(request.headers.get('Cookie')?.match(/(?:^|;\s*)rd_session=/))
++
++const version = env => env.VERSION || '0.1.0'
++
++export default {
++    async fetch(request, env) {
++        const url = new URL(request.url)
++
++        if (request.method === 'OPTIONS')
++            return cors(request, env)
++
++        if (url.pathname === '/health')
++            return json({ result: true, status: 'ok', environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
++
++        if (url.pathname === '/version')
++            return json({ result: true, environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
++
++        if (url.pathname === '/v1' || url.pathname.startsWith('/v1/')) {
++            if (!hasSession(request))
++                return json({
++                    result: false,
++                    auth: false,
++                    error: 'auth_required',
++                    errorMessage: 'Login is required',
++                    login: `${env.APP_ORIGIN}/account/login`
++                }, 401, request, env)
++
++            return json({ result: false, error: 'route_not_implemented' }, 404, request, env)
++        }
++
++        return json({ result: false, error: 'not_found' }, 404, request, env)
++    }
++}
+diff --git a/cloudflare/test/build-config.test.js b/cloudflare/test/build-config.test.js
+new file mode 100644
+index 00000000..9029e83f
+--- /dev/null
++++ b/cloudflare/test/build-config.test.js
+@@ -0,0 +1,44 @@
++import assert from 'node:assert/strict'
++import path from 'node:path'
++import { createRequire } from 'node:module'
++import test from 'node:test'
++
++const require = createRequire(import.meta.url)
++const environments = require('../environments.json')
++const web = require('../../build/web.js')
++const extension = require('../../build/extension.js')
++const manifest = require('../../src/target/extension/manifest/index.js')
++
++const profiles = ['local', 'preview', 'beta']
++const definitionsFor = config => config.plugins.find(plugin =>
++    plugin.definitions?.['process.env.API_ORIGIN'])?.definitions
++const valueFor = (definitions, name) => JSON.parse(definitions[`process.env.${name}`])
++
++test('Web and Chrome development profiles inject matching origins and API host permissions', () => {
++    for (const name of profiles) {
++        const profile = environments[name]
++        const webConfig = web({ environment: name })
++        const chromeConfig = extension({ environment: name, vendor: 'chrome' })
++        const webDefinitions = definitionsFor(webConfig)
++        const chromeDefinitions = definitionsFor(chromeConfig)
++
++        for (const definitions of [webDefinitions, chromeDefinitions]) {
++            assert.equal(valueFor(definitions, 'API_ORIGIN'), profile.apiOrigin)
++            assert.equal(valueFor(definitions, 'AI_PAGE_ORIGIN'), profile.aiPageOrigin)
++            assert.equal(valueFor(definitions, 'APP_ORIGIN'), profile.appOrigin)
++            assert.equal(valueFor(definitions, 'RAINDROP_BUILD_ENVIRONMENT'), name)
++        }
++
++        assert.equal(
++            webConfig.output.path,
++            path.resolve(process.cwd(), 'dist', 'web', name === 'local' ? 'dev' : name)
++        )
++        assert.equal(
++            chromeConfig.output.path,
++            path.resolve(process.cwd(), 'dist', 'chrome', name === 'local' ? 'dev' : name)
++        )
++
++        const generated = manifest({ vendor: 'chrome', apiOrigin: profile.apiOrigin }, { emitFile() {} })
++        assert.deepEqual(JSON.parse(generated.code).host_permissions, [`${new URL(profile.apiOrigin).origin}/*`])
++    }
++})
+diff --git a/cloudflare/test/contract.test.js b/cloudflare/test/contract.test.js
+new file mode 100644
+index 00000000..5d9ef658
+--- /dev/null
++++ b/cloudflare/test/contract.test.js
+@@ -0,0 +1,88 @@
++import assert from 'node:assert/strict'
++import { createRequire } from 'node:module'
++import test from 'node:test'
++import worker from '../src/index.js'
++
++const require = createRequire(import.meta.url)
++const manifest = require('../contracts/v1-routes.json')
++const environments = require('../environments.json')
++const env = {
++    ENVIRONMENT: 'local',
++    VERSION: '0.1.0-local',
++    APP_ORIGIN: 'http://localhost:2000',
++    CORS_ORIGINS: 'http://localhost:2000 http://127.0.0.1:2000 chrome-extension://*'
++}
++
++test('environment profiles keep origins, resources, and secret scopes separate', () => {
++    const profiles = Object.values(environments)
++    const unique = values => assert.equal(new Set(values).size, profiles.length)
++
++    unique(profiles.map(profile => profile.apiOrigin))
++    unique(profiles.map(profile => profile.aiPageOrigin))
++    unique(profiles.map(profile => profile.workerName))
++    unique(profiles.map(profile => profile.secretScope))
++
++    const resourceNames = profiles.flatMap(profile => Object.values(profile.resourceNames))
++    assert.equal(new Set(resourceNames).size, resourceNames.length)
++})
++
++test('contract manifest entries describe response cases', () => {
++    assert.equal(manifest.version, '1.0.0')
++    assert.ok(manifest.routes.length > 0)
++    for (const route of manifest.routes) {
++        assert.match(route.path, /^\/v1\//)
++        assert.equal(route.authentication, 'required')
++        assert.ok(route.responses.includes(401))
++    }
++})
++
++test('health and version expose the selected environment', async () => {
++    const health = await worker.fetch(new Request('http://localhost/health'), env)
++    assert.equal(health.status, 200)
++    assert.deepEqual(await health.json(), {
++        result: true,
++        status: 'ok',
++        environment: 'local',
++        version: '0.1.0-local'
++    })
++
++    const deployedVersion = await worker.fetch(new Request('http://localhost/version'), env)
++    assert.equal(deployedVersion.status, 200)
++    assert.deepEqual(await deployedVersion.json(), {
++        result: true,
++        environment: 'local',
++        version: '0.1.0-local'
++    })
++})
++
++test('unauthenticated v1 requests return the login envelope', async () => {
++    const response = await worker.fetch(new Request('http://localhost/v1/user', {
++        headers: { Origin: 'http://localhost:2000' }
++    }), env)
++
++    assert.equal(response.status, 401)
++    assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'http://localhost:2000')
++    assert.equal(response.headers.get('Access-Control-Allow-Credentials'), 'true')
++    assert.deepEqual(await response.json(), {
++        result: false,
++        auth: false,
++        error: 'auth_required',
++        errorMessage: 'Login is required',
++        login: 'http://localhost:2000/account/login'
++    })
++
++    const loopbackResponse = await worker.fetch(new Request('http://localhost/v1/user', {
++        headers: { Origin: 'http://127.0.0.1:2000' }
++    }), env)
++    assert.equal(loopbackResponse.headers.get('Access-Control-Allow-Origin'), 'http://127.0.0.1:2000')
++})
++
++test('configured extension origins receive credentialed CORS headers', async () => {
++    const response = await worker.fetch(new Request('http://localhost/v1/user', {
++        headers: { Origin: 'chrome-extension://local-dev' }
++    }), env)
++
++    assert.equal(response.status, 401)
++    assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'chrome-extension://local-dev')
++    assert.equal(response.headers.get('Access-Control-Allow-Credentials'), 'true')
++})
+diff --git a/cloudflare/wrangler.toml b/cloudflare/wrangler.toml
+new file mode 100644
+index 00000000..471f26ce
+--- /dev/null
++++ b/cloudflare/wrangler.toml
+@@ -0,0 +1,161 @@
++# The top-level (no --env) configuration is the isolated local environment.
++name = "raindrop-api-local"
++main = "src/index.js"
++compatibility_date = "2025-01-01"
++workers_dev = true
++
++[vars]
++ENVIRONMENT = "local"
++VERSION = "0.1.0-local"
++API_ORIGIN = "http://localhost:8787"
++APP_ORIGIN = "http://localhost:2000"
++AI_PAGE_ORIGIN = "http://localhost:5173/ai"
++CORS_ORIGINS = "http://localhost:2000 http://127.0.0.1:2000 http://localhost:3000 chrome-extension://*"
++
++[[d1_databases]]
++binding = "DB"
++database_name = "raindrop-db-local"
++database_id = "REPLACE_WITH_LOCAL_D1_DATABASE_ID"
++migrations_dir = "migrations"
++
++[[r2_buckets]]
++binding = "CONTENT_BUCKET"
++bucket_name = "raindrop-content-local"
++
++[[r2_buckets]]
++binding = "BACKUP_BUCKET"
++bucket_name = "raindrop-backup-local"
++
++[[queues.producers]]
++binding = "TASK_QUEUE"
++queue = "raindrop-tasks-local"
++
++[[queues.producers]]
++binding = "TASK_DLQ"
++queue = "raindrop-tasks-dlq-local"
++
++[ai]
++binding = "AI"
++
++[env.preview]
++name = "raindrop-api-preview"
++workers_dev = false
++
++[[env.preview.routes]]
++pattern = "api-preview.raindrop.io"
++custom_domain = true
++
++[env.preview.vars]
++ENVIRONMENT = "preview"
++VERSION = "0.1.0-preview"
++API_ORIGIN = "https://api-preview.raindrop.io"
++APP_ORIGIN = "https://preview.raindrop.io"
++AI_PAGE_ORIGIN = "https://ai-preview.raindrop.io/ai"
++CORS_ORIGINS = "https://preview.raindrop.io chrome-extension://*"
++
++[[env.preview.d1_databases]]
++binding = "DB"
++database_name = "raindrop-db-preview"
++database_id = "REPLACE_WITH_PREVIEW_D1_DATABASE_ID"
++migrations_dir = "migrations"
++
++[[env.preview.r2_buckets]]
++binding = "CONTENT_BUCKET"
++bucket_name = "raindrop-content-preview"
++
++[[env.preview.r2_buckets]]
++binding = "BACKUP_BUCKET"
++bucket_name = "raindrop-backup-preview"
++
++[[env.preview.queues.producers]]
++binding = "TASK_QUEUE"
++queue = "raindrop-tasks-preview"
++
++[[env.preview.queues.producers]]
++binding = "TASK_DLQ"
++queue = "raindrop-tasks-dlq-preview"
++
++[env.preview.ai]
++binding = "AI"
++
++[env.beta]
++name = "raindrop-api-beta"
++workers_dev = false
++
++[[env.beta.routes]]
++pattern = "api-beta.raindrop.io"
++custom_domain = true
++
++[env.beta.vars]
++ENVIRONMENT = "beta"
++VERSION = "0.1.0-beta"
++API_ORIGIN = "https://api-beta.raindrop.io"
++APP_ORIGIN = "https://beta.raindrop.io"
++AI_PAGE_ORIGIN = "https://beta-ai.raindrop.io/ai"
++CORS_ORIGINS = "https://beta.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
++
++[[env.beta.d1_databases]]
++binding = "DB"
++database_name = "raindrop-db-beta"
++database_id = "REPLACE_WITH_BETA_D1_DATABASE_ID"
++migrations_dir = "migrations"
++
++[[env.beta.r2_buckets]]
++binding = "CONTENT_BUCKET"
++bucket_name = "raindrop-content-beta"
++
++[[env.beta.r2_buckets]]
++binding = "BACKUP_BUCKET"
++bucket_name = "raindrop-backup-beta"
++
++[[env.beta.queues.producers]]
++binding = "TASK_QUEUE"
++queue = "raindrop-tasks-beta"
++
++[[env.beta.queues.producers]]
++binding = "TASK_DLQ"
++queue = "raindrop-tasks-dlq-beta"
++
++[env.beta.ai]
++binding = "AI"
++
++[env.production]
++name = "raindrop-api-production"
++workers_dev = false
++
++[[env.production.routes]]
++pattern = "api.raindrop.io"
++custom_domain = true
++
++[env.production.vars]
++ENVIRONMENT = "production"
++VERSION = "0.1.0-production"
++API_ORIGIN = "https://api.raindrop.io"
++APP_ORIGIN = "https://app.raindrop.io"
++AI_PAGE_ORIGIN = "https://ai.raindrop.io/ai"
++CORS_ORIGINS = "https://app.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
++
++[[env.production.d1_databases]]
++binding = "DB"
++database_name = "raindrop-db-production"
++database_id = "REPLACE_WITH_PRODUCTION_D1_DATABASE_ID"
++migrations_dir = "migrations"
++
++[[env.production.r2_buckets]]
++binding = "CONTENT_BUCKET"
++bucket_name = "raindrop-content-production"
++
++[[env.production.r2_buckets]]
++binding = "BACKUP_BUCKET"
++bucket_name = "raindrop-backup-production"
++
++[[env.production.queues.producers]]
++binding = "TASK_QUEUE"
++queue = "raindrop-tasks-production"
++
++[[env.production.queues.producers]]
++binding = "TASK_DLQ"
++queue = "raindrop-tasks-dlq-production"
++
++[env.production.ai]
++binding = "AI"
+diff --git a/package.json b/package.json
+index 696ebc36..a9286268 100755
+--- a/package.json
++++ b/package.json
+@@ -20,6 +20,7 @@
+         "build:extension:opera": "webpack --config build/extension.js --env production --env vendor=opera",
+         "build:extension:safari": "webpack --config build/extension.js --env production --env vendor=safari && cd 'build/xcode/Save to Raindrop.io' && ./version.sh",
+         "build:extension:safari-ios": "webpack --config build/extension.js --env production --env vendor=safari-ios",
++        "test:contract": "node --test cloudflare/test/contract.test.js cloudflare/test/build-config.test.js",
+         "build:electron": "webpack --config build/electron.js --env production",
+         "size": "webpack --config build/web.js --env production --profile --json > dist/web-stats.json && webpack-bundle-analyzer dist/web-stats.json dist/web",
+         "size:extension:chrome": "webpack --config build/extension.js --env production --env vendor=chrome --profile --json > dist/extension-chrome-stats.json && webpack-bundle-analyzer dist/extension-chrome-stats.json dist/chrome/prod",
+diff --git a/src/data/constants/app.js b/src/data/constants/app.js
+index 0de15916..88b4ec46 100644
+--- a/src/data/constants/app.js
++++ b/src/data/constants/app.js
+@@ -6,14 +6,21 @@ export const
+     WORKERS_BASE_URL    = 'https://rdl.ink',
+     LEGACY_WORKERS_BASE_URL=`https://stella.${APP_DOMAIN}`
+
++const defaultApiOrigin = process.env.NODE_ENV == 'production' || RAINDROP_ENVIRONMENT == 'react-native' ? 'https://api.raindrop.io' : 'http://localhost:8787'
++const defaultAiPageOrigin = process.env.NODE_ENV == 'production' ? 'https://ai.raindrop.io/ai' : 'http://localhost:5173/ai'
++const trimTrailingSlash = value => String(value || '').replace(/\/+$/, '')
++export const
++    API_ORIGIN = trimTrailingSlash(process.env.API_ORIGIN || defaultApiOrigin),
++    AI_PAGE_ORIGIN = trimTrailingSlash(process.env.AI_PAGE_ORIGIN || defaultAiPageOrigin)
++
+ export const
+     RECAPTCHA_SITE_KEY = '6LfB38wUAAAAAMX3VuFcriTz-Tb-qw7MD966XNnk'
+
+ export const
+-    API_ENDPOINT_URL     = `${process.env.NODE_ENV == 'production' || RAINDROP_ENVIRONMENT == 'react-native' ? 'https://api.raindrop.io' : 'http://localhost:3000' }/v1/`,
++    API_ENDPOINT_URL     = `${API_ORIGIN}/v1/`,
+     API_RETRIES         = 3,
+     API_TIMEOUT         = 30000,
+     FAVICON_URL         = `${WORKERS_BASE_URL}/favicon`,
+     RENDER_URL             = `${WORKERS_BASE_URL}/render`,
+     PREVIEW_URL            = 'https://preview.systems',
+-    BETA_AI_URL            = process.env.NODE_ENV == 'production' ? 'https://beta-ai.raindrop.io/ai' : 'http://localhost:5173/ai'
+\ No newline at end of file
++    BETA_AI_URL            = AI_PAGE_ORIGIN
+diff --git a/src/index.ejs b/src/index.ejs
+index dac75a08..8baf1111 100755
+--- a/src/index.ejs
++++ b/src/index.ejs
+@@ -39,7 +39,7 @@
+
+     <!-- performance -->
+     <%if (process.env.NODE_ENV == 'production') { %>
+-        <link rel="preconnect" href="https://api.raindrop.io" >
++        <link rel="preconnect" href="<%= apiOrigin %>" >
+         <link rel="preconnect" href="https://rdl.ink">
+     <% } %>
+ </head>
+@@ -60,4 +60,4 @@
+         data-exclude='/my, /my/*'></script>
+     <% } %>
+ </body>
+-</html>
+\ No newline at end of file
++</html>
+diff --git a/src/target/extension/manifest/index.js b/src/target/extension/manifest/index.js
+index 047a8c83..275c0198 100644
+--- a/src/target/extension/manifest/index.js
++++ b/src/target/extension/manifest/index.js
+@@ -7,8 +7,9 @@ function file({ emitFile }, filename) {
+     return name
+ }
+
+-module.exports = ({ vendor, production=false }, l) => {
++module.exports = ({ vendor, production=false, apiOrigin='https://api.raindrop.io' }, l) => {
+     const { version } = JSON.parse(fs.readFileSync(`${__dirname}/../../../../package.json`, 'utf-8'))
++    const apiHostPermission = `${new URL(apiOrigin).origin}/*`
+
+     //locales generation
+     locales(l)
+@@ -100,10 +101,10 @@ module.exports = ({ vendor, production=false }, l) => {
+         ],
+
+         host_permissions: [
+-            ...(!production ? ['http://localhost:3000/*'] : []),
++            apiHostPermission,
+
+             //fix firefox cookie protection
+-            ...(vendor == 'firefox' ? ['*://api.raindrop.io/*'] : []),
++            ...(vendor == 'firefox' && apiHostPermission != 'https://api.raindrop.io/*' ? ['*://api.raindrop.io/*'] : []),
+         ],
+
+         optional_host_permissions: [
+@@ -184,4 +185,4 @@ module.exports = ({ vendor, production=false }, l) => {
+     }
+
+     return { code: JSON.stringify(json, null, 2) };
+-}
+\ No newline at end of file
++}

@@ -2,16 +2,19 @@ const path = require('path')
 const webpack = require('webpack')
 const { merge } = require('webpack-merge')
 const common = require('./common')
+const { resolveEnvironment } = require('./environments')
 
 const WebpackPwaManifest = require('webpack-pwa-manifest')
 const CopyPlugin = require('copy-webpack-plugin')
 
-module.exports = (env={}, args={}) =>
-    merge(
+module.exports = (env={}, args={}) => {
+    const buildEnvironment = resolveEnvironment(env)
+
+    return merge(
         common(env, args),
         {
             output: {
-                path: path.resolve(__dirname, '..', 'dist', 'web', env.production?'prod':'dev'),
+                path: path.resolve(__dirname, '..', 'dist', 'web', buildEnvironment.name == 'local' ? 'dev' : buildEnvironment.name == 'production' ? 'prod' : buildEnvironment.name),
                 publicPath: '/'
             },
 
@@ -119,3 +122,4 @@ module.exports = (env={}, args={}) =>
             ]
         }
     )
+}

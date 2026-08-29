@@ -39,7 +39,7 @@
 
 	<!-- performance -->
 	<%if (process.env.NODE_ENV == 'production') { %>
-		<link rel="preconnect" href="https://api.raindrop.io" >
+		<link rel="preconnect" href="<%= apiOrigin %>" >
 		<link rel="preconnect" href="https://rdl.ink">
 	<% } %>
 </head>

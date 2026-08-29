@@ -6,11 +6,16 @@ const TerserJSPlugin = require('terser-webpack-plugin')
 const MiniCssExtractPlugin = require('mini-css-extract-plugin')
 const CssMinimizerPlugin = require('css-minimizer-webpack-plugin')
 const SentryCliPlugin = require('@sentry/webpack-plugin')
+const { resolveEnvironment } = require('./environments')
 
 //defaults
 process.env.SENTRY_RELEASE = String(new Date().getTime())
 
-module.exports = ({ production, filename='[name].[contenthash]', sentry={} }, { profile }) => ({
+module.exports = (options={}) => {
+	const { production, filename='[name].[contenthash]', sentry={} } = options
+	const buildEnvironment = resolveEnvironment(options)
+
+	return ({
 	mode:		production ? 'production' : 'development',
 	context:	path.resolve(__dirname, '../src'),
 	devtool:	production ? 'source-map' : 'eval-cheap-module-source-map',
@@ -108,6 +113,10 @@ module.exports = ({ production, filename='[name].[contenthash]', sentry={} }, { 
 
 		new webpack.DefinePlugin({
 			'process.env.NODE_ENV': JSON.stringify(production?'production':'development'),
+			'process.env.API_ORIGIN': JSON.stringify(buildEnvironment.apiOrigin),
+			'process.env.AI_PAGE_ORIGIN': JSON.stringify(buildEnvironment.aiPageOrigin),
+			'process.env.APP_ORIGIN': JSON.stringify(buildEnvironment.appOrigin),
+			'process.env.RAINDROP_BUILD_ENVIRONMENT': JSON.stringify(buildEnvironment.name),
 			RAINDROP_ENVIRONMENT: JSON.stringify('browser'),
 			'process.env.SENTRY_RELEASE': JSON.stringify(production && !sentry?.disabled? process.env.SENTRY_RELEASE : undefined)
 		}),
@@ -116,6 +125,11 @@ module.exports = ({ production, filename='[name].[contenthash]', sentry={} }, { 
 		new HtmlWebpackPlugin({
 			title: 'Raindrop.io',
 			template: './index.ejs',
+			templateParameters: {
+				apiOrigin: buildEnvironment.apiOrigin,
+				aiPageOrigin: buildEnvironment.aiPageOrigin,
+				appOrigin: buildEnvironment.appOrigin
+			},
 			scriptLoading: 'blocking',
 			inject: 'body',
 			excludeChunks: ['manifest', 'background']
@@ -248,4 +262,5 @@ module.exports = ({ production, filename='[name].[contenthash]', sentry={} }, { 
 			],
 		}
 	] }
-})
+	})
+}

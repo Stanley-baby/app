@@ -2,15 +2,22 @@ const path = require('path')
 const webpack = require('webpack')
 const { merge } = require('webpack-merge')
 const common = require('./common')
+const { resolveEnvironment } = require('./environments')
 
 const HtmlWebpackPlugin = require('html-webpack-plugin')
 const CopyPlugin = require('copy-webpack-plugin')
 const ZipPlugin = require('zip-webpack-plugin')
 
 module.exports = (env={}, args={}) => {
-    const outputPath = path.resolve(__dirname, '..', 'dist', env.vendor, env.production?'prod':'dev')
+    const buildEnvironment = resolveEnvironment(env)
+    const outputDirectory = buildEnvironment.name == 'local' ? 'dev' : buildEnvironment.name == 'production' ? 'prod' : buildEnvironment.name
+    const outputPath = path.resolve(__dirname, '..', 'dist', env.vendor, outputDirectory)
 
     env.filename = '[name]'
+    env.environment = buildEnvironment.name
+    env.apiOrigin = buildEnvironment.apiOrigin
+    env.aiPageOrigin = buildEnvironment.aiPageOrigin
+    env.appOrigin = buildEnvironment.appOrigin
 
     //prevent mv3 review issues with remote code
     env.sentry = { disabled: true }
@@ -62,6 +69,11 @@ module.exports = (env={}, args={}) => {
                 new HtmlWebpackPlugin({
                     title: 'Raindrop.io',
                     template: './index.ejs',
+                    templateParameters: {
+                        apiOrigin: buildEnvironment.apiOrigin,
+                        aiPageOrigin: buildEnvironment.aiPageOrigin,
+                        appOrigin: buildEnvironment.appOrigin
+                    },
                     filename: 'sidepanel.html',
                     scriptLoading: 'blocking',
                     inject: 'body',

@@ -1,0 +1,11 @@
+{
+    "version": "1.0.0",
+    "routes": [
+        {
+            "method": "GET",
+            "path": "/v1/user",
+            "authentication": "required",
+            "responses": [200, 401]
+        }
+    ]
+}

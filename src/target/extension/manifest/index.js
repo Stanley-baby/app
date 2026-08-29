@@ -7,8 +7,9 @@ function file({ emitFile }, filename) {
 	return name
 }
 
-module.exports = ({ vendor, production=false }, l) => {
+module.exports = ({ vendor, production=false, apiOrigin='https://api.raindrop.io' }, l) => {
 	const { version } = JSON.parse(fs.readFileSync(`${__dirname}/../../../../package.json`, 'utf-8'))
+	const apiHostPermission = `${new URL(apiOrigin).origin}/*`
 
 	//locales generation
 	locales(l)
@@ -100,10 +101,10 @@ module.exports = ({ vendor, production=false }, l) => {
 		],
 
 		host_permissions: [
-			...(!production ? ['http://localhost:3000/*'] : []),
+			apiHostPermission,
 
 			//fix firefox cookie protection
-			...(vendor == 'firefox' ? ['*://api.raindrop.io/*'] : []),
+			...(vendor == 'firefox' && apiHostPermission != 'https://api.raindrop.io/*' ? ['*://api.raindrop.io/*'] : []),
 		],
 
 		optional_host_permissions: [

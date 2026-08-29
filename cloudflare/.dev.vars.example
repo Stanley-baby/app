@@ -1,0 +1,4 @@
+# Copy to cloudflare/.dev.vars for local Worker development. Keep values out of git.
+BETA_ACCESS_PASSWORD=
+SESSION_SECRET=
+ENCRYPTION_KEY=
