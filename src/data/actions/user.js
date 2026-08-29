@@ -53,9 +53,9 @@ export const loginWithPassword = ({email, password}, onSuccess, onFail)=>({
 	onFail: wrapFunc(onFail)
 })
 
-export const registerWithPassword = ({name, email, password})=>({
+export const registerWithPassword = ({name, email, password, betaAccessPassword, turnstileToken})=>({
 	type: USER_REGISTER_PASSWORD,
-	name, email, password
+	name, email, password, betaAccessPassword, turnstileToken
 })
 
 export const loginNative = (params, onSuccess, onFail)=>({

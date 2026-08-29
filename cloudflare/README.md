@@ -16,8 +16,10 @@ wrangler secret put SESSION_SECRET --config cloudflare/wrangler.toml --env beta
 
 Before each remote deploy, create the environment's D1/R2/Queue resources,
 put the actual D1 ID in the matching block, and set each secret with the same
-`--env` value. The repository intentionally contains no resource IDs or
-secret values.
+`--env` value. Identity deployments require `BETA_ACCESS_PASSWORD`,
+`SESSION_SECRET`, `TURNSTILE_SECRET_KEY`, `RESEND_API_KEY`, and
+`MAIL_FROM`; the matching public `TURNSTILE_SITE_KEY` is supplied only to
+the Web build. Apply the D1 migrations before deploying the Worker.
 
 The client build selects the same profiles with `--env environment=preview`.
 The contract test skeleton runs with `npm run test:contract`.

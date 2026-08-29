@@ -17,6 +17,9 @@ export const
 	RECAPTCHA_SITE_KEY = '6LfB38wUAAAAAMX3VuFcriTz-Tb-qw7MD966XNnk'
 
 export const
+	TURNSTILE_SITE_KEY	= process.env.TURNSTILE_SITE_KEY || ''
+
+export const
 	API_ENDPOINT_URL 	= `${API_ORIGIN}/v1/`,
 	API_RETRIES 		= 3,
 	API_TIMEOUT 		= 30000,

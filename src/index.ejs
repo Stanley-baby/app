@@ -11,6 +11,9 @@
 	<%if (process.env.APP_TARGET != 'extension') { %>
 		<meta name="google" value="notranslate" />
 		<meta name="description" content="All-in-one bookmark manager">
+		<%if (turnstileSiteKey) { %>
+			<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+		<% } %>
 
 		<!-- security -->
 		<meta http-equiv="Content-Security-Policy" content="default-src *; script-src 'self' <%= require('./config/csp.js').hosts %> <%= process.env.NODE_ENV === 'development' ? '\'unsafe-inline\' \'unsafe-eval\'' : '' %>; style-src 'self' 'unsafe-inline'; img-src * blob: data:; object-src 'self' up.raindrop.io;">

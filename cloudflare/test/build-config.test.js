@@ -26,6 +26,7 @@ test('Web and Chrome development profiles inject matching origins and API host p
             assert.equal(valueFor(definitions, 'API_ORIGIN'), profile.apiOrigin)
             assert.equal(valueFor(definitions, 'AI_PAGE_ORIGIN'), profile.aiPageOrigin)
             assert.equal(valueFor(definitions, 'APP_ORIGIN'), profile.appOrigin)
+            assert.equal(valueFor(definitions, 'TURNSTILE_SITE_KEY'), profile.turnstileSiteKey)
             assert.equal(valueFor(definitions, 'RAINDROP_BUILD_ENVIRONMENT'), name)
         }
 

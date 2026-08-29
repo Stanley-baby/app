@@ -7,10 +7,12 @@ const require = createRequire(import.meta.url)
 const manifest = require('../contracts/v1-routes.json')
 const environments = require('../environments.json')
 const env = {
+    DB: {},
     ENVIRONMENT: 'local',
     VERSION: '0.1.0-local',
     APP_ORIGIN: 'http://localhost:2000',
-    CORS_ORIGINS: 'http://localhost:2000 http://127.0.0.1:2000 chrome-extension://*'
+    CORS_ORIGINS: 'http://localhost:2000 http://127.0.0.1:2000 chrome-extension://*',
+    SESSION_SECRET: 'test-session-secret'
 }
 
 test('environment profiles keep origins, resources, and secret scopes separate', () => {
@@ -31,8 +33,9 @@ test('contract manifest entries describe response cases', () => {
     assert.ok(manifest.routes.length > 0)
     for (const route of manifest.routes) {
         assert.match(route.path, /^\/v1\//)
-        assert.equal(route.authentication, 'required')
-        assert.ok(route.responses.includes(401))
+        assert.ok(['required', 'none'].includes(route.authentication))
+        if (route.authentication === 'required')
+            assert.ok(route.responses.includes(401))
     }
 })
 

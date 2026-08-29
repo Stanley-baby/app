@@ -1,208 +1,63 @@
-Cloudflare preview and beta deployment acceptance
-==================================================
-
-Changed branch
---------------
-docs/add-repository-guidelines
-
-Changed field
--------------
-Beta now deploys as the isolated `raindrop-api-beta` Worker on workers.dev,
-without the `api-beta.raindrop.io` custom-domain route. Its API origin is the
-exact deployed workers.dev URL. Beta has its own D1, R2, and Queue resources.
-Preview remains deployed and unchanged; production was not deployed.
-
-Artifacts
----------
-MODIFIED_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/wrangler.toml
-DIFF_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/CF_ENVIRONMENT.diff
-VERIFICATION.txt: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/VERIFICATION.txt
-ROLLBACK.sh: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/ROLLBACK.sh (executable)
-Additional changed source config: cloudflare/environments.json
-
-Beta resources
---------------
-Worker: raindrop-api-beta
-workers.dev: https://raindrop-api-beta.shenyuan.workers.dev
-Deployment version ID: 38b7c47c-a04c-437e-92e3-61fcfe857b9c
-D1: raindrop-db-beta / 4bad3000-d53b-451d-a6f7-b7030684c72d
-R2: raindrop-content-beta
-R2: raindrop-backup-beta
-Queue: raindrop-tasks-beta / 909400a098ac45bba07fdea6df68f51a
-Queue: raindrop-tasks-dlq-beta / 2f3536970015417796d7358a1aa58a46
-Custom-domain route: removed; workers_dev = true
+BRANCH: docs/add-repository-guidelines
+FIELD: Beta identity, email verification, and device sessions
+MODIFIED_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/MODIFIED_FILE
+DIFF_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/DIFF_FILE
+VERIFICATION_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/VERIFICATION.txt
+ROLLBACK_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/ROLLBACK.sh
 
 BASELINE
---------
-Command:
-  PATH="$(brew --prefix node@18)/bin:$PATH" npm run test:contract
-Input:
-  HEAD 4f4d0532, preview-accepted source/config before the beta delta
-Literal output/result:
-  1..6
-  # tests 6
-  # pass 6
-  # fail 0
-Exit status: 0
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: pre-#3 checkout
+LITERAL_OUTPUT:
+# tests 6
+# pass 6
+# fail 0
+RESULT: PASS
+EXIT_STATUS: 0
 
 MODIFIED
---------
-Resource provisioning command:
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npx wrangler d1 create raindrop-db-beta
-Input:
-  Authenticated Wrangler account and beta D1 resource name
-Literal output/result:
-  Successfully created DB 'raindrop-db-beta' in region WNAM
-  database_id: 4bad3000-d53b-451d-a6f7-b7030684c72d
-Exit status: 0
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: Beta signup, Turnstile rejection, email confirmation, basic Bookmark, and session revoke fixtures
+LITERAL_OUTPUT:
+# tests 7
+# pass 7
+# fail 0
+RESULT: PASS
+EXIT_STATUS: 0
 
-Resource provisioning commands:
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npx wrangler r2 bucket create raindrop-content-beta
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npx wrangler r2 bucket create raindrop-backup-beta
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npx wrangler queues create raindrop-tasks-beta --message-retention-period-secs 60 --delivery-delay-secs 0
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npx wrangler queues create raindrop-tasks-dlq-beta --message-retention-period-secs 60 --delivery-delay-secs 0
-Input:
-  Beta content/backup buckets and task/DLQ queue names
-Literal output/result:
-  Created bucket 'raindrop-content-beta'
-  Created bucket 'raindrop-backup-beta'
-  Created queue 'raindrop-tasks-beta'
-  Created queue 'raindrop-tasks-dlq-beta'
-Exit status: 0
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler d1 migrations apply raindrop-db-local --local --persist-to cloudflare/.issue-3/d1-test --config cloudflare/wrangler.toml
+INPUT: 0001_initial.sql, 0002_identity_sessions.sql
+LITERAL_OUTPUT:
+│ 0001_initial.sql           │ ✅ │
+│ 0002_identity_sessions.sql │ ✅ │
+RESULT: PASS
+EXIT_STATUS: 0
 
-Dry-run command:
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npx wrangler deploy --dry-run --config cloudflare/wrangler.toml --env beta
-Input:
-  Beta workers.dev config with real D1/R2/Queue bindings
-Literal output/result:
-  Total Upload: 2.58 KiB / gzip: 1.04 KiB
-  env.TASK_QUEUE (raindrop-tasks-beta) Queue
-  env.TASK_DLQ (raindrop-tasks-dlq-beta) Queue
-  env.DB (raindrop-db-beta) D1 Database
-  env.CONTENT_BUCKET (raindrop-content-beta) R2 Bucket
-  env.BACKUP_BUCKET (raindrop-backup-beta) R2 Bucket
-  env.AI AI
-  env.ENVIRONMENT ("beta") Environment Variable
-  env.VERSION ("0.1.0-beta") Environment Variable
-  --dry-run: exiting now.
-Exit status: 0
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run build -- --env environment=beta
+INPUT: Beta Web build
+LITERAL_OUTPUT: webpack 5.105.4 compiled successfully
+RESULT: PASS
+EXIT_STATUS: 0
 
-Deploy command:
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npx wrangler deploy --config cloudflare/wrangler.toml --env beta
-Input:
-  Beta workers.dev config with API_ORIGIN=https://raindrop-api-beta.shenyuan.workers.dev
-Literal output/result:
-  Uploaded raindrop-api-beta (3.32 sec)
-  Deployed raindrop-api-beta triggers (6.22 sec)
-    https://raindrop-api-beta.shenyuan.workers.dev
-    Producer for raindrop-tasks-beta
-    Producer for raindrop-tasks-dlq-beta
-  Current Version ID: 38b7c47c-a04c-437e-92e3-61fcfe857b9c
-Exit status: 0
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run build:extension:chrome -- --env environment=beta
+INPUT: Beta Chrome build
+LITERAL_OUTPUT: webpack 5.105.4 compiled successfully
+RESULT: PASS
+EXIT_STATUS: 0
 
-Beta HTTP acceptance command:
-  BASE=https://raindrop-api-beta.shenyuan.workers.dev; for route in health version v1/user; do body=/tmp/raindrop-beta-deploy/${route//\\//-}.json; code=$(/usr/bin/curl -sS -o "$body" -w '%{http_code}' "$BASE/$route"); body_text=$(cat "$body"); printf '%s: HTTP %s %s\\n' "/$route" "$code" "$body_text"; done
-Input:
-  Anonymous HTTP requests to the deployed beta Worker
-Literal output/result:
-  /health: HTTP 200 {"result":true,"status":"ok","environment":"beta","version":"0.1.0-beta"}
-  /version: HTTP 200 {"result":true,"environment":"beta","version":"0.1.0-beta"}
-  /v1/user: HTTP 401 {"result":false,"auth":false,"error":"auth_required","errorMessage":"Login is required","login":"https://beta.raindrop.io/account/login"}
-Exit status: 0
-
-Preview preservation command:
-  for base in https://raindrop-api-preview.shenyuan.workers.dev https://raindrop-api-beta.shenyuan.workers.dev; do for route in health version v1/user; do curl "$base/$route"; done; done
-Input:
-  Existing preview and newly deployed beta Worker endpoints
-Literal output/result:
-  Preview /health: HTTP 200, environment preview, version 0.1.0-preview
-  Preview /version: HTTP 200, environment preview, version 0.1.0-preview
-  Preview /v1/user: HTTP 401, error auth_required
-  Beta /health: HTTP 200, environment beta, version 0.1.0-beta
-  Beta /version: HTTP 200, environment beta, version 0.1.0-beta
-  Beta /v1/user: HTTP 401, error auth_required
-Exit status: 0
-
-Build commands:
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npx webpack --config build/web.js --env environment=beta
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npx webpack --config build/extension.js --env vendor=chrome --env environment=beta
-Input:
-  Beta Web and Chrome bundles
-Literal output/result:
-  Web: webpack 5.105.4 compiled successfully in 14472 ms
-  Chrome: webpack 5.105.4 compiled successfully in 14892 ms
-Exit status: 0
-
-Bundle/manifest inspection command:
-  /usr/bin/python3 -c 'assert beta Web and Chrome bundles contain the beta API and AI origins; assert Chrome manifest host_permissions == ["https://raindrop-api-beta.shenyuan.workers.dev/*"]'
-Input:
-  dist/web/beta and dist/chrome/beta generated outputs
-Literal output/result:
-  Web API hits: 1; Chrome API hits: 3; Web AI hits: 1; Chrome AI hits: 2
-  Chrome manifest host_permissions: ["https://raindrop-api-beta.shenyuan.workers.dev/*"]
-  Chrome manifest optional_host_permissions: ["*://*/*"]
-Exit status: 0
-
-Contract test command:
-  PATH="$(/opt/homebrew/bin/brew --prefix node@18)/bin:$PATH" npm run test:contract
-Input:
-  Modified beta source/config and generated profiles
-Literal output/result:
-  1..6
-  # tests 6
-  # pass 6
-  # fail 0
-Exit status: 0
-
-Final local checks:
-  git diff --check HEAD && /bin/sh -n cloudflare/ROLLBACK.sh && test -x cloudflare/ROLLBACK.sh
-Input:
-  Modified tracked config and four Cloudflare artifacts
-Literal output/result:
-  checks passed; ROLLBACK.sh is executable
-Exit status: 0
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler deploy --dry-run --config cloudflare/wrangler.toml --env beta
+INPUT: Beta Worker configuration
+LITERAL_OUTPUT: --dry-run: exiting now.
+RESULT: PASS
+EXIT_STATUS: 0
 
 ROLLBACK
---------
-Command:
-  rollback_copy=$(/usr/bin/mktemp -d /tmp/raindrop-beta-rollback.XXXXXX)
-  for path in cloudflare/environments.json cloudflare/wrangler.toml cloudflare/CF_ENVIRONMENT.diff cloudflare/VERIFICATION.txt cloudflare/ROLLBACK.sh; do destination="$rollback_copy/$path"; mkdir -p "$(dirname "$destination")"; cp "$path" "$destination"; git show "HEAD:$path" > "$destination.orig"; done
-  /bin/sh cloudflare/ROLLBACK.sh "$rollback_copy"
-  python3 - "$rollback_copy" <<'PY' ... PY
-Input:
-  Separate temporary copy of the five changed tracked artifacts, with HEAD bytes saved as .orig files
-Literal output/result:
-  rollback copy artifacts before=5 restored_tracked=5 originals_left=0
-Exit status: 0
-
-Restored behavior/status
------------------------
-The rollback test restored all five changed tracked artifacts to their HEAD
-bytes inside the temporary copy and left the working tree modified. It did not
-remove or alter the deployed beta Worker or its Cloudflare resources. The
-preview Worker remained healthy after beta deployment. CONTEXT.md, docs/adr/,
-and docs/cf-backend-implementation-plan.md were not touched.
-
-Hashes
-------
-Original hashes before the beta delta:
-  cedf772a478ec950d9c48d6891ab83cb95738f5dfa06815ca5337e1424f8836e  cloudflare/wrangler.toml
-  5027b6d7c7b174bb88f754d6bfdc64b25caf03ce5045415372828b26100ab90e  cloudflare/environments.json
-  1ecaf8d7d3bd11428a2a4e6bed097e4788043501e72484e0a844d0f44a0fe677  cloudflare/CF_ENVIRONMENT.diff
-  5e12440c6358650466ba058023047e58d298d1fda17296ae2ad5a93702536853  cloudflare/VERIFICATION.txt
-  06ffe02b29c14e25dd6352ebd81294b4e578dfd7bdf8237e63f54c94eff2acf7  cloudflare/ROLLBACK.sh
-Current hashes:
-  55ca2cdd189cbd1e389cfe95459e6266f26f0af5fbab1ad46b1d9ef523ca9555  cloudflare/wrangler.toml
-  6420eee944e75569734d9bc5bec508b75a6de2d600b926fbb671c990ef395c1f  cloudflare/CF_ENVIRONMENT.diff
-  ee449d9a4d6d0e0b1e48b103de8fec722948c212a12b99e31ac58b0d722ecdb8  cloudflare/ROLLBACK.sh
-
-Manual follow-up
-----------------
-No custom domain is required for this beta acceptance. Beta secrets remain
-unset; future authenticated routes require BETA_ACCESS_PASSWORD,
-SESSION_SECRET, and ENCRYPTION_KEY in the beta scope.
-
-Acceptance status
------------------
-Issue #2 beta deployment/acceptance: complete. Preview: retained. Production:
-not deployed.
+COMMAND: target="$(rtk proxy mktemp -d)"; rtk mkdir -p "$target/cloudflare/src"; rtk cp cloudflare/src/index.js "$target/cloudflare/src/index.js"; rtk printf '%s\n' 'mutated copy' > "$target/cloudflare/src/index.js"; rtk ./cloudflare/ROLLBACK.sh "$target"
+INPUT: separate mutated copy of cloudflare/src/index.js
+LITERAL_OUTPUT: restored cloudflare/src/index.js 6efbddb21a9fe654701c2169551cc33f502c673f75e371714bb94fca5f90246f
+RESULT: restored pre-#3 Worker source hash
+EXIT_STATUS: 0

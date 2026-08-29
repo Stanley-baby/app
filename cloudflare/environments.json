@@ -4,6 +4,7 @@
         "apiOrigin": "http://localhost:8787",
         "appOrigin": "http://localhost:2000",
         "aiPageOrigin": "http://localhost:5173/ai",
+        "turnstileSiteKey": "1x00000000000000000000AA",
         "corsOrigins": [
             "http://localhost:2000",
             "http://127.0.0.1:2000",
@@ -21,7 +22,10 @@
         "secrets": [
             "BETA_ACCESS_PASSWORD",
             "SESSION_SECRET",
-            "ENCRYPTION_KEY"
+            "ENCRYPTION_KEY",
+            "TURNSTILE_SECRET_KEY",
+            "RESEND_API_KEY",
+            "MAIL_FROM"
         ]
     },
     "preview": {
@@ -29,6 +33,7 @@
         "apiOrigin": "https://raindrop-api-preview.shenyuan.workers.dev",
         "appOrigin": "https://preview.raindrop.io",
         "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
+        "turnstileSiteKey": "",
         "corsOrigins": [
             "https://preview.raindrop.io",
             "chrome-extension://*"
@@ -44,7 +49,10 @@
         "secrets": [
             "BETA_ACCESS_PASSWORD",
             "SESSION_SECRET",
-            "ENCRYPTION_KEY"
+            "ENCRYPTION_KEY",
+            "TURNSTILE_SECRET_KEY",
+            "RESEND_API_KEY",
+            "MAIL_FROM"
         ]
     },
     "beta": {
@@ -52,6 +60,7 @@
         "apiOrigin": "https://raindrop-api-beta.shenyuan.workers.dev",
         "appOrigin": "https://beta.raindrop.io",
         "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
+        "turnstileSiteKey": "",
         "corsOrigins": [
             "https://beta.raindrop.io",
             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
@@ -67,7 +76,10 @@
         "secrets": [
             "BETA_ACCESS_PASSWORD",
             "SESSION_SECRET",
-            "ENCRYPTION_KEY"
+            "ENCRYPTION_KEY",
+            "TURNSTILE_SECRET_KEY",
+            "RESEND_API_KEY",
+            "MAIL_FROM"
         ]
     },
     "production": {
@@ -75,6 +87,7 @@
         "apiOrigin": "https://api.raindrop.io",
         "appOrigin": "https://app.raindrop.io",
         "aiPageOrigin": "https://ai.raindrop.io/ai",
+        "turnstileSiteKey": "",
         "corsOrigins": [
             "https://app.raindrop.io",
             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
@@ -90,7 +103,10 @@
         "secrets": [
             "BETA_ACCESS_PASSWORD",
             "SESSION_SECRET",
-            "ENCRYPTION_KEY"
+            "ENCRYPTION_KEY",
+            "TURNSTILE_SECRET_KEY",
+            "RESEND_API_KEY",
+            "MAIL_FROM"
         ]
     }
 }

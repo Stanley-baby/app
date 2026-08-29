@@ -2,6 +2,42 @@
     "version": "1.0.0",
     "routes": [
         {
+            "method": "POST",
+            "path": "/v1/auth/email/signup",
+            "authentication": "none",
+            "responses": [201, 400, 403, 409, 502, 503]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/auth/email/login",
+            "authentication": "none",
+            "responses": [200, 401, 503]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/auth/email/confirm",
+            "authentication": "none",
+            "responses": [200, 400, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/sessions",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/raindrop",
+            "authentication": "required",
+            "responses": [201, 400, 401]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/sessions/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
             "method": "GET",
             "path": "/v1/user",
             "authentication": "required",

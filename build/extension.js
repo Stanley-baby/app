@@ -70,9 +70,10 @@ module.exports = (env={}, args={}) => {
                     title: 'Raindrop.io',
                     template: './index.ejs',
                     templateParameters: {
-                        apiOrigin: buildEnvironment.apiOrigin,
-                        aiPageOrigin: buildEnvironment.aiPageOrigin,
-                        appOrigin: buildEnvironment.appOrigin
+						apiOrigin: buildEnvironment.apiOrigin,
+						aiPageOrigin: buildEnvironment.aiPageOrigin,
+						appOrigin: buildEnvironment.appOrigin,
+						turnstileSiteKey: buildEnvironment.turnstileSiteKey
                     },
                     filename: 'sidepanel.html',
                     scriptLoading: 'blocking',
