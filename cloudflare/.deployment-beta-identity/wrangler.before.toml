@@ -84,9 +84,9 @@ workers_dev = true
 ENVIRONMENT = "beta"
 VERSION = "0.1.0-beta"
 API_ORIGIN = "https://raindrop-api-beta.shenyuan.workers.dev"
-APP_ORIGIN = "https://raindrop-beta.pages.dev"
+APP_ORIGIN = "https://beta.raindrop.io"
 AI_PAGE_ORIGIN = "https://beta-ai.raindrop.io/ai"
-CORS_ORIGINS = "https://raindrop-beta.pages.dev chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+CORS_ORIGINS = "https://beta.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
 MAIL_PROVIDER = "resend"
 
 [[env.beta.d1_databases]]

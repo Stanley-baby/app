@@ -58,11 +58,11 @@
     "beta": {
         "workerName": "raindrop-api-beta",
         "apiOrigin": "https://raindrop-api-beta.shenyuan.workers.dev",
-        "appOrigin": "https://raindrop-beta.pages.dev",
+        "appOrigin": "https://beta.raindrop.io",
         "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
-        "turnstileSiteKey": "0x4AAAAAAEgrWY2vz8wLYW8D",
+        "turnstileSiteKey": "",
         "corsOrigins": [
-            "https://raindrop-beta.pages.dev",
+            "https://beta.raindrop.io",
             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
         ],
         "resourceNames": {
