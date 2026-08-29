@@ -117,7 +117,6 @@ module.exports = (options={}) => {
 			'process.env.AI_PAGE_ORIGIN': JSON.stringify(buildEnvironment.aiPageOrigin),
 			'process.env.APP_ORIGIN': JSON.stringify(buildEnvironment.appOrigin),
 			'process.env.TURNSTILE_SITE_KEY': JSON.stringify(buildEnvironment.turnstileSiteKey),
-			'process.env.TURNSTILE_ENABLED': JSON.stringify(String(buildEnvironment.turnstileEnabled)),
 			'process.env.RAINDROP_BUILD_ENVIRONMENT': JSON.stringify(buildEnvironment.name),
 			RAINDROP_ENVIRONMENT: JSON.stringify('browser'),
 			'process.env.SENTRY_RELEASE': JSON.stringify(production && !sentry?.disabled? process.env.SENTRY_RELEASE : undefined)
@@ -131,8 +130,7 @@ module.exports = (options={}) => {
 				apiOrigin: buildEnvironment.apiOrigin,
 				aiPageOrigin: buildEnvironment.aiPageOrigin,
 				appOrigin: buildEnvironment.appOrigin,
-				turnstileSiteKey: buildEnvironment.turnstileSiteKey,
-				turnstileEnabled: buildEnvironment.turnstileEnabled
+				turnstileSiteKey: buildEnvironment.turnstileSiteKey
 			},
 			scriptLoading: 'blocking',
 			inject: 'body',

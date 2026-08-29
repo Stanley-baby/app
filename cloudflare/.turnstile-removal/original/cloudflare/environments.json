@@ -5,7 +5,6 @@
         "appOrigin": "http://localhost:2000",
         "aiPageOrigin": "http://localhost:5173/ai",
         "turnstileSiteKey": "1x00000000000000000000AA",
-        "turnstileEnabled": false,
         "corsOrigins": [
             "http://localhost:2000",
             "http://127.0.0.1:2000",
@@ -35,7 +34,6 @@
         "appOrigin": "https://preview.raindrop.io",
         "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
         "turnstileSiteKey": "",
-        "turnstileEnabled": false,
         "corsOrigins": [
             "https://preview.raindrop.io",
             "chrome-extension://*"
@@ -63,7 +61,6 @@
         "appOrigin": "https://raindrop-beta.pages.dev",
         "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
         "turnstileSiteKey": "0x4AAAAAAEgrWY2vz8wLYW8D",
-        "turnstileEnabled": false,
         "corsOrigins": [
             "https://raindrop-beta.pages.dev",
             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
@@ -91,7 +88,6 @@
         "appOrigin": "https://app.raindrop.io",
         "aiPageOrigin": "https://ai.raindrop.io/ai",
         "turnstileSiteKey": "",
-        "turnstileEnabled": false,
         "corsOrigins": [
             "https://app.raindrop.io",
             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"

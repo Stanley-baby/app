@@ -73,8 +73,7 @@ module.exports = (env={}, args={}) => {
 						apiOrigin: buildEnvironment.apiOrigin,
 						aiPageOrigin: buildEnvironment.aiPageOrigin,
 						appOrigin: buildEnvironment.appOrigin,
-						turnstileSiteKey: buildEnvironment.turnstileSiteKey,
-						turnstileEnabled: buildEnvironment.turnstileEnabled
+						turnstileSiteKey: buildEnvironment.turnstileSiteKey
                     },
                     filename: 'sidepanel.html',
                     scriptLoading: 'blocking',

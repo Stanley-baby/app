@@ -4,7 +4,7 @@ import t from '~t'
 import { connect } from 'react-redux'
 import { userStatus, errorReason } from '~data/selectors/user'
 import { registerWithPassword } from '~data/actions/user'
-import { TURNSTILE_ENABLED, TURNSTILE_SITE_KEY } from '~data/constants/app'
+import { TURNSTILE_SITE_KEY } from '~data/constants/app'
 
 import { Link } from 'react-router-dom'
 import { Helmet } from 'react-helmet'
@@ -25,7 +25,7 @@ class AccountSignup extends React.Component {
     }
 
     componentDidMount() {
-        if (!TURNSTILE_ENABLED || !TURNSTILE_SITE_KEY || process.env.APP_TARGET == 'extension')
+        if (!TURNSTILE_SITE_KEY || process.env.APP_TARGET == 'extension')
             return
 
         const render = () => {
@@ -120,7 +120,7 @@ class AccountSignup extends React.Component {
                             onChange={this.onChangeValue} />
                     </> : null}
 
-                    {TURNSTILE_ENABLED && TURNSTILE_SITE_KEY && process.env.APP_TARGET != 'extension' ? (
+                    {TURNSTILE_SITE_KEY && process.env.APP_TARGET != 'extension' ? (
                         <div ref={element=>this.turnstile=element} />
                     ) : null}
 

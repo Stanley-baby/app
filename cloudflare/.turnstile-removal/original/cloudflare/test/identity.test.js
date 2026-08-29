@@ -101,7 +101,6 @@ const env = db => ({
     CORS_ORIGINS: 'https://beta.example.test',
     BETA_ACCESS_PASSWORD: 'invite-only',
     SESSION_SECRET: 'session-secret',
-    TURNSTILE_ENABLED: 'true',
     TURNSTILE_SECRET_KEY: 'turnstile-secret',
     RESEND_API_KEY: 'resend-secret',
     MAIL_PROVIDER: 'resend',
@@ -112,13 +111,10 @@ test('beta signup verifies Turnstile, keeps credentials private, and creates rev
     const db = new MemoryDatabase()
     let confirmationUrl
     let turnstileValid = true
-    let turnstileRequests = 0
     const originalFetch = globalThis.fetch
     globalThis.fetch = async (url, options) => {
-        if (url === 'https://challenges.cloudflare.com/turnstile/v0/siteverify') {
-            turnstileRequests++
+        if (url === 'https://challenges.cloudflare.com/turnstile/v0/siteverify')
             return Response.json({ success: turnstileValid })
-        }
         if (url === 'https://api.resend.com/emails') {
             const email = JSON.parse(options.body)
             confirmationUrl = email.html.match(/href="([^"]+)"/)[1]
@@ -127,13 +123,6 @@ test('beta signup verifies Turnstile, keeps credentials private, and creates rev
         return originalFetch(url, options)
     }
     t.after(() => { globalThis.fetch = originalFetch })
-
-    const disabledDb = new MemoryDatabase()
-    const disabled = await worker.fetch(request('/v1/auth/email/signup', {
-        name: 'Disabled User', email: 'disabled.user@enterprise.example', password: 'correct horse battery staple', betaAccessPassword: 'invite-only'
-    }), { ...env(disabledDb), TURNSTILE_ENABLED: 'false' })
-    assert.equal(disabled.status, 201)
-    assert.equal(turnstileRequests, 0)
 
     const invalid = await worker.fetch(request('/v1/auth/email/signup', {
         name: 'Beta User', email: 'beta.user@enterprise.example', password: 'correct horse battery staple', betaAccessPassword: 'wrong', turnstileToken: 'token'

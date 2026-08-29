@@ -1,0 +1,277 @@
+diff --git a/build/common.js b/build/common.js
+index 076188a7..564a48b9 100644
+--- a/build/common.js
++++ b/build/common.js
+@@ -117,6 +117,7 @@ module.exports = (options={}) => {
+ 			'process.env.AI_PAGE_ORIGIN': JSON.stringify(buildEnvironment.aiPageOrigin),
+ 			'process.env.APP_ORIGIN': JSON.stringify(buildEnvironment.appOrigin),
+ 			'process.env.TURNSTILE_SITE_KEY': JSON.stringify(buildEnvironment.turnstileSiteKey),
++			'process.env.TURNSTILE_ENABLED': JSON.stringify(String(buildEnvironment.turnstileEnabled)),
+ 			'process.env.RAINDROP_BUILD_ENVIRONMENT': JSON.stringify(buildEnvironment.name),
+ 			RAINDROP_ENVIRONMENT: JSON.stringify('browser'),
+ 			'process.env.SENTRY_RELEASE': JSON.stringify(production && !sentry?.disabled? process.env.SENTRY_RELEASE : undefined)
+@@ -130,7 +131,8 @@ module.exports = (options={}) => {
+ 				apiOrigin: buildEnvironment.apiOrigin,
+ 				aiPageOrigin: buildEnvironment.aiPageOrigin,
+ 				appOrigin: buildEnvironment.appOrigin,
+-				turnstileSiteKey: buildEnvironment.turnstileSiteKey
++				turnstileSiteKey: buildEnvironment.turnstileSiteKey,
++				turnstileEnabled: buildEnvironment.turnstileEnabled
+ 			},
+ 			scriptLoading: 'blocking',
+ 			inject: 'body',
+diff --git a/build/environments.js b/build/environments.js
+index ea9313bd..787e5818 100644
+--- a/build/environments.js
++++ b/build/environments.js
+@@ -1,6 +1,7 @@
+ const profiles = require('../cloudflare/environments.json')
+ 
+ const trimTrailingSlash = value => String(value).replace(/\/+$/, '')
++const asBoolean = (value, fallback) => value === undefined ? fallback : String(value) === 'true'
+ 
+ const resolveEnvironment = (options={}) => {
+     const name = options.environment || (options.production ? 'production' : 'local')
+@@ -15,7 +16,8 @@ const resolveEnvironment = (options={}) => {
+         apiOrigin: trimTrailingSlash(options.apiOrigin || process.env.API_ORIGIN || profile.apiOrigin),
+         appOrigin: trimTrailingSlash(options.appOrigin || process.env.APP_ORIGIN || profile.appOrigin),
+         aiPageOrigin: trimTrailingSlash(options.aiPageOrigin || process.env.AI_PAGE_ORIGIN || profile.aiPageOrigin),
+-        turnstileSiteKey: options.turnstileSiteKey || process.env.TURNSTILE_SITE_KEY || profile.turnstileSiteKey || ''
++        turnstileSiteKey: options.turnstileSiteKey || process.env.TURNSTILE_SITE_KEY || profile.turnstileSiteKey || '',
++        turnstileEnabled: asBoolean(options.turnstileEnabled ?? process.env.TURNSTILE_ENABLED, profile.turnstileEnabled)
+     }
+ }
+ 
+diff --git a/build/extension.js b/build/extension.js
+index 164a650b..c8efb99d 100644
+--- a/build/extension.js
++++ b/build/extension.js
+@@ -73,7 +73,8 @@ module.exports = (env={}, args={}) => {
+ 						apiOrigin: buildEnvironment.apiOrigin,
+ 						aiPageOrigin: buildEnvironment.aiPageOrigin,
+ 						appOrigin: buildEnvironment.appOrigin,
+-						turnstileSiteKey: buildEnvironment.turnstileSiteKey
++						turnstileSiteKey: buildEnvironment.turnstileSiteKey,
++						turnstileEnabled: buildEnvironment.turnstileEnabled
+                     },
+                     filename: 'sidepanel.html',
+                     scriptLoading: 'blocking',
+diff --git a/cloudflare/environments.json b/cloudflare/environments.json
+index 8df17f43..1a09be49 100644
+--- a/cloudflare/environments.json
++++ b/cloudflare/environments.json
+@@ -5,6 +5,7 @@
+         "appOrigin": "http://localhost:2000",
+         "aiPageOrigin": "http://localhost:5173/ai",
+         "turnstileSiteKey": "1x00000000000000000000AA",
++        "turnstileEnabled": false,
+         "corsOrigins": [
+             "http://localhost:2000",
+             "http://127.0.0.1:2000",
+@@ -34,6 +35,7 @@
+         "appOrigin": "https://preview.raindrop.io",
+         "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
+         "turnstileSiteKey": "",
++        "turnstileEnabled": false,
+         "corsOrigins": [
+             "https://preview.raindrop.io",
+             "chrome-extension://*"
+@@ -61,6 +63,7 @@
+         "appOrigin": "https://raindrop-beta.pages.dev",
+         "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
+         "turnstileSiteKey": "0x4AAAAAAEgrWY2vz8wLYW8D",
++        "turnstileEnabled": false,
+         "corsOrigins": [
+             "https://raindrop-beta.pages.dev",
+             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+@@ -88,6 +91,7 @@
+         "appOrigin": "https://app.raindrop.io",
+         "aiPageOrigin": "https://ai.raindrop.io/ai",
+         "turnstileSiteKey": "",
++        "turnstileEnabled": false,
+         "corsOrigins": [
+             "https://app.raindrop.io",
+             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+diff --git a/cloudflare/src/index.js b/cloudflare/src/index.js
+index dd458781..9073b7fd 100644
+--- a/cloudflare/src/index.js
++++ b/cloudflare/src/index.js
+@@ -116,6 +116,7 @@ const publicUser = user => ({
+ })
+ 
+ const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
++const turnstileEnabled = env => String(env.TURNSTILE_ENABLED || '').toLowerCase() === 'true'
+ 
+ const configurationError = (request, env) =>
+     error('auth_configuration_missing', 503, request, env, 'Authentication is not configured')
+@@ -233,7 +234,7 @@ export default {
+ 
+         if (url.pathname === '/v1/auth/email/signup' && request.method === 'POST') {
+             if (!authReady(env)) return configurationError(request, env)
+-            if (!env.TURNSTILE_SECRET_KEY || env.MAIL_PROVIDER !== 'resend' || !env.RESEND_API_KEY || !env.MAIL_FROM)
++            if ((turnstileEnabled(env) && !env.TURNSTILE_SECRET_KEY) || env.MAIL_PROVIDER !== 'resend' || !env.RESEND_API_KEY || !env.MAIL_FROM)
+                 return configurationError(request, env)
+ 
+             const { data } = await readBody(request)
+@@ -249,9 +250,11 @@ export default {
+             if (env.ENVIRONMENT === 'beta' && (!env.BETA_ACCESS_PASSWORD || !equal(accessPassword, env.BETA_ACCESS_PASSWORD)))
+                 return error('beta_access_denied', 403, request, env, 'Beta access password is invalid')
+ 
+-            const turnstile = await verifyTurnstile(request, env, turnstileToken)
+-            if (!turnstile)
+-                return error('turnstile_failed', 400, request, env, 'Turnstile verification failed')
++            if (turnstileEnabled(env)) {
++                const turnstile = await verifyTurnstile(request, env, turnstileToken)
++                if (!turnstile)
++                    return error('turnstile_failed', 400, request, env, 'Turnstile verification failed')
++            }
+ 
+             const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first()
+             if (existing)
+diff --git a/cloudflare/test/build-config.test.js b/cloudflare/test/build-config.test.js
+index 3f1ae2f2..771b2843 100644
+--- a/cloudflare/test/build-config.test.js
++++ b/cloudflare/test/build-config.test.js
+@@ -27,6 +27,7 @@ test('Web and Chrome development profiles inject matching origins and API host p
+             assert.equal(valueFor(definitions, 'AI_PAGE_ORIGIN'), profile.aiPageOrigin)
+             assert.equal(valueFor(definitions, 'APP_ORIGIN'), profile.appOrigin)
+             assert.equal(valueFor(definitions, 'TURNSTILE_SITE_KEY'), profile.turnstileSiteKey)
++            assert.equal(valueFor(definitions, 'TURNSTILE_ENABLED'), String(profile.turnstileEnabled))
+             assert.equal(valueFor(definitions, 'RAINDROP_BUILD_ENVIRONMENT'), name)
+         }
+ 
+diff --git a/cloudflare/test/identity.test.js b/cloudflare/test/identity.test.js
+index a32b7c88..8ce8a45d 100644
+--- a/cloudflare/test/identity.test.js
++++ b/cloudflare/test/identity.test.js
+@@ -101,6 +101,7 @@ const env = db => ({
+     CORS_ORIGINS: 'https://beta.example.test',
+     BETA_ACCESS_PASSWORD: 'invite-only',
+     SESSION_SECRET: 'session-secret',
++    TURNSTILE_ENABLED: 'true',
+     TURNSTILE_SECRET_KEY: 'turnstile-secret',
+     RESEND_API_KEY: 'resend-secret',
+     MAIL_PROVIDER: 'resend',
+@@ -111,10 +112,13 @@ test('beta signup verifies Turnstile, keeps credentials private, and creates rev
+     const db = new MemoryDatabase()
+     let confirmationUrl
+     let turnstileValid = true
++    let turnstileRequests = 0
+     const originalFetch = globalThis.fetch
+     globalThis.fetch = async (url, options) => {
+-        if (url === 'https://challenges.cloudflare.com/turnstile/v0/siteverify')
++        if (url === 'https://challenges.cloudflare.com/turnstile/v0/siteverify') {
++            turnstileRequests++
+             return Response.json({ success: turnstileValid })
++        }
+         if (url === 'https://api.resend.com/emails') {
+             const email = JSON.parse(options.body)
+             confirmationUrl = email.html.match(/href="([^"]+)"/)[1]
+@@ -124,6 +128,13 @@ test('beta signup verifies Turnstile, keeps credentials private, and creates rev
+     }
+     t.after(() => { globalThis.fetch = originalFetch })
+ 
++    const disabledDb = new MemoryDatabase()
++    const disabled = await worker.fetch(request('/v1/auth/email/signup', {
++        name: 'Disabled User', email: 'disabled.user@enterprise.example', password: 'correct horse battery staple', betaAccessPassword: 'invite-only'
++    }), { ...env(disabledDb), TURNSTILE_ENABLED: 'false' })
++    assert.equal(disabled.status, 201)
++    assert.equal(turnstileRequests, 0)
++
+     const invalid = await worker.fetch(request('/v1/auth/email/signup', {
+         name: 'Beta User', email: 'beta.user@enterprise.example', password: 'correct horse battery staple', betaAccessPassword: 'wrong', turnstileToken: 'token'
+     }), env(db))
+diff --git a/cloudflare/wrangler.toml b/cloudflare/wrangler.toml
+index 06e42ecb..9e196001 100644
+--- a/cloudflare/wrangler.toml
++++ b/cloudflare/wrangler.toml
+@@ -12,6 +12,7 @@ APP_ORIGIN = "http://localhost:2000"
+ AI_PAGE_ORIGIN = "http://localhost:5173/ai"
+ CORS_ORIGINS = "http://localhost:2000 http://127.0.0.1:2000 http://localhost:3000 chrome-extension://*"
+ MAIL_PROVIDER = "resend"
++TURNSTILE_ENABLED = "false"
+ 
+ [[d1_databases]]
+ binding = "DB"
+@@ -50,6 +51,7 @@ APP_ORIGIN = "https://preview.raindrop.io"
+ AI_PAGE_ORIGIN = "https://ai-preview.raindrop.io/ai"
+ CORS_ORIGINS = "https://preview.raindrop.io chrome-extension://*"
+ MAIL_PROVIDER = "resend"
++TURNSTILE_ENABLED = "false"
+ 
+ [[env.preview.d1_databases]]
+ binding = "DB"
+@@ -88,6 +90,7 @@ APP_ORIGIN = "https://raindrop-beta.pages.dev"
+ AI_PAGE_ORIGIN = "https://beta-ai.raindrop.io/ai"
+ CORS_ORIGINS = "https://raindrop-beta.pages.dev chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+ MAIL_PROVIDER = "resend"
++TURNSTILE_ENABLED = "false"
+ 
+ [[env.beta.d1_databases]]
+ binding = "DB"
+@@ -130,6 +133,7 @@ APP_ORIGIN = "https://app.raindrop.io"
+ AI_PAGE_ORIGIN = "https://ai.raindrop.io/ai"
+ CORS_ORIGINS = "https://app.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+ MAIL_PROVIDER = "resend"
++TURNSTILE_ENABLED = "false"
+ 
+ [[env.production.d1_databases]]
+ binding = "DB"
+diff --git a/src/data/constants/app.js b/src/data/constants/app.js
+index b7f32eda..e6b7796f 100644
+--- a/src/data/constants/app.js
++++ b/src/data/constants/app.js
+@@ -17,7 +17,8 @@ export const
+ 	RECAPTCHA_SITE_KEY = '6LfB38wUAAAAAMX3VuFcriTz-Tb-qw7MD966XNnk'
+ 
+ export const
+-	TURNSTILE_SITE_KEY	= process.env.TURNSTILE_SITE_KEY || ''
++	TURNSTILE_SITE_KEY	= process.env.TURNSTILE_SITE_KEY || '',
++	TURNSTILE_ENABLED	= process.env.TURNSTILE_ENABLED == 'true'
+ 
+ export const
+ 	API_ENDPOINT_URL 	= `${API_ORIGIN}/v1/`,
+diff --git a/src/index.ejs b/src/index.ejs
+index 100ced70..20df0339 100755
+--- a/src/index.ejs
++++ b/src/index.ejs
+@@ -11,7 +11,7 @@
+ 	<%if (process.env.APP_TARGET != 'extension') { %>
+ 		<meta name="google" value="notranslate" />
+ 		<meta name="description" content="All-in-one bookmark manager">
+-		<%if (turnstileSiteKey) { %>
++		<%if (turnstileEnabled && turnstileSiteKey) { %>
+ 			<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+ 		<% } %>
+ 
+diff --git a/src/routes/account/signup/index.js b/src/routes/account/signup/index.js
+index d1902097..3df9e0df 100644
+--- a/src/routes/account/signup/index.js
++++ b/src/routes/account/signup/index.js
+@@ -4,7 +4,7 @@ import t from '~t'
+ import { connect } from 'react-redux'
+ import { userStatus, errorReason } from '~data/selectors/user'
+ import { registerWithPassword } from '~data/actions/user'
+-import { TURNSTILE_SITE_KEY } from '~data/constants/app'
++import { TURNSTILE_ENABLED, TURNSTILE_SITE_KEY } from '~data/constants/app'
+ 
+ import { Link } from 'react-router-dom'
+ import { Helmet } from 'react-helmet'
+@@ -25,7 +25,7 @@ class AccountSignup extends React.Component {
+     }
+ 
+     componentDidMount() {
+-        if (!TURNSTILE_SITE_KEY || process.env.APP_TARGET == 'extension')
++        if (!TURNSTILE_ENABLED || !TURNSTILE_SITE_KEY || process.env.APP_TARGET == 'extension')
+             return
+ 
+         const render = () => {
+@@ -120,7 +120,7 @@ class AccountSignup extends React.Component {
+                             onChange={this.onChangeValue} />
+                     </> : null}
+ 
+-                    {TURNSTILE_SITE_KEY && process.env.APP_TARGET != 'extension' ? (
++                    {TURNSTILE_ENABLED && TURNSTILE_SITE_KEY && process.env.APP_TARGET != 'extension' ? (
+                         <div ref={element=>this.turnstile=element} />
+                     ) : null}
+ 

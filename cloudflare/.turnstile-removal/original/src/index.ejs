@@ -11,7 +11,7 @@
 	<%if (process.env.APP_TARGET != 'extension') { %>
 		<meta name="google" value="notranslate" />
 		<meta name="description" content="All-in-one bookmark manager">
-		<%if (turnstileEnabled && turnstileSiteKey) { %>
+		<%if (turnstileSiteKey) { %>
 			<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 		<% } %>
 

@@ -1,0 +1,59 @@
+openapi: 3.0.3
+info:
+  title: Independent Bookmarking Service API
+  version: 1.0.0
+servers:
+  - url: https://api.raindrop.io
+paths:
+  /health:
+    get:
+      responses:
+        '200':
+          description: Worker is healthy.
+  /version:
+    get:
+      responses:
+        '200':
+          description: Deployed Worker version.
+  /v1/auth/email/signup:
+    post:
+      responses:
+        '201':
+          description: Unverified User created and confirmation email sent.
+        '400':
+          description: Validation or Turnstile failure.
+        '403':
+          description: Beta Access Password rejected.
+  /v1/auth/email/login:
+    post:
+      responses:
+        '200':
+          description: Device session cookie created.
+        '401':
+          description: Invalid credentials.
+  /v1/auth/email/confirm:
+    post:
+      responses:
+        '200':
+          description: Email verified.
+  /v1/sessions:
+    get:
+      responses:
+        '200':
+          description: Current User device sessions.
+        '401':
+          description: Login required.
+  /v1/raindrop:
+    post:
+      responses:
+        '201':
+          description: Basic Bookmark created for the signed-in User.
+        '401':
+          description: Login required.
+  /v1/user:
+    get:
+      responses:
+        '200':
+          description: Authenticated User.
+        '401':
+          description: Login required.

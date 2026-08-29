@@ -116,7 +116,6 @@ const publicUser = user => ({
 })
 
 const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
-const turnstileEnabled = env => String(env.TURNSTILE_ENABLED || '').toLowerCase() === 'true'
 
 const configurationError = (request, env) =>
     error('auth_configuration_missing', 503, request, env, 'Authentication is not configured')
@@ -234,7 +233,7 @@ export default {
 
         if (url.pathname === '/v1/auth/email/signup' && request.method === 'POST') {
             if (!authReady(env)) return configurationError(request, env)
-            if ((turnstileEnabled(env) && !env.TURNSTILE_SECRET_KEY) || env.MAIL_PROVIDER !== 'resend' || !env.RESEND_API_KEY || !env.MAIL_FROM)
+            if (!env.TURNSTILE_SECRET_KEY || env.MAIL_PROVIDER !== 'resend' || !env.RESEND_API_KEY || !env.MAIL_FROM)
                 return configurationError(request, env)
 
             const { data } = await readBody(request)
@@ -250,11 +249,9 @@ export default {
             if (env.ENVIRONMENT === 'beta' && (!env.BETA_ACCESS_PASSWORD || !equal(accessPassword, env.BETA_ACCESS_PASSWORD)))
                 return error('beta_access_denied', 403, request, env, 'Beta access password is invalid')
 
-            if (turnstileEnabled(env)) {
-                const turnstile = await verifyTurnstile(request, env, turnstileToken)
-                if (!turnstile)
-                    return error('turnstile_failed', 400, request, env, 'Turnstile verification failed')
-            }
+            const turnstile = await verifyTurnstile(request, env, turnstileToken)
+            if (!turnstile)
+                return error('turnstile_failed', 400, request, env, 'Turnstile verification failed')
 
             const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first()
             if (existing)

@@ -12,7 +12,6 @@ APP_ORIGIN = "http://localhost:2000"
 AI_PAGE_ORIGIN = "http://localhost:5173/ai"
 CORS_ORIGINS = "http://localhost:2000 http://127.0.0.1:2000 http://localhost:3000 chrome-extension://*"
 MAIL_PROVIDER = "resend"
-TURNSTILE_ENABLED = "false"
 
 [[d1_databases]]
 binding = "DB"
@@ -51,7 +50,6 @@ APP_ORIGIN = "https://preview.raindrop.io"
 AI_PAGE_ORIGIN = "https://ai-preview.raindrop.io/ai"
 CORS_ORIGINS = "https://preview.raindrop.io chrome-extension://*"
 MAIL_PROVIDER = "resend"
-TURNSTILE_ENABLED = "false"
 
 [[env.preview.d1_databases]]
 binding = "DB"
@@ -90,7 +88,6 @@ APP_ORIGIN = "https://raindrop-beta.pages.dev"
 AI_PAGE_ORIGIN = "https://beta-ai.raindrop.io/ai"
 CORS_ORIGINS = "https://raindrop-beta.pages.dev chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
 MAIL_PROVIDER = "resend"
-TURNSTILE_ENABLED = "false"
 
 [[env.beta.d1_databases]]
 binding = "DB"
@@ -133,7 +130,6 @@ APP_ORIGIN = "https://app.raindrop.io"
 AI_PAGE_ORIGIN = "https://ai.raindrop.io/ai"
 CORS_ORIGINS = "https://app.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
 MAIL_PROVIDER = "resend"
-TURNSTILE_ENABLED = "false"
 
 [[env.production.d1_databases]]
 binding = "DB"
