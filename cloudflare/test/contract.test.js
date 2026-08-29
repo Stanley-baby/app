@@ -89,3 +89,20 @@ test('configured extension origins receive credentialed CORS headers', async () 
     assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'chrome-extension://local-dev')
     assert.equal(response.headers.get('Access-Control-Allow-Credentials'), 'true')
 })
+
+test('preflight returns credentialed CORS headers without a response body', async () => {
+    const response = await worker.fetch(new Request('http://localhost/v1/auth/email/signup', {
+        method: 'OPTIONS',
+        headers: {
+            Origin: 'http://localhost:2000',
+            'Access-Control-Request-Method': 'POST',
+            'Access-Control-Request-Headers': 'Content-Type'
+        }
+    }), env)
+
+    assert.equal(response.status, 204)
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'http://localhost:2000')
+    assert.equal(response.headers.get('Access-Control-Allow-Credentials'), 'true')
+    assert.equal(response.headers.get('Access-Control-Allow-Methods'), 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
+    assert.equal(response.headers.get('Access-Control-Allow-Headers'), 'Content-Type, X-Request-ID, X-Device-Name')
+})

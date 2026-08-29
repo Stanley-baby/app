@@ -5,7 +5,12 @@ const passwordIterations = 310000
 
 const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
 
-const addCorsHeaders = (headers, request, env) => {
+const json = (body, status, request, env, extraHeaders = {}) => {
+    const headers = new Headers({
+        'Content-Type': 'application/json; charset=utf-8',
+        'X-Request-ID': requestId(request),
+        ...extraHeaders
+    })
     const origin = request.headers.get('Origin')
     const allowedOrigins = String(env.CORS_ORIGINS || '').split(/\s+/).filter(Boolean)
 
@@ -18,16 +23,6 @@ const addCorsHeaders = (headers, request, env) => {
         headers.set('Vary', 'Origin')
     }
 
-    return headers
-}
-
-const json = (body, status, request, env, extraHeaders = {}) => {
-    const headers = addCorsHeaders(new Headers({
-        'Content-Type': 'application/json; charset=utf-8',
-        'X-Request-ID': requestId(request),
-        ...extraHeaders
-    }), request, env)
-
     return new Response(JSON.stringify(body), { status, headers })
 }
 
@@ -35,9 +30,8 @@ const error = (code, status, request, env, errorMessage = code) =>
     json({ result: false, error: code, errorMessage }, status, request, env)
 
 const cors = (request, env) => {
-    const headers = addCorsHeaders(new Headers({
-        'X-Request-ID': requestId(request)
-    }), request, env)
+    const headers = json({}, 204, request, env).headers
+    headers.delete('Content-Type')
     headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
     headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID, X-Device-Name')
     headers.set('Access-Control-Max-Age', '600')

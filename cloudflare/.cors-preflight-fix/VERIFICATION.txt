@@ -1,0 +1,41 @@
+BRANCH: docs/add-repository-guidelines
+FIELD: Beta signup CORS preflight
+MODIFIED_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.cors-preflight-fix/MODIFIED_FILE
+DIFF_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.cors-preflight-fix/DIFF_FILE
+VERIFICATION_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.cors-preflight-fix/VERIFICATION.txt
+ROLLBACK_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.cors-preflight-fix/ROLLBACK.sh
+
+BASELINE
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk node --test cloudflare/test/contract.test.js
+INPUT: OPTIONS /v1/auth/email/signup with Pages origin
+LITERAL_OUTPUT: Response constructor: Invalid response status code 204
+RESULT: FAIL reproduced
+EXIT_STATUS: 1
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: contract and identity suites
+LITERAL_OUTPUT: # tests 8; # pass 8; # fail 0
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler deploy --config cloudflare/wrangler.toml --env beta
+INPUT: CORS preflight Worker fix
+LITERAL_OUTPUT: Current Version ID: e60e5041-1f94-46f5-aaf0-5a50283c10f0
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: curl -X OPTIONS -H "Origin: https://raindrop-beta.pages.dev" -H "Access-Control-Request-Method: POST" -H "Access-Control-Request-Headers: content-type" https://raindrop-api-beta.shenyuan.workers.dev/v1/auth/email/signup
+INPUT: Pages signup preflight
+LITERAL_OUTPUT: HTTP 204; Access-Control-Allow-Origin: https://raindrop-beta.pages.dev
+RESULT: PASS
+EXIT_STATUS: 0
+
+ROLLBACK
+COMMAND: cloudflare/.cors-preflight-fix/ROLLBACK.sh TARGET_REPOSITORY
+INPUT: separate mutated copy of cloudflare/src/index.js
+LITERAL_OUTPUT: restored preflight source hash a9fbc55de65616b85eeba995826b07f40cbaf9ad80d4c6cb795b79129ec7fc1f
+RESULT: restored pre-fix source
+EXIT_STATUS: 0; comparison exit 0
