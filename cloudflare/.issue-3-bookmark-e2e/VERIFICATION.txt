@@ -1,0 +1,52 @@
+TARGET: Issue #3 Beta bookmark lifecycle, auth error flow, and SPA route QA
+BRANCH: docs/add-repository-guidelines
+CHANGED_FIELDS: collections table; bookmarks.collection_id/tags/removed_at; /v1 collection/bookmark lifecycle routes; login form error response; Pages SPA fallback
+
+ARTIFACTS:
+MODIFIED_FILE=/Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.issue-3-bookmark-e2e/MODIFIED_FILE
+DIFF_FILE=/Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.issue-3-bookmark-e2e/DIFF_FILE
+VERIFICATION=/Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.issue-3-bookmark-e2e/VERIFICATION.txt
+ROLLBACK=/Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.issue-3-bookmark-e2e/ROLLBACK.sh
+
+BASELINE:
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" npm run test:contract
+INPUT: existing 8 contract/identity/build tests before lifecycle changes
+LITERAL_RESULT: 8 tests, 8 pass, 0 fail
+EXIT_STATUS: 0
+LIVE_RESULT: Beta Web showed collection not found; POST /v1/raindrops returned fail_fetch_status because lifecycle routes were absent
+RESTORED_BEHAVIOR_STATUS: baseline retained only signup/login/session/basic single bookmark create
+
+MODIFIED:
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" npm run test:contract
+INPUT: 9 contract/identity/build tests with lifecycle, confirmation reuse, form error, SPA route coverage
+LITERAL_RESULT: 9 tests, 9 pass, 0 fail
+EXIT_STATUS: 0
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" npx eslint --env es2021,node,browser cloudflare/src/index.js cloudflare/test/identity.test.js cloudflare/test/build-config.test.js
+INPUT: changed JavaScript files
+LITERAL_RESULT: ESLint: No issues found
+EXIT_STATUS: 0
+COMMAND: npx webpack --config build/web.js --env production --env environment=beta
+INPUT: Beta Web profile, TURNSTILE_ENABLED=false
+LITERAL_RESULT: webpack compiled successfully
+EXIT_STATUS: 0
+COMMAND: npx webpack --config build/extension.js --env production --env environment=beta --env vendor=chrome
+INPUT: Chrome Beta profile
+LITERAL_RESULT: webpack compiled successfully
+EXIT_STATUS: 0
+COMMAND: npx wrangler deploy --config cloudflare/wrangler.toml --env beta --dry-run
+INPUT: Beta Worker configuration
+LITERAL_RESULT: --dry-run: exiting now
+EXIT_STATUS: 0
+COMMAND: git diff --check
+INPUT: tracked Issue #2/#3 changes
+LITERAL_RESULT: no output
+EXIT_STATUS: 0
+LIVE_RESULT: Beta browser created, refreshed, searched, edited, moved, deleted, viewed in recycle bin, restored, logged out, rejected old session, logged in again, refreshed session; /v1/user returned verified Stanley user
+RESTORED_BEHAVIOR_STATUS: bookmark lifecycle persisted in Beta D1; QA bookmark and collections removed after verification
+
+ROLLBACK:
+COMMAND: cloudflare/.issue-3-bookmark-e2e/ROLLBACK.sh (executed in a disposable repository copy)
+INPUT: modified source, tests, redirect file, and migration file
+LITERAL_OUTPUT: ROLLBACK_TEST=restored baseline on disposable copy; exit=0
+EXIT_STATUS: 0
+RESTORED_BEHAVIOR_STATUS: disposable copy restored commit 36246ef6 versions and removed migration; working MODIFIED_FILE remains changed

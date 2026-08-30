@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import test from 'node:test'
@@ -43,4 +44,8 @@ test('Web and Chrome development profiles inject matching origins and API host p
         const generated = manifest({ vendor: 'chrome', apiOrigin: profile.apiOrigin }, { emitFile() {} })
         assert.deepEqual(JSON.parse(generated.code).host_permissions, [`${new URL(profile.apiOrigin).origin}/*`])
     }
+})
+
+test('Pages serves client-side routes through the Web entry point', () => {
+    assert.match(fs.readFileSync(new URL('../../src/assets/_redirects', import.meta.url), 'utf8'), /^\/\*\s+\/index\.html\s+200$/m)
 })

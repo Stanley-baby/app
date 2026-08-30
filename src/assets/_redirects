@@ -1,1 +1,3 @@
 /legacy/4   https://extension.raindrop.io
+/account/*  /             200
+/*          /index.html   200
