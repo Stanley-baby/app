@@ -12,6 +12,10 @@ class MemoryDatabase {
         this.tokens = []
         this.bookmarks = []
         this.collections = []
+        this.identities = []
+        this.oauthStates = []
+        this.deletions = []
+        this.collaborators = []
     }
 
     prepare(sql) {
@@ -20,15 +24,35 @@ class MemoryDatabase {
             if (sql.includes('FROM users WHERE email'))
                 return this.users.find(user => user.email === values[0]) || null
 
+            if (sql.includes('FROM users WHERE id'))
+                return this.users.find(user => user.id === values[0]) || null
+
             if (sql.includes('FROM sessions s')) {
                 const session = this.sessions.find(item => item.token_hash === values[0] && !item.revoked_at && item.expires_at > values[1])
                 if (!session) return null
                 const user = this.users.find(item => item.id === session.user_id)
-                return user && { ...session, session_id: session.id, ...user }
+                return user && {
+                    ...session,
+                    session_id: session.id,
+                    ...user,
+                    google_enabled: sql.includes('connected_identities') && this.identities.some(identity => identity.user_id === user.id && identity.provider === 'google')
+                }
             }
 
             if (sql.includes('FROM email_tokens'))
                 return this.tokens.find(token => token.token_hash === values[0] && !token.used_at && token.expires_at > values[1]) || null
+
+            if (sql.includes('FROM connected_identities'))
+                return this.identities.find(identity => identity.provider === values[0] && identity.provider_subject === values[1]) || null
+
+            if (sql.includes('FROM oauth_states'))
+                return this.oauthStates.find(state => state.state_hash === values[0] && !state.used_at && state.expires_at > values[1]) || null
+
+            if (sql.includes('FROM account_deletions'))
+                return this.deletions.find(deletion => deletion.user_id === values[0]) || null
+
+            if (sql.includes('FROM collection_collaborators'))
+                return this.collaborators.find(item => item.owner_id === values[0]) || null
 
             if (sql.includes('FROM bookmarks WHERE id'))
                 return this.bookmarks.find(item => item.id === values[0] && item.user_id === values[1]) || null
@@ -54,7 +78,15 @@ class MemoryDatabase {
         }
         const run = async () => {
             if (sql.includes('INSERT INTO users')) {
-                const user = { id: this.users.length + 1, email: values[0], name: values[1], password_hash: values[2], password_salt: values[3], email_verified_at: null }
+                const user = {
+                    id: this.users.length + 1,
+                    email: values[0],
+                    name: values[1],
+                    password_hash: values[2],
+                    password_salt: values[3],
+                    email_verified_at: sql.includes('email_verified_at') ? values[4] : null,
+                    federated_only: sql.includes('federated_only') ? 1 : 0
+                }
                 this.users.push(user)
                 return { meta: { last_row_id: user.id, changes: 1 } }
             }
@@ -75,6 +107,20 @@ class MemoryDatabase {
                 const collection = { id: this.collections.length + 1, user_id: values[0], title: values[1], parent_id: values[2], created_at: values[3], updated_at: values[4] }
                 this.collections.push(collection)
                 return { meta: { last_row_id: collection.id, changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO connected_identities')) {
+                const identity = { id: this.identities.length + 1, provider: values[0], provider_subject: values[1], user_id: values[2], email: values[3], created_at: values[4] }
+                this.identities.push(identity)
+                return { meta: { last_row_id: identity.id, changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO oauth_states')) {
+                this.oauthStates.push({ state_hash: values[0], purpose: values[1], user_id: values[2], redirect_path: values[3], admission_granted: values[4], expires_at: values[5], used_at: null })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO account_deletions')) {
+                this.deletions = this.deletions.filter(item => item.user_id !== values[0])
+                this.deletions.push({ user_id: values[0], requested_at: values[1], purge_after: values[2] })
+                return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE bookmarks SET url')) {
                 const bookmark = this.bookmarks.find(item => item.id === values[6] && item.user_id === values[7])
@@ -103,9 +149,48 @@ class MemoryDatabase {
                 for (const session of matches) session.revoked_at = values[0]
                 return { meta: { changes: matches.length } }
             }
+            if (sql.includes('UPDATE oauth_states SET used_at')) {
+                const state = this.oauthStates.find(item => item.state_hash === values[1] && !item.used_at)
+                if (!state) return { meta: { changes: 0 } }
+                state.used_at = values[0]
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('DELETE FROM connected_identities')) {
+                const before = this.identities.length
+                if (sql.includes('provider = ?')) this.identities = this.identities.filter(item => !(item.user_id === values[0] && item.provider === values[1]))
+                else this.identities = this.identities.filter(item => item.user_id !== values[0])
+                return { meta: { changes: before - this.identities.length } }
+            }
+            if (sql.includes('DELETE FROM account_deletions')) {
+                const before = this.deletions.length
+                this.deletions = this.deletions.filter(item => item.user_id !== values[0])
+                return { meta: { changes: before - this.deletions.length } }
+            }
+            if (sql.includes('DELETE FROM bookmarks')) {
+                this.bookmarks = this.bookmarks.filter(item => item.user_id !== values[0])
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('DELETE FROM collections')) {
+                this.collections = this.collections.filter(item => item.user_id !== values[0])
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('DELETE FROM email_tokens')) {
+                this.tokens = this.tokens.filter(item => item.user_id !== values[0])
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('DELETE FROM sessions')) {
+                this.sessions = this.sessions.filter(item => item.user_id !== values[0])
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('DELETE FROM users')) {
+                this.users = this.users.filter(item => item.id !== values[0])
+                return { meta: { changes: 1 } }
+            }
             return { meta: { changes: 1 } }
         }
         const all = async () => {
+            if (sql.includes('FROM account_deletions'))
+                return { results: this.deletions.filter(item => item.purge_after <= values[0]).map(item => ({ ...item })) }
             if (sql.includes('FROM sessions WHERE user_id'))
                 return {
                     results: this.sessions
@@ -288,4 +373,158 @@ test('beta signup verifies Turnstile, keeps credentials private, and creates rev
 
     const loggedOut = await worker.fetch(request('/v1/user', null, { Cookie: cookie }), env(db))
     assert.equal(loggedOut.status, 401)
+})
+
+test('Google identity conflicts stay separate, logout-all revokes every session, and deletion can be cancelled before purge', async t => {
+    const db = new MemoryDatabase()
+    const oauthEnv = {
+        ...env(db),
+        TURNSTILE_ENABLED: 'false',
+        API_ORIGIN: 'https://api.example.test',
+        GOOGLE_CLIENT_ID: 'google-client-id',
+        GOOGLE_CLIENT_SECRET: 'google-client-secret'
+    }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options = {}) => {
+        if (url === 'https://api.resend.com/emails') return Response.json({ id: 'email_1' })
+        if (url === 'https://oauth2.googleapis.com/token') {
+            assert.equal(options.method, 'POST')
+            return Response.json({ access_token: 'google-access-token' })
+        }
+        if (url === 'https://openidconnect.googleapis.com/v1/userinfo')
+            return Response.json({ sub: 'google-subject-1', email: 'google.user@example.test', email_verified: true, name: 'Google User' })
+        return originalFetch(url, options)
+    }
+    t.after(() => { globalThis.fetch = originalFetch })
+
+    const federatedDb = new MemoryDatabase()
+    const federatedEnv = { ...oauthEnv, DB: federatedDb }
+    const admitted = await worker.fetch(request('/v1/auth/google', { betaAccessPassword: 'invite-only' }), federatedEnv)
+    assert.equal(admitted.status, 200)
+    const admittedState = new URL((await admitted.json()).location).searchParams.get('state')
+    const enrolled = await worker.fetch(request(`/v1/auth/google/callback?code=google-code&state=${admittedState}`), federatedEnv)
+    assert.equal(enrolled.status, 303)
+    assert.equal(federatedDb.users.length, 1)
+    assert.equal(federatedDb.identities.length, 1)
+    assert.equal(federatedDb.users[0].email_verified_at > 0, true)
+    const federatedCookie = enrolled.headers.get('Set-Cookie').split(';')[0]
+    const csrfRejected = await worker.fetch(new Request('https://api.example.test/v1/user/connect/google/revoke', {
+        method: 'POST', headers: { Cookie: federatedCookie, Origin: 'https://attacker.example.test' }
+    }), federatedEnv)
+    assert.equal(csrfRejected.status, 403)
+    assert.equal(federatedDb.identities.length, 1)
+    const lockedIdentity = await worker.fetch(new Request('https://api.example.test/v1/user/connect/google/revoke', {
+        method: 'POST', headers: { Cookie: federatedCookie, Origin: 'https://beta.example.test' }
+    }), federatedEnv)
+    assert.equal(lockedIdentity.status, 409)
+    assert.equal(federatedDb.identities.length, 1)
+    await worker.fetch(request('/v1/auth/logout?all', null, { Cookie: federatedCookie }), federatedEnv)
+    const returning = await worker.fetch(request('/v1/auth/google'), federatedEnv)
+    const returningState = new URL(returning.headers.get('Location')).searchParams.get('state')
+    await worker.fetch(request(`/v1/auth/google/callback?code=google-code&state=${returningState}`), federatedEnv)
+    assert.equal(federatedDb.users.length, 1)
+
+    const collisionDb = new MemoryDatabase()
+    collisionDb.users.push({ id: 1, email: 'google.user@example.test', name: 'Email User' })
+    const collisionEnv = { ...oauthEnv, DB: collisionDb }
+    const collisionStart = await worker.fetch(request('/v1/auth/google', { betaAccessPassword: 'invite-only' }), collisionEnv)
+    const collisionState = new URL((await collisionStart.json()).location).searchParams.get('state')
+    const collisionLogin = await worker.fetch(request(`/v1/auth/google/callback?code=google-code&state=${collisionState}`), collisionEnv)
+    assert.match(collisionLogin.headers.get('Location'), /google_identity_conflict/)
+    assert.equal(collisionDb.identities.length, 0)
+
+    const signup = async (name, email) => {
+        const created = await worker.fetch(request('/v1/auth/email/signup', {
+            name, email, password: 'correct horse battery staple', betaAccessPassword: 'invite-only'
+        }), oauthEnv)
+        assert.equal(created.status, 201)
+        const login = await worker.fetch(request('/v1/auth/email/login', {
+            email, password: 'correct horse battery staple'
+        }), oauthEnv)
+        assert.equal(login.status, 200)
+        return login.headers.get('Set-Cookie').split(';')[0]
+    }
+
+    const firstCookie = await signup('First User', 'first.user@example.test')
+    const connect = await worker.fetch(request('/v1/user/connect/google', null, { Cookie: firstCookie }), oauthEnv)
+    assert.equal(connect.status, 302)
+    const connectState = new URL(connect.headers.get('Location')).searchParams.get('state')
+    assert.ok(connectState)
+
+    const connected = await worker.fetch(request(`/v1/auth/google/callback?code=google-code&state=${connectState}`), oauthEnv)
+    assert.equal(connected.status, 303)
+    assert.match(connected.headers.get('Location'), /settings\/account\?connected=google/)
+    assert.equal(db.identities.length, 1)
+    assert.equal(db.identities[0].user_id, 1)
+
+    const profile = await worker.fetch(request('/v1/user', null, { Cookie: firstCookie }), oauthEnv)
+    assert.deepEqual((await profile.json()).user.google, { enabled: true })
+
+    const revoked = await worker.fetch(new Request('https://api.example.test/v1/user/connect/google/revoke', {
+        method: 'POST', headers: { Cookie: firstCookie, Origin: 'https://beta.example.test' }
+    }), oauthEnv)
+    assert.equal(revoked.status, 200)
+    assert.equal(db.identities.length, 0)
+    const reconnect = await worker.fetch(request('/v1/user/connect/google', null, { Cookie: firstCookie }), oauthEnv)
+    const reconnectState = new URL(reconnect.headers.get('Location')).searchParams.get('state')
+    await worker.fetch(request(`/v1/auth/google/callback?code=google-code&state=${reconnectState}`), oauthEnv)
+    assert.equal(db.identities.length, 1)
+
+    const secondCookie = await signup('Second User', 'second.user@example.test')
+    const conflictStart = await worker.fetch(request('/v1/user/connect/google', null, { Cookie: secondCookie }), oauthEnv)
+    const conflictState = new URL(conflictStart.headers.get('Location')).searchParams.get('state')
+    const conflict = await worker.fetch(request(`/v1/auth/google/callback?code=google-code&state=${conflictState}`), oauthEnv)
+    assert.equal(conflict.status, 303)
+    assert.match(conflict.headers.get('Location'), /connect_error=conflict/)
+    assert.equal(db.identities.length, 1)
+
+    const secondFirstSession = await worker.fetch(request('/v1/auth/email/login', {
+        email: 'first.user@example.test', password: 'correct horse battery staple'
+    }), oauthEnv)
+    const secondFirstCookie = secondFirstSession.headers.get('Set-Cookie').split(';')[0]
+    const logoutAll = await worker.fetch(request('/v1/auth/logout?all', null, { Cookie: firstCookie }), oauthEnv)
+    assert.equal(logoutAll.status, 200)
+    const allRevoked = await worker.fetch(request('/v1/user', null, { Cookie: secondFirstCookie }), oauthEnv)
+    assert.equal(allRevoked.status, 401)
+
+    const googleStart = await worker.fetch(request('/v1/auth/google'), oauthEnv)
+    const googleState = new URL(googleStart.headers.get('Location')).searchParams.get('state')
+    const googleLogin = await worker.fetch(request(`/v1/auth/google/callback?code=google-code&state=${googleState}`), oauthEnv)
+    assert.equal(googleLogin.status, 303)
+    const googleCookie = googleLogin.headers.get('Set-Cookie').split(';')[0]
+    const signedIn = await worker.fetch(request('/v1/user', null, { Cookie: googleCookie }), oauthEnv)
+    assert.equal(signedIn.status, 200)
+
+    db.collaborators.push({ owner_id: 1 })
+    const shared = await worker.fetch(request('/v1/user/deletion', {}, { Cookie: googleCookie }), oauthEnv)
+    assert.equal(shared.status, 409)
+    assert.equal((await shared.json()).error, 'shared_collections_pending')
+    db.collaborators = []
+
+    const scheduled = await worker.fetch(request('/v1/user/deletion', {}, { Cookie: googleCookie }), oauthEnv)
+    assert.equal(scheduled.status, 202)
+    assert.equal(db.deletions[0].user_id, 1)
+    const restorePage = await worker.fetch(request('/v1/user/remove', null, { Cookie: googleCookie }), oauthEnv)
+    assert.match(await restorePage.text(), /Restore account/)
+    const cancelled = await worker.fetch(new Request('https://api.example.test/v1/user/deletion', {
+        method: 'DELETE', headers: { Cookie: googleCookie }
+    }), oauthEnv)
+    assert.equal(cancelled.status, 200)
+    assert.equal(db.deletions.length, 0)
+
+    await worker.fetch(request('/v1/user/deletion', {}, { Cookie: googleCookie }), oauthEnv)
+    db.bookmarks.push({ id: 1, user_id: 1, url: 'https://example.test', title: 'Private', created_at: 1, updated_at: 1, collection_id: -1, tags: '[]', removed_at: null })
+    db.deletions[0].purge_after = Date.now() - 1
+    db.collaborators.push({ owner_id: 1 })
+    let purge
+    await worker.scheduled({}, oauthEnv, { waitUntil: promise => { purge = promise } })
+    await purge
+    assert.equal(db.users.some(user => user.id === 1), true)
+    db.collaborators = []
+    await worker.scheduled({}, oauthEnv, { waitUntil: promise => { purge = promise } })
+    await purge
+    assert.equal(db.users.some(user => user.id === 1), false)
+    assert.equal(db.sessions.some(session => session.user_id === 1), false)
+    assert.equal(db.identities.some(identity => identity.user_id === 1), false)
+    assert.equal(db.bookmarks.some(bookmark => bookmark.user_id === 1), false)
 })

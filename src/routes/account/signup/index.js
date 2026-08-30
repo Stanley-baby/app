@@ -143,6 +143,7 @@ class AccountSignup extends React.Component {
 
                     <Social 
                         {...this.props}
+                        betaAccessPassword={this.state.betaAccessPassword}
                         disabled={status == 'loading'} />
 
                     <Button

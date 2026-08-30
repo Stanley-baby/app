@@ -21,6 +21,24 @@
         },
         {
             "method": "GET",
+            "path": "/v1/auth/google",
+            "authentication": "none",
+            "responses": [302, 503]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/auth/google",
+            "authentication": "none",
+            "responses": [200, 403, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/auth/google/callback",
+            "authentication": "none",
+            "responses": [303, 503]
+        },
+        {
+            "method": "GET",
             "path": "/v1/sessions",
             "authentication": "required",
             "responses": [200, 401]
@@ -40,6 +58,36 @@
         {
             "method": "GET",
             "path": "/v1/user",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/user/connect/google",
+            "authentication": "required",
+            "responses": [302, 401, 503]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/user/connect/google/revoke",
+            "authentication": "required",
+            "responses": [200, 401, 403, 409]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/user/deletion",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/user/deletion",
+            "authentication": "required",
+            "responses": [202, 401, 409]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/user/deletion",
             "authentication": "required",
             "responses": [200, 401]
         }

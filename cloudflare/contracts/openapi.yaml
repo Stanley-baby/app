@@ -36,6 +36,22 @@ paths:
       responses:
         '200':
           description: Email verified.
+  /v1/auth/google:
+    get:
+      responses:
+        '302':
+          description: Redirect to Google consent.
+    post:
+      responses:
+        '200':
+          description: Authorize a Beta Google signup and return the consent URL.
+        '403':
+          description: Beta Access Password rejected.
+  /v1/auth/google/callback:
+    get:
+      responses:
+        '303':
+          description: Complete a Google sign-in or connection.
   /v1/sessions:
     get:
       responses:
@@ -57,3 +73,32 @@ paths:
           description: Authenticated User.
         '401':
           description: Login required.
+  /v1/user/connect/google:
+    get:
+      responses:
+        '302':
+          description: Redirect to Google consent to connect an identity.
+  /v1/user/connect/google/revoke:
+    post:
+      responses:
+        '200':
+          description: Disconnect Google from the authenticated User.
+        '403':
+          description: Browser origin is not the configured Web app.
+        '409':
+          description: Another sign-in method is required before disconnecting Google.
+  /v1/user/deletion:
+    get:
+      responses:
+        '200':
+          description: Current deletion-window status.
+    post:
+      responses:
+        '202':
+          description: Thirty-day deletion window scheduled.
+        '409':
+          description: Shared collections require explicit resolution first.
+    delete:
+      responses:
+        '200':
+          description: Scheduled deletion cancelled.

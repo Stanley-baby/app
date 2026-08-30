@@ -13,6 +13,9 @@ import { Label, Checkbox } from '~co/common/form'
 import Icon from '~co/common/icon'
 import Alert from '~co/common/alert'
 
+const vendors = process.env.RAINDROP_BUILD_ENVIRONMENT == 'production' ? ['google', 'apple'] : ['google']
+const independentService = process.env.RAINDROP_BUILD_ENVIRONMENT != 'production'
+
 function ConnectionError() {
     const { search } = useLocation()
     const { connect_error='' } = Object.fromEntries(new URLSearchParams(search))||{}
@@ -42,6 +45,16 @@ export default function SettingsProfileConnect() {
     const { pathname } = useLocation()
     const user = useSelector(state=>getUser(state))
 
+    const revokeGoogle = async () => {
+        const response = await fetch(`${API_ENDPOINT_URL}user/connect/google/revoke`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' }
+        })
+        if (response.ok) window.location.reload()
+        else window.alert((await response.json()).errorMessage)
+    }
+
     return (
         <>
             <Label>{t.s('signInSocial')}</Label>
@@ -50,14 +63,14 @@ export default function SettingsProfileConnect() {
                 <div>
                     <ConnectionError />
 
-                    {['google', 'apple'].map(key=>{
+                    {vendors.map(key=>{
                         const enabled = user[key] && user[key].enabled
 
                         return (
                             <Checkbox 
                                 key={key}
                                 checked={enabled}
-                                onChange={()=>window.location=`${API_ENDPOINT_URL}user/connect/${key}/${enabled ? 'revoke' : ''}`}
+                                onChange={()=>independentService && enabled ? revokeGoogle() : window.location=`${API_ENDPOINT_URL}user/connect/${key}/${enabled ? 'revoke' : ''}`}
                                 className={enabled ? s.enabled : s.default}>
                                 <Icon 
                                     name={key}

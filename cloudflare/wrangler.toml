@@ -4,6 +4,9 @@ main = "src/index.js"
 compatibility_date = "2025-01-01"
 workers_dev = true
 
+[triggers]
+crons = ["0 * * * *"]
+
 [vars]
 ENVIRONMENT = "local"
 VERSION = "0.1.0-local"

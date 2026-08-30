@@ -1,6 +1,8 @@
 const encoder = new TextEncoder()
 const sessionDays = 30
 const verificationHours = 24
+const googleStateMinutes = 10
+const deletionDays = 30
 const passwordIterations = 100000
 
 const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
@@ -112,7 +114,8 @@ const publicUser = user => ({
     _id: String(user.id || user.user_id),
     email: user.email,
     name: user.name,
-    email_verified: Boolean(user.email_verified_at)
+    email_verified: Boolean(user.email_verified_at),
+    ...(user.google_enabled ? { google: { enabled: true } } : {})
 })
 
 const bookmarkItem = item => ({
@@ -136,6 +139,7 @@ const collectionItem = item => ({
 
 const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
 const turnstileEnabled = env => String(env.TURNSTILE_ENABLED || '').toLowerCase() === 'true'
+const googleReady = env => Boolean(authReady(env) && env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.API_ORIGIN)
 
 const configurationError = (request, env) =>
     error('auth_configuration_missing', 503, request, env, 'Authentication is not configured')
@@ -157,7 +161,11 @@ const getSession = async (request, env) => {
     if (!token || !authReady(env)) return null
 
     const now = Date.now()
-    const session = await env.DB.prepare('SELECT s.id AS session_id, s.user_id, s.device_name, s.created_at, s.last_seen_at, s.expires_at, u.id, u.email, u.name, u.email_verified_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?')
+    const session = await env.DB.prepare(`SELECT s.id AS session_id, s.user_id, s.device_name, s.created_at, s.last_seen_at, s.expires_at,
+        u.id, u.email, u.name, u.email_verified_at,
+        u.federated_only,
+        EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'google') AS google_enabled
+        FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?`)
         .bind(await hmac(token, env.SESSION_SECRET), now).first()
 
     if (!session) return null
@@ -236,6 +244,105 @@ const redirect = (request, env, location, token) => {
     return new Response(null, { status: 303, headers })
 }
 
+const appRedirect = (request, env, path, token) => {
+    const headers = new Headers({
+        Location: new URL(path, env.APP_ORIGIN).toString(),
+        'X-Request-ID': requestId(request)
+    })
+    if (token) headers.set('Set-Cookie', sessionCookie(token))
+    return new Response(null, { status: 303, headers })
+}
+
+const googleCallbackUrl = env => new URL('/v1/auth/google/callback', env.API_ORIGIN).toString()
+
+const appPath = (env, value, fallback = '/') => {
+    try {
+        const appOrigin = new URL(env.APP_ORIGIN)
+        const target = new URL(value || fallback, appOrigin)
+        return target.origin === appOrigin.origin ? target.pathname + target.search + target.hash : fallback
+    } catch {
+        return fallback
+    }
+}
+
+const createGoogleState = async (env, purpose, userId, redirectPath = '/', admissionGranted = false) => {
+    const state = randomToken(32)
+    await env.DB.prepare('INSERT INTO oauth_states (state_hash, purpose, user_id, redirect_path, admission_granted, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .bind(await hmac(state, env.SESSION_SECRET), purpose, userId || null, redirectPath, admissionGranted ? 1 : 0, Date.now() + googleStateMinutes * 60 * 1000).run()
+    return state
+}
+
+const googleAuthorization = (env, state) => {
+    const url = new URL('https://accounts.google.com/o/oauth2/v2/auth')
+    url.search = new URLSearchParams({
+        client_id: env.GOOGLE_CLIENT_ID,
+        redirect_uri: googleCallbackUrl(env),
+        response_type: 'code',
+        scope: 'openid email profile',
+        state,
+        prompt: 'select_account'
+    }).toString()
+    return url.toString()
+}
+
+const googleProfile = async (env, code) => {
+    try {
+        const response = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                code,
+                client_id: env.GOOGLE_CLIENT_ID,
+                client_secret: env.GOOGLE_CLIENT_SECRET,
+                redirect_uri: googleCallbackUrl(env),
+                grant_type: 'authorization_code'
+            })
+        })
+        if (!response.ok) return null
+        const token = await response.json()
+        if (!token.access_token) return null
+
+        const profile = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+            headers: { Authorization: 'Bearer ' + token.access_token }
+        })
+        if (!profile.ok) return null
+        const data = await profile.json()
+        if (!data.sub || !validEmail(String(data.email || '')) || data.email_verified !== true) return null
+        return { subject: String(data.sub), email: String(data.email).toLowerCase(), name: String(data.name || data.email).slice(0, 100) }
+    } catch {
+        return null
+    }
+}
+
+const hasSharedCollections = (env, userId) => env.DB.prepare(`SELECT 1 FROM collection_collaborators cc
+    JOIN collections c ON c.id = cc.collection_id
+    WHERE c.user_id = ? AND cc.user_id != ? LIMIT 1`).bind(userId, userId).first()
+
+const deleteUserData = async (env, userId) => {
+    const statements = [
+        env.DB.prepare('DELETE FROM email_tokens WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM connected_identities WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM oauth_states WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM collection_collaborators WHERE collection_id IN (SELECT id FROM collections WHERE user_id = ?) OR user_id = ?').bind(userId, userId),
+        env.DB.prepare('DELETE FROM bookmarks WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM collections WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM account_deletions WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId)
+    ]
+    if (env.DB.batch) return env.DB.batch(statements)
+    for (const statement of statements) await statement.run()
+}
+
+const purgeExpiredDeletions = async env => {
+    if (!env.DB) return
+    const expired = await env.DB.prepare('SELECT user_id FROM account_deletions WHERE purge_after <= ?').bind(Date.now()).all()
+    for (const { user_id: userId } of expired.results) {
+        if (!await hasSharedCollections(env, userId))
+            await deleteUserData(env, userId)
+    }
+}
+
 const loginErrorPage = (request, env, message) => new Response(`<!doctype html><meta charset="utf-8"><title>Login failed</title><main><h1>Login failed</h1><p>${message}</p><p><a href="${env.APP_ORIGIN}/">Return to login</a></p></main>`, {
     status: 401,
     headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Request-ID': requestId(request) }
@@ -255,6 +362,64 @@ export default {
 
         if (url.pathname === '/version')
             return json({ result: true, environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
+
+        if (url.pathname === '/v1/auth/google' && request.method === 'GET') {
+            if (!googleReady(env)) return configurationError(request, env)
+            const state = await createGoogleState(env, 'login', null, appPath(env, url.searchParams.get('redirect')))
+            return new Response(null, { status: 302, headers: { Location: googleAuthorization(env, state), 'X-Request-ID': requestId(request) } })
+        }
+
+        if (url.pathname === '/v1/auth/google' && request.method === 'POST') {
+            if (!googleReady(env)) return configurationError(request, env)
+            const { data } = await readBody(request)
+            const admitted = env.ENVIRONMENT !== 'beta' || Boolean(env.BETA_ACCESS_PASSWORD && equal(data.betaAccessPassword, env.BETA_ACCESS_PASSWORD))
+            if (!admitted)
+                return error('beta_access_denied', 403, request, env, 'Beta access password is invalid')
+            const state = await createGoogleState(env, 'login', null, appPath(env, data.redirect), true)
+            return json({ result: true, location: googleAuthorization(env, state) }, 200, request, env)
+        }
+
+        if (url.pathname === '/v1/auth/google/callback' && request.method === 'GET') {
+            if (!googleReady(env)) return configurationError(request, env)
+            const stateHash = await hmac(String(url.searchParams.get('state') || ''), env.SESSION_SECRET)
+            const state = await env.DB.prepare('SELECT purpose, user_id, redirect_path, admission_granted FROM oauth_states WHERE state_hash = ? AND used_at IS NULL AND expires_at > ?')
+                .bind(stateHash, Date.now()).first()
+            if (!state || !url.searchParams.get('code'))
+                return appRedirect(request, env, '/account/login?error=google_sign_in_failed')
+
+            await env.DB.prepare('UPDATE oauth_states SET used_at = ? WHERE state_hash = ?').bind(Date.now(), stateHash).run()
+            const profile = await googleProfile(env, url.searchParams.get('code'))
+            if (!profile)
+                return appRedirect(request, env, state.purpose === 'connect' ? '/settings/account?connect_error=google_sign_in_failed' : '/account/login?error=google_sign_in_failed')
+
+            let identity = await env.DB.prepare('SELECT user_id FROM connected_identities WHERE provider = ? AND provider_subject = ?')
+                .bind('google', profile.subject).first()
+            if (state.purpose === 'connect') {
+                if (identity && identity.user_id !== state.user_id)
+                    return appRedirect(request, env, '/settings/account?connect_error=conflict')
+                if (!identity)
+                    await env.DB.prepare('INSERT INTO connected_identities (provider, provider_subject, user_id, email, created_at) VALUES (?, ?, ?, ?, ?)')
+                        .bind('google', profile.subject, state.user_id, profile.email, Date.now()).run()
+                return appRedirect(request, env, '/settings/account?connected=google')
+            }
+
+            if (!identity) {
+                if (env.ENVIRONMENT === 'beta' && !state.admission_granted)
+                    return appRedirect(request, env, '/account/signup?error=beta_access_required')
+                const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(profile.email).first()
+                if (existing)
+                    return appRedirect(request, env, '/account/login?error=google_identity_conflict')
+                const salt = new Uint8Array(16)
+                crypto.getRandomValues(salt)
+                const inserted = await env.DB.prepare('INSERT INTO users (email, name, password_hash, password_salt, email_verified_at, created_at, federated_only) VALUES (?, ?, ?, ?, ?, ?, 1)')
+                    .bind(profile.email, profile.name, await passwordHash(randomToken(32), salt), bytesToBase64url(salt), Date.now(), Date.now()).run()
+                identity = { user_id: Number(inserted.meta.last_row_id) }
+                await env.DB.prepare('INSERT INTO connected_identities (provider, provider_subject, user_id, email, created_at) VALUES (?, ?, ?, ?, ?)')
+                    .bind('google', profile.subject, identity.user_id, profile.email, Date.now()).run()
+            }
+            const session = await createSession(request, env, identity.user_id)
+            return appRedirect(request, env, state.redirect_path || '/', session.token)
+        }
 
         if (url.pathname === '/v1/auth/email/signup' && request.method === 'POST') {
             if (!authReady(env)) return configurationError(request, env)
@@ -357,6 +522,52 @@ export default {
 
             if (requiresVerification(url.pathname) && !session.email_verified_at)
                 return error('email_verification_required', 403, request, env, 'Confirm your email before this action')
+
+            if (url.pathname === '/v1/user/connect/google' && request.method === 'GET') {
+                if (!googleReady(env)) return configurationError(request, env)
+                const state = await createGoogleState(env, 'connect', session.user_id, '/settings/account')
+                return new Response(null, { status: 302, headers: { Location: googleAuthorization(env, state), 'X-Request-ID': requestId(request) } })
+            }
+
+            if (url.pathname === '/v1/user/connect/google/revoke' && request.method === 'POST') {
+                if (request.headers.get('Origin') !== env.APP_ORIGIN)
+                    return error('origin_not_allowed', 403, request, env, 'Use the Web app to disconnect Google')
+                if (session.federated_only)
+                    return error('alternative_sign_in_required', 409, request, env, 'Set an email password before disconnecting Google')
+                await env.DB.prepare('DELETE FROM connected_identities WHERE user_id = ? AND provider = ?').bind(session.user_id, 'google').run()
+                return json({ result: true }, 200, request, env)
+            }
+
+            if (url.pathname === '/v1/user/remove' && request.method === 'GET') {
+                const action = new URL('/v1/user/deletion', env.API_ORIGIN || request.url).toString()
+                const deletion = await env.DB.prepare('SELECT requested_at, purge_after FROM account_deletions WHERE user_id = ?').bind(session.user_id).first()
+                const scheduled = Boolean(deletion)
+                const date = scheduled ? new Date(deletion.purge_after).toISOString() : ''
+                return new Response(`<!doctype html><meta charset="utf-8"><title>${scheduled ? 'Restore account' : 'Schedule account deletion'}</title><main><h1>${scheduled ? 'Restore account' : 'Schedule account deletion'}</h1><p>${scheduled ? 'Deletion is scheduled for ' + date + '.' : 'Your account can be restored for 30 days.'}</p><button>${scheduled ? 'Restore account' : 'Schedule deletion'}</button><p id="result"></p><script>document.querySelector('button').onclick=async()=>{const r=await fetch('${action}',{method:'${scheduled ? 'DELETE' : 'POST'}',credentials:'include'});document.querySelector('#result').textContent=r.ok?'Done.':'Request failed.';if(r.ok)setTimeout(()=>location.reload(),500)}</script></main>`, {
+                    headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Request-ID': requestId(request) }
+                })
+            }
+
+            if (url.pathname === '/v1/user/deletion') {
+                if (request.method === 'GET') {
+                    const deletion = await env.DB.prepare('SELECT requested_at, purge_after FROM account_deletions WHERE user_id = ?').bind(session.user_id).first()
+                    return json({ result: true, deletion: deletion || null }, 200, request, env)
+                }
+                if (request.method === 'POST') {
+                    const shared = await hasSharedCollections(env, session.user_id)
+                    if (shared)
+                        return error('shared_collections_pending', 409, request, env, 'Transfer or remove collaborators from shared collections before deletion')
+                    const requestedAt = Date.now()
+                    const purgeAfter = requestedAt + deletionDays * 86400 * 1000
+                    await env.DB.prepare('INSERT INTO account_deletions (user_id, requested_at, purge_after) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET requested_at = excluded.requested_at, purge_after = excluded.purge_after')
+                        .bind(session.user_id, requestedAt, purgeAfter).run()
+                    return json({ result: true, purge_after: purgeAfter }, 202, request, env)
+                }
+                if (request.method === 'DELETE') {
+                    const result = await env.DB.prepare('DELETE FROM account_deletions WHERE user_id = ?').bind(session.user_id).run()
+                    return json({ result: true, cancelled: Boolean(result.meta.changes) }, 200, request, env)
+                }
+            }
 
             if (url.pathname === '/v1/user' && request.method === 'GET')
                 return json({ result: true, user: publicUser(session) }, 200, request, env)
@@ -540,5 +751,9 @@ export default {
         }
 
         return error('not_found', 404, request, env)
+    },
+
+    async scheduled(controller, env, ctx) {
+        ctx.waitUntil(purgeExpiredDeletions(env))
     }
 }

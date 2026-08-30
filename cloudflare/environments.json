@@ -26,7 +26,9 @@
             "ENCRYPTION_KEY",
             "TURNSTILE_SECRET_KEY",
             "RESEND_API_KEY",
-            "MAIL_FROM"
+            "MAIL_FROM",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET"
         ]
     },
     "preview": {
@@ -54,7 +56,9 @@
             "ENCRYPTION_KEY",
             "TURNSTILE_SECRET_KEY",
             "RESEND_API_KEY",
-            "MAIL_FROM"
+            "MAIL_FROM",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET"
         ]
     },
     "beta": {
@@ -82,7 +86,9 @@
             "ENCRYPTION_KEY",
             "TURNSTILE_SECRET_KEY",
             "RESEND_API_KEY",
-            "MAIL_FROM"
+            "MAIL_FROM",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET"
         ]
     },
     "production": {
@@ -110,7 +116,9 @@
             "ENCRYPTION_KEY",
             "TURNSTILE_SECRET_KEY",
             "RESEND_API_KEY",
-            "MAIL_FROM"
+            "MAIL_FROM",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET"
         ]
     }
 }
