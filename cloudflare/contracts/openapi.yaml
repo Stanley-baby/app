@@ -183,13 +183,19 @@ paths:
               properties:
                 tag:
                   type: string
+                  minLength: 1
+                  maxLength: 100
                 replace:
                   type: string
+                  minLength: 1
+                  maxLength: 100
       responses:
         '200':
           description: Tag renamed on the User's active Bookmarks.
         '400':
           description: Invalid Tag name.
+        '409':
+          description: Tag update conflicted with a concurrent Bookmark change.
         '401':
           description: Login required.
   /v1/tag:
@@ -200,11 +206,15 @@ paths:
           required: true
           schema:
             type: string
+            minLength: 1
+            maxLength: 100
       responses:
         '200':
           description: Tag removed from the User's active Bookmarks.
         '400':
           description: Invalid Tag name.
+        '409':
+          description: Tag update conflicted with a concurrent Bookmark change.
         '401':
           description: Login required.
   /v1/filters/{collectionId}:
@@ -224,6 +234,28 @@ paths:
           description: Collection not found for this User.
   /v1/raindrop:
     post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [link]
+              properties:
+                link:
+                  type: string
+                  format: uri
+                title:
+                  type: string
+                  maxLength: 500
+                collectionId:
+                  type: integer
+                  minimum: -1
+                tags:
+                  type: array
+                  items:
+                    type: string
+                    maxLength: 100
       responses:
         '201':
           description: Basic Bookmark created for the signed-in User.
@@ -335,6 +367,35 @@ paths:
           description: Bookmark not found for this User.
   /v1/raindrops:
     post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [link]
+                    properties:
+                      link:
+                        type: string
+                        format: uri
+                      title:
+                        type: string
+                        maxLength: 500
+                      collectionId:
+                        type: integer
+                        minimum: -1
+                      tags:
+                        type: array
+                        items:
+                          type: string
+                          maxLength: 100
       responses:
         '201':
           description: Multiple Bookmarks created with one Change Version per item.

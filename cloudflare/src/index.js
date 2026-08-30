@@ -132,6 +132,8 @@ const tagValue = value => String(value || '').trim()
 
 const bookmarkTags = value => [...new Set(arrayValue(value).map(tagValue).filter(Boolean))]
 
+const validTagList = value => Array.isArray(value) && value.every(tag => tagValue(tag).length <= 100)
+
 const highlightId = value => {
     const id = Number(value)
     return Number.isSafeInteger(id) && id > 0 ? id : null
@@ -300,9 +302,28 @@ const tagItems = async (env, userId, collectionId=0, search='', sort='') => {
 }
 
 const runStatements = async (env, statements) => {
-    if (!statements.length) return
+    if (!statements.length) return []
     if (env.DB.batch) return env.DB.batch(statements)
-    for (const statement of statements) await statement.run()
+    const results = []
+    for (const statement of statements) results.push(await statement.run())
+    return results
+}
+
+const mutateBookmarkTags = async (env, userId, transform) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const rows = await env.DB.prepare('SELECT id, tags, change_version FROM bookmarks WHERE user_id = ? AND removed_at IS NULL').bind(userId).all()
+        const now = Date.now()
+        const statements = []
+        for (const row of rows.results || []) {
+            const updated = transform(bookmarkTags(row.tags))
+            if (!updated) continue
+            statements.push(env.DB.prepare('UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ? AND change_version = ?')
+                .bind(JSON.stringify(updated), now, row.id, userId, Number(row.change_version || 0)))
+        }
+        const results = await runStatements(env, statements)
+        if (results.every(result => Number(result?.meta?.changes ?? 0) === 1)) return true
+    }
+    return false
 }
 
 const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
@@ -849,6 +870,8 @@ export default {
                     const title = String(input.title || '').trim()
                     if (!['http:', 'https:'].includes((() => { try { return new URL(link).protocol } catch { return '' } })()))
                         return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL')
+                    if (input.tags !== undefined && !validTagList(input.tags))
+                        return error('validation_failed', 400, request, env, 'Bookmark tags must be 100 characters or fewer')
                     const now = Date.now()
                     const collectionId = input.collectionId === undefined ? -1 : parseBookmarkCollectionId(input.collectionId)
                     if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
@@ -875,6 +898,8 @@ export default {
                 }
                 if (!['http:', 'https:'].includes(protocol) || title.length > 500)
                     return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL and a title under 500 characters')
+                if (data.tags !== undefined && !validTagList(data.tags))
+                    return error('validation_failed', 400, request, env, 'Bookmark tags must be 100 characters or fewer')
 
                 const now = Date.now()
                 const collectionId = data.collectionId === undefined ? -1 : parseBookmarkCollectionId(data.collectionId)
@@ -931,6 +956,8 @@ export default {
                     }
                     if (!['http:', 'https:'].includes(protocol) || title.length > 500)
                         return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL and a title under 500 characters')
+                    if (data.tags !== undefined && !validTagList(data.tags))
+                        return error('validation_failed', 400, request, env, 'Bookmark tags must be 100 characters or fewer')
                     if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
                         return error('collection_not_found', 404, request, env)
                     if (!validHighlightChanges(highlights))
@@ -968,16 +995,9 @@ export default {
                 const replacement = tagValue(data.replace)
                 if (!tag || !replacement || tag.length > 100 || replacement.length > 100)
                     return error('validation_failed', 400, request, env, 'Tag names must be between 1 and 100 characters')
-                const rows = await env.DB.prepare('SELECT id, tags FROM bookmarks WHERE user_id = ? AND removed_at IS NULL').bind(session.user_id).all()
-                const statements = []
-                for (const row of rows.results || []) {
-                    const tags = bookmarkTags(row.tags)
-                    if (!tags.includes(tag)) continue
-                    const updated = [...new Set(tags.map(value => value === tag ? replacement : value))]
-                    statements.push(env.DB.prepare('UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(JSON.stringify(updated), Date.now(), row.id, session.user_id))
-                }
-                await runStatements(env, statements)
+                const updated = await mutateBookmarkTags(env, session.user_id, tags =>
+                    tags.includes(tag) ? [...new Set(tags.map(value => value === tag ? replacement : value))] : null)
+                if (!updated) return error('conflict', 409, request, env, 'Tag update conflicted; retry the request')
                 return json({ result: true }, 200, request, env)
             }
 
@@ -985,15 +1005,9 @@ export default {
                 const tag = tagValue(url.searchParams.get('tag'))
                 if (!tag || tag.length > 100)
                     return error('validation_failed', 400, request, env, 'Tag name must be between 1 and 100 characters')
-                const rows = await env.DB.prepare('SELECT id, tags FROM bookmarks WHERE user_id = ? AND removed_at IS NULL').bind(session.user_id).all()
-                const statements = []
-                for (const row of rows.results || []) {
-                    const tags = bookmarkTags(row.tags)
-                    if (!tags.includes(tag)) continue
-                    statements.push(env.DB.prepare('UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(JSON.stringify(tags.filter(value => value !== tag)), Date.now(), row.id, session.user_id))
-                }
-                await runStatements(env, statements)
+                const updated = await mutateBookmarkTags(env, session.user_id, tags =>
+                    tags.includes(tag) ? tags.filter(value => value !== tag) : null)
+                if (!updated) return error('conflict', 409, request, env, 'Tag update conflicted; retry the request')
                 return json({ result: true }, 200, request, env)
             }
 

@@ -83,13 +83,13 @@
             "method": "PUT",
             "path": "/v1/tags/0",
             "authentication": "required",
-            "responses": [200, 400, 401]
+            "responses": [200, 400, 401, 409]
         },
         {
             "method": "DELETE",
             "path": "/v1/tag",
             "authentication": "required",
-            "responses": [200, 400, 401]
+            "responses": [200, 400, 401, 409]
         },
         {
             "method": "GET",

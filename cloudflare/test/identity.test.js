@@ -18,6 +18,9 @@ class MemoryDatabase {
         this.collaborators = []
         this.changes = []
         this.nextChangeVersion = 1
+        this.batchCalls = 0
+        this.beforeBatch = null
+        this.failBatchAt = null
     }
 
     prepare(sql) {
@@ -142,6 +145,8 @@ class MemoryDatabase {
             }
             if (sql.includes('UPDATE bookmarks SET tags')) {
                 const bookmark = this.bookmarks.find(item => item.id === values[2] && item.user_id === values[3])
+                if (sql.includes('change_version = ?') && (!bookmark || bookmark.change_version !== values[4]))
+                    return { meta: { changes: 0 } }
                 Object.assign(bookmark, { tags: values[0], updated_at: values[1], change_version: this.nextChangeVersion })
                 this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { changes: 1 } }
@@ -241,7 +246,50 @@ class MemoryDatabase {
             }
         }
     }
+
+    async batch(statements) {
+        this.batchCalls++
+        if (this.beforeBatch) {
+            const beforeBatch = this.beforeBatch
+            this.beforeBatch = null
+            await beforeBatch()
+        }
+        const snapshot = {
+            bookmarks: this.bookmarks.map(item => ({ ...item })),
+            changes: this.changes.map(item => ({ ...item })),
+            nextChangeVersion: this.nextChangeVersion
+        }
+        try {
+            const results = []
+            for (const [index, statement] of statements.entries()) {
+                if (index === this.failBatchAt) throw new Error('forced batch failure')
+                results.push(await statement.run())
+            }
+            return results
+        } catch (error) {
+            this.bookmarks = snapshot.bookmarks
+            this.changes = snapshot.changes
+            this.nextChangeVersion = snapshot.nextChangeVersion
+            throw error
+        }
+    }
 }
+
+test('D1 batch mutations roll back all writes on failure', async () => {
+    const db = new MemoryDatabase()
+    db.bookmarks.push({ id: 1, user_id: 1, tags: '[]', updated_at: 1, change_version: 1 })
+    const update = 'UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ? AND change_version = ?'
+    const first = db.prepare(update).bind('["first"]', 2, 1, 1, 1)
+    const failing = db.prepare(update).bind('["second"]', 2, 2, 1, 1)
+    db.failBatchAt = 1
+
+    await assert.rejects(() => db.batch([first, failing]))
+    assert.equal(db.batchCalls, 1)
+    assert.equal(db.bookmarks[0].tags, '[]')
+    assert.equal(db.bookmarks[0].change_version, 1)
+    assert.equal(db.changes.length, 0)
+    assert.equal(db.nextChangeVersion, 1)
+})
 
 const request = (path, body, headers = {}) => new Request(`https://api.example.test${path}`, {
     method: body ? 'POST' : 'GET',
@@ -670,6 +718,11 @@ test('nested collections, bookmark moves, tags, and highlights stay user-scoped'
         assert.equal(bookmark.collectionId, Number(child._id))
         assert.deepEqual(bookmark.tags, ['alpha', 'beta'])
 
+        const invalidTags = await worker.fetch(request('/v1/raindrop', {
+            link: 'https://example.com/invalid-tags', title: 'Invalid tags', tags: ['x'.repeat(101)]
+        }, { Cookie: cookie }), testEnv)
+        assert.equal(invalidTags.status, 400)
+
         const moved = await worker.fetch(new Request('https://api.example.test/v1/raindrop/' + bookmark._id, {
             method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
             body: JSON.stringify({ collectionId: Number(root._id) })
@@ -683,6 +736,12 @@ test('nested collections, bookmark moves, tags, and highlights stay user-scoped'
         const recentTags = await worker.fetch(request('/v1/tags/recent', null, { Cookie: cookie }), testEnv)
         assert.equal((await recentTags.json()).items[0]._id, 'alpha')
 
+        db.beforeBatch = async () => {
+            const current = db.bookmarks.find(item => item.id === bookmark._id)
+            current.tags = JSON.stringify(['alpha', 'beta', 'concurrent'])
+            current.change_version = db.nextChangeVersion
+            db.changes.push({ version: db.nextChangeVersion++, user_id: current.user_id, bookmark_id: current.id, changed_at: current.updated_at })
+        }
         const renamed = await worker.fetch(new Request('https://api.example.test/v1/tags/0', {
             method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
             body: JSON.stringify({ tag: 'alpha', replace: 'renamed' })
@@ -693,9 +752,10 @@ test('nested collections, bookmark moves, tags, and highlights stay user-scoped'
             method: 'DELETE', headers: { Cookie: cookie }
         }), testEnv)
         assert.equal(removedTag.status, 200)
+        assert.equal(db.batchCalls, 3)
 
         const afterTags = await worker.fetch(request('/v1/raindrop/' + bookmark._id, null, { Cookie: cookie }), testEnv)
-        assert.deepEqual((await afterTags.json()).item.tags, ['renamed'])
+        assert.deepEqual((await afterTags.json()).item.tags, ['renamed', 'concurrent'])
 
         const addedHighlight = await worker.fetch(new Request('https://api.example.test/v1/raindrop/' + bookmark._id, {
             method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
