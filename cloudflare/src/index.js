@@ -186,7 +186,7 @@ const validHighlightChanges = changes => Array.isArray(changes) && changes.every
 const bookmarkItem = item => {
     const changeVersion = Number(item.change_version || 0)
     return {
-        _id: String(item.id),
+        _id: Number(item.id),
         link: item.url,
         title: item.title,
         collectionId: item.removed_at ? -99 : item.collection_id,
@@ -228,7 +228,7 @@ const changedBookmarks = async (env, userId, since) => {
 }
 
 const collectionItem = item => ({
-    _id: String(item.id),
+    _id: Number(item.id),
     title: item.title,
     parentId: item.parent_id,
     count: Number(item.count || 0),
@@ -297,6 +297,12 @@ const tagItems = async (env, userId, collectionId=0, search='', sort='') => {
     else items.sort((left, right) => left._id.localeCompare(right._id))
 
     return items.map(({ _id, count }) => ({ _id, count }))
+}
+
+const runStatements = async (env, statements) => {
+    if (!statements.length) return
+    if (env.DB.batch) return env.DB.batch(statements)
+    for (const statement of statements) await statement.run()
 }
 
 const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
@@ -797,38 +803,6 @@ export default {
                         .bind(title, parentId || null, Date.now(), collectionId, session.user_id).run()
                     return json({ result: true, item: collectionItem({ ...existing, title, parent_id: parentId || null }) }, 200, request, env)
                 }
-                if (request.method === 'DELETE') {
-                    if (collectionId === -99) {
-                        const removed = await env.DB.prepare('SELECT id FROM bookmarks WHERE user_id = ? AND removed_at IS NOT NULL').bind(session.user_id).all()
-                        await env.DB.prepare('DELETE FROM bookmark_changes WHERE user_id = ? AND bookmark_id IN (SELECT id FROM bookmarks WHERE user_id = ? AND removed_at IS NOT NULL)').bind(session.user_id, session.user_id).run()
-                        await env.DB.prepare('DELETE FROM bookmarks WHERE user_id = ? AND removed_at IS NOT NULL').bind(session.user_id).run()
-                        return json({ result: true, count: (removed.results || []).length }, 200, request, env)
-                    }
-
-                    if (collectionId <= 0)
-                        return error('collection_not_found', 404, request, env)
-                    if (!await collectionOwned(env, session.user_id, collectionId))
-                        return error('collection_not_found', 404, request, env)
-                    const collections = await env.DB.prepare('SELECT id, parent_id FROM collections WHERE user_id = ?').bind(session.user_id).all()
-                    const ids = new Set([collectionId])
-                    let changed = true
-                    while (changed) {
-                        changed = false
-                        for (const item of collections.results || [])
-                            if (ids.has(Number(item.parent_id)) && !ids.has(item.id)) {
-                                ids.add(item.id)
-                                changed = true
-                            }
-                    }
-                    const placeholders = [...ids].map(() => '?').join(',')
-                    const values = [...ids]
-                    const now = Date.now()
-                    await env.DB.prepare(`UPDATE bookmarks SET collection_id = -1, updated_at = ? WHERE user_id = ? AND collection_id IN (${placeholders})`)
-                        .bind(now, session.user_id, ...values).run()
-                    await env.DB.prepare(`DELETE FROM collection_collaborators WHERE collection_id IN (${placeholders})`).bind(...values).run()
-                    await env.DB.prepare(`DELETE FROM collections WHERE user_id = ? AND id IN (${placeholders})`).bind(session.user_id, ...values).run()
-                    return json({ result: true, count: ids.size }, 200, request, env)
-                }
             }
 
             const listMatch = url.pathname.match(/^\/v1\/raindrops\/(-?\d+)$/)
@@ -995,13 +969,15 @@ export default {
                 if (!tag || !replacement || tag.length > 100 || replacement.length > 100)
                     return error('validation_failed', 400, request, env, 'Tag names must be between 1 and 100 characters')
                 const rows = await env.DB.prepare('SELECT id, tags FROM bookmarks WHERE user_id = ? AND removed_at IS NULL').bind(session.user_id).all()
+                const statements = []
                 for (const row of rows.results || []) {
                     const tags = bookmarkTags(row.tags)
                     if (!tags.includes(tag)) continue
                     const updated = [...new Set(tags.map(value => value === tag ? replacement : value))]
-                    await env.DB.prepare('UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(JSON.stringify(updated), Date.now(), row.id, session.user_id).run()
+                    statements.push(env.DB.prepare('UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(JSON.stringify(updated), Date.now(), row.id, session.user_id))
                 }
+                await runStatements(env, statements)
                 return json({ result: true }, 200, request, env)
             }
 
@@ -1010,12 +986,14 @@ export default {
                 if (!tag || tag.length > 100)
                     return error('validation_failed', 400, request, env, 'Tag name must be between 1 and 100 characters')
                 const rows = await env.DB.prepare('SELECT id, tags FROM bookmarks WHERE user_id = ? AND removed_at IS NULL').bind(session.user_id).all()
+                const statements = []
                 for (const row of rows.results || []) {
                     const tags = bookmarkTags(row.tags)
                     if (!tags.includes(tag)) continue
-                    await env.DB.prepare('UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(JSON.stringify(tags.filter(value => value !== tag)), Date.now(), row.id, session.user_id).run()
+                    statements.push(env.DB.prepare('UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(JSON.stringify(tags.filter(value => value !== tag)), Date.now(), row.id, session.user_id))
                 }
+                await runStatements(env, statements)
                 return json({ result: true }, 200, request, env)
             }
 

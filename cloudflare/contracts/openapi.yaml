@@ -78,8 +78,13 @@ paths:
               properties:
                 title:
                   type: string
+                  maxLength: 200
                 parentId:
-                  type: integer
+                  oneOf:
+                    - type: integer
+                      minimum: 0
+                    - type: string
+                      enum: [root]
                   nullable: true
       responses:
         '201':
@@ -106,6 +111,23 @@ paths:
         '404':
           description: Collection not found for this User.
     put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  maxLength: 200
+                parentId:
+                  oneOf:
+                    - type: integer
+                      minimum: 0
+                    - type: string
+                      enum: [root]
+                  nullable: true
       responses:
         '200':
           description: Collection title or parent updated.
@@ -115,14 +137,6 @@ paths:
           description: Login required.
         '404':
           description: Collection or parent not found for this User.
-    delete:
-      responses:
-        '200':
-          description: Collection and descendants removed; contained Bookmarks become unsorted.
-        '401':
-          description: Login required.
-        '404':
-          description: Collection not found for this User.
   /v1/tags/{collectionId}:
     parameters:
       - in: path
@@ -231,6 +245,47 @@ paths:
         '404':
           description: Bookmark not found for this User.
     put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                link:
+                  type: string
+                  format: uri
+                title:
+                  type: string
+                  maxLength: 500
+                collectionId:
+                  type: integer
+                  minimum: -1
+                tags:
+                  type: array
+                  items:
+                    type: string
+                    maxLength: 100
+                highlights:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      _id:
+                        type: integer
+                        minimum: 1
+                      text:
+                        type: string
+                        maxLength: 10000
+                      note:
+                        type: string
+                        maxLength: 10000
+                      color:
+                        type: string
+                        enum: [yellow, blue, green, red]
+                      position: {}
+                removed:
+                  type: boolean
       responses:
         '200':
           description: Bookmark updated with the winning Change Version.

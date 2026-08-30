@@ -642,8 +642,7 @@ test('nested collections, bookmark moves, tags, and highlights stay user-scoped'
         const rootResponse = await worker.fetch(request('/v1/collection', { title: 'Parent Collection' }, { Cookie: cookie }), testEnv)
         assert.equal(rootResponse.status, 201)
         const root = (await rootResponse.json()).item
-        assert.equal(typeof root._id, 'string')
-        assert.equal(Number.isInteger(Number(root._id)), true)
+        assert.equal(Number.isSafeInteger(root._id), true)
 
         const childResponse = await worker.fetch(request('/v1/collection', { title: 'Nested Collection', parentId: Number(root._id) }, { Cookie: cookie }), testEnv)
         assert.equal(childResponse.status, 201)
@@ -667,6 +666,7 @@ test('nested collections, bookmark moves, tags, and highlights stay user-scoped'
         }, { Cookie: cookie }), testEnv)
         assert.equal(bookmarkResponse.status, 201)
         const bookmark = (await bookmarkResponse.json()).item
+        assert.equal(Number.isSafeInteger(bookmark._id), true)
         assert.equal(bookmark.collectionId, Number(child._id))
         assert.deepEqual(bookmark.tags, ['alpha', 'beta'])
 

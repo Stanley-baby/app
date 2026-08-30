@@ -43,7 +43,7 @@ function* removeTag({tagName, ignore=false, onSuccess, onFail}) {
 		return;
 
 	try{
-		const {result} = yield call(Api.del, 'tag?tag='+tagName)
+		const {result} = yield call(Api.del, 'tag?tag='+encodeURIComponent(tagName))
 		if (!result)
 			throw new Error('cant remove tag')
 

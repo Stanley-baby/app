@@ -68,12 +68,6 @@
             "responses": [200, 400, 401, 404]
         },
         {
-            "method": "DELETE",
-            "path": "/v1/collection/:id",
-            "authentication": "required",
-            "responses": [200, 401, 404]
-        },
-        {
             "method": "GET",
             "path": "/v1/tags/:collectionId",
             "authentication": "required",
