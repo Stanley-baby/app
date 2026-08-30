@@ -104,7 +104,7 @@ class MemoryDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('INSERT INTO bookmarks')) {
-                const bookmark = { id: this.bookmarks.length + 1, user_id: values[0], url: values[1], title: values[2], created_at: values[3], updated_at: values[4], collection_id: values[5], tags: values[6], removed_at: null, change_version: this.nextChangeVersion }
+                const bookmark = { id: this.bookmarks.length + 1, user_id: values[0], url: values[1], title: values[2], created_at: values[3], updated_at: values[4], collection_id: values[5], tags: values[6], highlights: '[]', removed_at: null, change_version: this.nextChangeVersion }
                 this.bookmarks.push(bookmark)
                 this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { last_row_id: bookmark.id, changes: 1 } }
@@ -129,14 +129,20 @@ class MemoryDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE bookmarks SET url')) {
-                const bookmark = this.bookmarks.find(item => item.id === values[6] && item.user_id === values[7])
-                Object.assign(bookmark, { url: values[0], title: values[1], collection_id: values[2], tags: values[3], removed_at: values[4], updated_at: values[5], change_version: this.nextChangeVersion })
+                const bookmark = this.bookmarks.find(item => item.id === values[7] && item.user_id === values[8])
+                Object.assign(bookmark, { url: values[0], title: values[1], collection_id: values[2], tags: values[3], highlights: values[4], removed_at: values[5], updated_at: values[6], change_version: this.nextChangeVersion })
                 this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE bookmarks SET removed_at')) {
                 const bookmark = this.bookmarks.find(item => item.id === values[2] && item.user_id === values[3])
                 Object.assign(bookmark, { removed_at: values[0], updated_at: values[1], change_version: this.nextChangeVersion })
+                this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE bookmarks SET tags')) {
+                const bookmark = this.bookmarks.find(item => item.id === values[2] && item.user_id === values[3])
+                Object.assign(bookmark, { tags: values[0], updated_at: values[1], change_version: this.nextChangeVersion })
                 this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { changes: 1 } }
             }
@@ -609,6 +615,130 @@ test('bookmark sync markers are monotonic and incremental reads return changes',
 
         const changesRoute = await worker.fetch(request('/v1/raindrops/changes?since=2', null, { Cookie: cookie }), testEnv)
         assert.equal((await changesRoute.json()).items[0].changeVersion, latestVersion)
+    } finally {
+        globalThis.fetch = originalFetch
+    }
+})
+
+test('nested collections, bookmark moves, tags, and highlights stay user-scoped', async () => {
+    const db = new MemoryDatabase()
+    const testEnv = { ...env(db), TURNSTILE_ENABLED: 'false' }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options) => {
+        if (url === 'https://api.resend.com/emails') return Response.json({ id: 'email_collections' })
+        return originalFetch(url, options)
+    }
+
+    try {
+        const signup = await worker.fetch(request('/v1/auth/email/signup', {
+            name: 'Collections User', email: 'collections.user@example.test', password: 'correct horse battery staple', betaAccessPassword: 'invite-only'
+        }), testEnv)
+        assert.equal(signup.status, 201)
+        const login = await worker.fetch(request('/v1/auth/email/login', {
+            email: 'collections.user@example.test', password: 'correct horse battery staple'
+        }), testEnv)
+        const cookie = login.headers.get('Set-Cookie').split(';')[0]
+
+        const rootResponse = await worker.fetch(request('/v1/collection', { title: 'Parent Collection' }, { Cookie: cookie }), testEnv)
+        assert.equal(rootResponse.status, 201)
+        const root = (await rootResponse.json()).item
+        assert.equal(typeof root._id, 'string')
+        assert.equal(Number.isInteger(Number(root._id)), true)
+
+        const childResponse = await worker.fetch(request('/v1/collection', { title: 'Nested Collection', parentId: Number(root._id) }, { Cookie: cookie }), testEnv)
+        assert.equal(childResponse.status, 201)
+        const child = (await childResponse.json()).item
+        assert.equal(child.parentId, Number(root._id))
+
+        const cycle = await worker.fetch(new Request('https://api.example.test/v1/collection/' + root._id, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+            body: JSON.stringify({ parentId: Number(child._id) })
+        }), testEnv)
+        assert.equal(cycle.status, 404)
+
+        const collections = await worker.fetch(request('/v1/collections/all', null, { Cookie: cookie }), testEnv)
+        assert.deepEqual((await collections.json()).items.map(item => item.parentId), [null, Number(root._id)])
+
+        const collectionTags = await worker.fetch(request('/v1/tags/' + root._id, null, { Cookie: cookie }), testEnv)
+        assert.equal(collectionTags.status, 200)
+
+        const bookmarkResponse = await worker.fetch(request('/v1/raindrop', {
+            link: 'https://example.com/issue6', title: 'Issue 6 collection bookmark', collectionId: Number(child._id), tags: ['alpha', 'beta']
+        }, { Cookie: cookie }), testEnv)
+        assert.equal(bookmarkResponse.status, 201)
+        const bookmark = (await bookmarkResponse.json()).item
+        assert.equal(bookmark.collectionId, Number(child._id))
+        assert.deepEqual(bookmark.tags, ['alpha', 'beta'])
+
+        const moved = await worker.fetch(new Request('https://api.example.test/v1/raindrop/' + bookmark._id, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+            body: JSON.stringify({ collectionId: Number(root._id) })
+        }), testEnv)
+        assert.equal(moved.status, 200)
+        assert.equal((await moved.json()).item.collectionId, Number(root._id))
+
+        const filters = await worker.fetch(request('/v1/filters/0?search=alpha&tagsSort=-count', null, { Cookie: cookie }), testEnv)
+        assert.deepEqual((await filters.json()).tags, [{ _id: 'alpha', count: 1 }])
+
+        const recentTags = await worker.fetch(request('/v1/tags/recent', null, { Cookie: cookie }), testEnv)
+        assert.equal((await recentTags.json()).items[0]._id, 'alpha')
+
+        const renamed = await worker.fetch(new Request('https://api.example.test/v1/tags/0', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+            body: JSON.stringify({ tag: 'alpha', replace: 'renamed' })
+        }), testEnv)
+        assert.equal(renamed.status, 200)
+
+        const removedTag = await worker.fetch(new Request('https://api.example.test/v1/tag?tag=beta', {
+            method: 'DELETE', headers: { Cookie: cookie }
+        }), testEnv)
+        assert.equal(removedTag.status, 200)
+
+        const afterTags = await worker.fetch(request('/v1/raindrop/' + bookmark._id, null, { Cookie: cookie }), testEnv)
+        assert.deepEqual((await afterTags.json()).item.tags, ['renamed'])
+
+        const addedHighlight = await worker.fetch(new Request('https://api.example.test/v1/raindrop/' + bookmark._id, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+            body: JSON.stringify({ highlights: [{ text: 'A quoted passage', note: 'first note', color: 'blue' }] })
+        }), testEnv)
+        assert.equal(addedHighlight.status, 200)
+        const addedHighlightItem = (await addedHighlight.json()).item.highlights[0]
+        assert.equal(Number.isInteger(addedHighlightItem._id), true)
+        assert.equal(addedHighlightItem.text, 'A quoted passage')
+
+        const updatedHighlight = await worker.fetch(new Request('https://api.example.test/v1/raindrop/' + bookmark._id, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+            body: JSON.stringify({ highlights: [{ _id: addedHighlightItem._id, note: 'updated note', color: 'green' }] })
+        }), testEnv)
+        assert.equal((await updatedHighlight.json()).item.highlights[0].note, 'updated note')
+
+        const exported = await worker.fetch(request('/v1/raindrop/' + bookmark._id + '/highlights.txt', null, { Cookie: cookie }), testEnv)
+        assert.equal(exported.status, 200)
+        assert.match(await exported.text(), /A quoted passage/)
+
+        const removedHighlight = await worker.fetch(new Request('https://api.example.test/v1/raindrop/' + bookmark._id, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+            body: JSON.stringify({ highlights: [{ _id: addedHighlightItem._id, text: '' }] })
+        }), testEnv)
+        assert.deepEqual((await removedHighlight.json()).item.highlights, [])
+
+        const outsiderSignup = await worker.fetch(request('/v1/auth/email/signup', {
+            name: 'Outsider', email: 'issue6.outsider@example.test', password: 'correct horse battery staple', betaAccessPassword: 'invite-only'
+        }), testEnv)
+        assert.equal(outsiderSignup.status, 201)
+        const outsiderLogin = await worker.fetch(request('/v1/auth/email/login', {
+            email: 'issue6.outsider@example.test', password: 'correct horse battery staple'
+        }), testEnv)
+        const outsiderCookie = outsiderLogin.headers.get('Set-Cookie').split(';')[0]
+        const foreignCollection = await worker.fetch(request('/v1/collection', { title: 'Foreign Child', parentId: Number(root._id) }, { Cookie: outsiderCookie }), testEnv)
+        assert.equal(foreignCollection.status, 404)
+        const foreignBookmark = await worker.fetch(request('/v1/raindrop', {
+            link: 'https://example.com/foreign', title: 'Foreign', collectionId: Number(root._id)
+        }, { Cookie: outsiderCookie }), testEnv)
+        assert.equal(foreignBookmark.status, 404)
+
+        const unauthorized = await worker.fetch(request('/v1/collections/all'), testEnv)
+        assert.equal(unauthorized.status, 401)
     } finally {
         globalThis.fetch = originalFetch
     }

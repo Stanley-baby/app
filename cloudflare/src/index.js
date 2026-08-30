@@ -118,6 +118,71 @@ const publicUser = user => ({
     ...(user.google_enabled ? { google: { enabled: true } } : {})
 })
 
+const arrayValue = value => {
+    if (Array.isArray(value)) return value
+    try {
+        const parsed = JSON.parse(value || '[]')
+        return Array.isArray(parsed) ? parsed : []
+    } catch {
+        return []
+    }
+}
+
+const tagValue = value => String(value || '').trim()
+
+const bookmarkTags = value => [...new Set(arrayValue(value).map(tagValue).filter(Boolean))]
+
+const highlightId = value => {
+    const id = Number(value)
+    return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+
+const highlightItem = (item={}, fallbackId=1) => ({
+    _id: highlightId(item._id || item.id) || fallbackId,
+    text: String(item.text || ''),
+    note: String(item.note || ''),
+    color: ['yellow', 'blue', 'green', 'red'].includes(item.color) ? item.color : 'yellow',
+    created: item.created || new Date().toISOString(),
+    ...(item.position === undefined ? {} : { position: item.position })
+})
+
+const bookmarkHighlights = value => arrayValue(value).map((item, index) => highlightItem(item, index + 1))
+
+const applyHighlightChanges = (existingValue, changes) => {
+    const current = bookmarkHighlights(existingValue)
+    if (!Array.isArray(changes)) return current
+    if (!changes.length) return []
+
+    let nextId = Math.max(0, ...current.map(item => item._id)) + 1
+    for (const change of changes) {
+        const id = highlightId(change?._id || change?.id)
+        const index = id ? current.findIndex(item => item._id === id) : -1
+        const hasText = Object.prototype.hasOwnProperty.call(change || {}, 'text')
+        const text = String(change?.text || '')
+
+        if (id && hasText && !text && index !== -1) {
+            current.splice(index, 1)
+            continue
+        }
+        if (id && hasText && !text && index === -1)
+            continue
+
+        const assignedId = id || nextId++
+        const item = index === -1 ? { ...change, _id: assignedId } : { ...current[index], ...change, _id: current[index]._id }
+        const normalized = highlightItem(item, assignedId)
+        if (index === -1) current.push(normalized)
+        else current[index] = normalized
+    }
+    return current
+}
+
+const validHighlightChanges = changes => Array.isArray(changes) && changes.every(change => {
+    const id = highlightId(change?._id || change?.id)
+    const text = String(change?.text || '')
+    const note = String(change?.note || '')
+    return text.length <= 10000 && note.length <= 10000 && (id || text.trim())
+})
+
 const bookmarkItem = item => {
     const changeVersion = Number(item.change_version || 0)
     return {
@@ -125,7 +190,8 @@ const bookmarkItem = item => {
         link: item.url,
         title: item.title,
         collectionId: item.removed_at ? -99 : item.collection_id,
-        tags: JSON.parse(item.tags || '[]'),
+        tags: bookmarkTags(item.tags),
+        highlights: bookmarkHighlights(item.highlights),
         removed: Boolean(item.removed_at),
         created: new Date(item.created_at).toISOString(),
         lastUpdate: new Date(item.updated_at).toISOString(),
@@ -168,6 +234,70 @@ const collectionItem = item => ({
     count: Number(item.count || 0),
     access: { level: 4, draggable: true }
 })
+
+const parseCollectionId = value => {
+    if (value === undefined) return undefined
+    if (value === null || value === '' || value === 'root' || value === 0 || value === '0') return null
+    const id = Number(value)
+    return Number.isSafeInteger(id) && id > 0 ? id : NaN
+}
+
+const parseBookmarkCollectionId = value => {
+    const id = Number(value)
+    return Number.isSafeInteger(id) && id >= -1 ? (id > 0 ? id : -1) : NaN
+}
+
+const collectionOwned = async (env, userId, collectionId) =>
+    collectionId <= 0 || Boolean(await env.DB.prepare('SELECT id FROM collections WHERE id = ? AND user_id = ?').bind(collectionId, userId).first())
+
+const collectionParentAllowed = async (env, userId, collectionId, parentId) => {
+    if (!parentId) return true
+
+    const visited = new Set()
+    let current = parentId
+    while (current && !visited.has(current)) {
+        if (current === collectionId) return false
+        visited.add(current)
+        const parent = await env.DB.prepare('SELECT id, parent_id FROM collections WHERE id = ? AND user_id = ?').bind(current, userId).first()
+        if (!parent) return false
+        current = Number(parent.parent_id) || null
+    }
+    return true
+}
+
+const tagItems = async (env, userId, collectionId=0, search='', sort='') => {
+    let query = 'SELECT tags, updated_at FROM bookmarks WHERE user_id = ? AND removed_at IS NULL'
+    const values = [userId]
+    if (collectionId === -1) {
+        query += ' AND collection_id = -1'
+    } else if (collectionId > 0) {
+        query += ' AND collection_id = ?'
+        values.push(collectionId)
+    }
+    query += ' ORDER BY updated_at DESC'
+
+    const rows = await env.DB.prepare(query).bind(...values).all()
+    const entries = new Map()
+    for (const row of rows.results || []) {
+        for (const name of bookmarkTags(row.tags)) {
+            const entry = entries.get(name) || { _id: name, count: 0, last: Number(row.updated_at || 0) }
+            entry.count++
+            entry.last = Math.max(entry.last, Number(row.updated_at || 0))
+            entries.set(name, entry)
+        }
+    }
+
+    const needle = tagValue(search).replace(/^#/, '').replace(/^"|"$/g, '').toLowerCase()
+    const items = [...entries.values()]
+        .filter(item => !needle || item._id.toLowerCase().includes(needle))
+        .map(({ _id, count, last }) => ({ _id, count, last }))
+
+    if (sort === 'recent') items.sort((left, right) => right.last - left.last || left._id.localeCompare(right._id))
+    else if (sort === '-count') items.sort((left, right) => right.count - left.count || left._id.localeCompare(right._id))
+    else items.sort((left, right) => left._id.localeCompare(right._id))
+
+    return items.map(({ _id, count }) => ({ _id, count }))
+}
 
 const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
 const turnstileEnabled = env => String(env.TURNSTILE_ENABLED || '').toLowerCase() === 'true'
@@ -630,10 +760,13 @@ export default {
                 const title = String(data.title || '').trim()
                 if (!title || title.length > 200)
                     return error('validation_failed', 400, request, env, 'Enter a collection title under 200 characters')
+                const parentId = parseCollectionId(data.parentId)
+                if (Number.isNaN(parentId) || parentId && !await collectionOwned(env, session.user_id, parentId))
+                    return error('collection_not_found', 404, request, env)
                 const now = Date.now()
                 const inserted = await env.DB.prepare('INSERT INTO collections (user_id, title, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-                    .bind(session.user_id, title, Number(data.parentId) || null, now, now).run()
-                return json({ result: true, item: collectionItem({ id: inserted.meta.last_row_id, title, parent_id: Number(data.parentId) || null }) }, 201, request, env)
+                    .bind(session.user_id, title, parentId || null, now, now).run()
+                return json({ result: true, item: collectionItem({ id: inserted.meta.last_row_id, title, parent_id: parentId || null }) }, 201, request, env)
             }
 
             const collectionMatch = url.pathname.match(/^\/v1\/collection\/(-?\d+)(?:\/lastAction)?$/)
@@ -655,10 +788,46 @@ export default {
                     const existing = await env.DB.prepare('SELECT * FROM collections WHERE id = ? AND user_id = ?').bind(collectionId, session.user_id).first()
                     if (!existing) return error('collection_not_found', 404, request, env)
                     const title = data.title === undefined ? existing.title : String(data.title).trim()
-                    const parentId = data.parentId === undefined ? existing.parent_id : Number(data.parentId) || null
+                    if (!title || title.length > 200)
+                        return error('validation_failed', 400, request, env, 'Enter a collection title under 200 characters')
+                    const parentId = data.parentId === undefined ? existing.parent_id : parseCollectionId(data.parentId)
+                    if (Number.isNaN(parentId) || parentId && !await collectionParentAllowed(env, session.user_id, collectionId, parentId))
+                        return error('collection_not_found', 404, request, env)
                     await env.DB.prepare('UPDATE collections SET title = ?, parent_id = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(title, parentId, Date.now(), collectionId, session.user_id).run()
-                    return json({ result: true, item: collectionItem({ ...existing, title, parent_id: parentId }) }, 200, request, env)
+                        .bind(title, parentId || null, Date.now(), collectionId, session.user_id).run()
+                    return json({ result: true, item: collectionItem({ ...existing, title, parent_id: parentId || null }) }, 200, request, env)
+                }
+                if (request.method === 'DELETE') {
+                    if (collectionId === -99) {
+                        const removed = await env.DB.prepare('SELECT id FROM bookmarks WHERE user_id = ? AND removed_at IS NOT NULL').bind(session.user_id).all()
+                        await env.DB.prepare('DELETE FROM bookmark_changes WHERE user_id = ? AND bookmark_id IN (SELECT id FROM bookmarks WHERE user_id = ? AND removed_at IS NOT NULL)').bind(session.user_id, session.user_id).run()
+                        await env.DB.prepare('DELETE FROM bookmarks WHERE user_id = ? AND removed_at IS NOT NULL').bind(session.user_id).run()
+                        return json({ result: true, count: (removed.results || []).length }, 200, request, env)
+                    }
+
+                    if (collectionId <= 0)
+                        return error('collection_not_found', 404, request, env)
+                    if (!await collectionOwned(env, session.user_id, collectionId))
+                        return error('collection_not_found', 404, request, env)
+                    const collections = await env.DB.prepare('SELECT id, parent_id FROM collections WHERE user_id = ?').bind(session.user_id).all()
+                    const ids = new Set([collectionId])
+                    let changed = true
+                    while (changed) {
+                        changed = false
+                        for (const item of collections.results || [])
+                            if (ids.has(Number(item.parent_id)) && !ids.has(item.id)) {
+                                ids.add(item.id)
+                                changed = true
+                            }
+                    }
+                    const placeholders = [...ids].map(() => '?').join(',')
+                    const values = [...ids]
+                    const now = Date.now()
+                    await env.DB.prepare(`UPDATE bookmarks SET collection_id = -1, updated_at = ? WHERE user_id = ? AND collection_id IN (${placeholders})`)
+                        .bind(now, session.user_id, ...values).run()
+                    await env.DB.prepare(`DELETE FROM collection_collaborators WHERE collection_id IN (${placeholders})`).bind(...values).run()
+                    await env.DB.prepare(`DELETE FROM collections WHERE user_id = ? AND id IN (${placeholders})`).bind(session.user_id, ...values).run()
+                    return json({ result: true, count: ids.size }, 200, request, env)
                 }
             }
 
@@ -707,8 +876,10 @@ export default {
                     if (!['http:', 'https:'].includes((() => { try { return new URL(link).protocol } catch { return '' } })()))
                         return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL')
                     const now = Date.now()
-                    const collectionId = Number(input.collectionId) || -1
-                    const tags = Array.isArray(input.tags) ? input.tags.map(String) : []
+                    const collectionId = input.collectionId === undefined ? -1 : parseBookmarkCollectionId(input.collectionId)
+                    if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
+                        return error('collection_not_found', 404, request, env)
+                    const tags = bookmarkTags(input.tags)
                     const inserted = await env.DB.prepare('INSERT INTO bookmarks (user_id, url, title, created_at, updated_at, collection_id, tags) VALUES (?, ?, ?, ?, ?, ?, ?)')
                         .bind(session.user_id, link, title, now, now, collectionId, JSON.stringify(tags)).run()
                     const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
@@ -732,8 +903,10 @@ export default {
                     return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL and a title under 500 characters')
 
                 const now = Date.now()
-                const collectionId = Number(data.collectionId) || -1
-                const tags = Array.isArray(data.tags) ? data.tags.map(String) : []
+                const collectionId = data.collectionId === undefined ? -1 : parseBookmarkCollectionId(data.collectionId)
+                if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
+                    return error('collection_not_found', 404, request, env)
+                const tags = bookmarkTags(data.tags)
                 const inserted = await env.DB.prepare('INSERT INTO bookmarks (user_id, url, title, created_at, updated_at, collection_id, tags) VALUES (?, ?, ?, ?, ?, ?, ?)')
                     .bind(session.user_id, bookmarkUrl, title, now, now, collectionId, JSON.stringify(tags)).run()
                 const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
@@ -743,6 +916,22 @@ export default {
                     item: bookmarkItem(item || { id: inserted.meta.last_row_id, url: bookmarkUrl, title, created_at: now, updated_at: now, collection_id: collectionId, tags: JSON.stringify(tags), removed_at: null }),
                     ...(await bookmarkSync(env, session.user_id))
                 }, 201, request, env)
+            }
+
+            const highlightExport = url.pathname.match(/^\/v1\/raindrop\/(\d+)\/highlights\.(txt|csv)$/)
+            if (highlightExport && request.method === 'GET') {
+                const bookmark = await env.DB.prepare('SELECT highlights FROM bookmarks WHERE id = ? AND user_id = ?')
+                    .bind(Number(highlightExport[1]), session.user_id).first()
+                if (!bookmark) return error('bookmark_not_found', 404, request, env)
+                const highlights = bookmarkHighlights(bookmark.highlights)
+                const body = highlightExport[2] === 'csv'
+                    ? ['text,note,color,created', ...highlights.map(item => [item.text, item.note, item.color, item.created].map(value => JSON.stringify(value)).join(','))].join('\n')
+                    : highlights.map(item => item.text + (item.note ? '\n' + item.note : '')).join('\n\n')
+                const headers = addCorsHeaders(new Headers({
+                    'Content-Type': highlightExport[2] === 'csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8',
+                    'X-Request-ID': requestId(request)
+                }), request, env)
+                return new Response(body, { status: 200, headers })
             }
 
             const bookmarkMatch = url.pathname.match(/^\/v1\/raindrop\/(\d+)$/)
@@ -756,9 +945,10 @@ export default {
                     const { data } = await readBody(request)
                     const title = data.title === undefined ? existing.title : String(data.title).trim()
                     const link = data.link === undefined ? existing.url : String(data.link).trim()
-                    const tags = data.tags === undefined ? JSON.parse(existing.tags || '[]') : (Array.isArray(data.tags) ? data.tags.map(String) : [])
-                    const collectionId = data.collectionId === undefined ? existing.collection_id : Number(data.collectionId) || -1
+                    const tags = data.tags === undefined ? bookmarkTags(existing.tags) : bookmarkTags(data.tags)
+                    const collectionId = data.collectionId === undefined ? existing.collection_id : parseBookmarkCollectionId(data.collectionId)
                     const removedAt = data.removed === false ? null : existing.removed_at
+                    const highlights = data.highlights === undefined ? bookmarkHighlights(existing.highlights) : data.highlights
                     let protocol
                     try {
                         protocol = new URL(link).protocol
@@ -767,8 +957,12 @@ export default {
                     }
                     if (!['http:', 'https:'].includes(protocol) || title.length > 500)
                         return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL and a title under 500 characters')
-                    await env.DB.prepare('UPDATE bookmarks SET url = ?, title = ?, collection_id = ?, tags = ?, removed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(link, title, collectionId, JSON.stringify(tags), removedAt, Date.now(), bookmarkId, session.user_id).run()
+                    if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
+                        return error('collection_not_found', 404, request, env)
+                    if (!validHighlightChanges(highlights))
+                        return error('validation_failed', 400, request, env, 'Highlight text and note must be valid')
+                    await env.DB.prepare('UPDATE bookmarks SET url = ?, title = ?, collection_id = ?, tags = ?, highlights = ?, removed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(link, title, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)), removedAt, Date.now(), bookmarkId, session.user_id).run()
                     const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, session.user_id).first()
                     return json({ result: true, item: bookmarkItem(item), ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }
@@ -780,11 +974,59 @@ export default {
                 }
             }
 
-            if ((url.pathname === '/v1/tags/0' || url.pathname === '/v1/tags/recent') && request.method === 'GET')
-                return json({ result: true, items: [] }, 200, request, env)
+            const tagsMatch = url.pathname.match(/^\/v1\/tags\/(-?\d+)$/)
+            if (tagsMatch && request.method === 'GET') {
+                const collectionId = Number(tagsMatch[1])
+                if (collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId))
+                    return error('collection_not_found', 404, request, env)
+                const tags = await tagItems(env, session.user_id, collectionId, url.searchParams.get('search'), url.searchParams.get('tagsSort'))
+                return json({ result: true, items: tags, tags }, 200, request, env)
+            }
 
-            if (url.pathname.startsWith('/v1/filters/') && request.method === 'GET')
-                return json({ result: true, tags: [] }, 200, request, env)
+            if (url.pathname === '/v1/tags/recent' && request.method === 'GET') {
+                const tags = await tagItems(env, session.user_id, 0, '', 'recent')
+                return json({ result: true, items: tags.slice(0, 20) }, 200, request, env)
+            }
+
+            if (url.pathname === '/v1/tags/0' && request.method === 'PUT') {
+                const { data } = await readBody(request)
+                const tag = tagValue(data.tag)
+                const replacement = tagValue(data.replace)
+                if (!tag || !replacement || tag.length > 100 || replacement.length > 100)
+                    return error('validation_failed', 400, request, env, 'Tag names must be between 1 and 100 characters')
+                const rows = await env.DB.prepare('SELECT id, tags FROM bookmarks WHERE user_id = ? AND removed_at IS NULL').bind(session.user_id).all()
+                for (const row of rows.results || []) {
+                    const tags = bookmarkTags(row.tags)
+                    if (!tags.includes(tag)) continue
+                    const updated = [...new Set(tags.map(value => value === tag ? replacement : value))]
+                    await env.DB.prepare('UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(JSON.stringify(updated), Date.now(), row.id, session.user_id).run()
+                }
+                return json({ result: true }, 200, request, env)
+            }
+
+            if (url.pathname === '/v1/tag' && request.method === 'DELETE') {
+                const tag = tagValue(url.searchParams.get('tag'))
+                if (!tag || tag.length > 100)
+                    return error('validation_failed', 400, request, env, 'Tag name must be between 1 and 100 characters')
+                const rows = await env.DB.prepare('SELECT id, tags FROM bookmarks WHERE user_id = ? AND removed_at IS NULL').bind(session.user_id).all()
+                for (const row of rows.results || []) {
+                    const tags = bookmarkTags(row.tags)
+                    if (!tags.includes(tag)) continue
+                    await env.DB.prepare('UPDATE bookmarks SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(JSON.stringify(tags.filter(value => value !== tag)), Date.now(), row.id, session.user_id).run()
+                }
+                return json({ result: true }, 200, request, env)
+            }
+
+            const filtersMatch = url.pathname.match(/^\/v1\/filters\/(-?\d+)$/)
+            if (filtersMatch && request.method === 'GET') {
+                const collectionId = Number(filtersMatch[1])
+                if (collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId))
+                    return error('collection_not_found', 404, request, env)
+                const tags = await tagItems(env, session.user_id, collectionId, url.searchParams.get('search'), url.searchParams.get('tagsSort'))
+                return json({ result: true, items: [], tags }, 200, request, env)
+            }
 
             if (url.pathname === '/v1/user/send_email_confirm' && request.method === 'POST') {
                 if (session.email_verified_at)

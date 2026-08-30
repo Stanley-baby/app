@@ -44,6 +44,66 @@
             "responses": [200, 401]
         },
         {
+            "method": "GET",
+            "path": "/v1/collections/all",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/collection",
+            "authentication": "required",
+            "responses": [201, 400, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/collection/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/collection/:id",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/collection/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/tags/:collectionId",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/tags/recent",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/tags/0",
+            "authentication": "required",
+            "responses": [200, 400, 401]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/tag",
+            "authentication": "required",
+            "responses": [200, 400, 401]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/filters/:collectionId",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
             "method": "POST",
             "path": "/v1/raindrop",
             "authentication": "required",
@@ -64,6 +124,18 @@
         {
             "method": "DELETE",
             "path": "/v1/raindrop/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/raindrop/:id/highlights.txt",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/raindrop/:id/highlights.csv",
             "authentication": "required",
             "responses": [200, 401, 404]
         },

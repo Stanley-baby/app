@@ -59,6 +59,155 @@ paths:
           description: Current User device sessions.
         '401':
           description: Login required.
+  /v1/collections/all:
+    get:
+      responses:
+        '200':
+          description: Authorized Collections with numeric Resource IDs and parent IDs.
+        '401':
+          description: Login required.
+  /v1/collection:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:
+                  type: string
+                parentId:
+                  type: integer
+                  nullable: true
+      responses:
+        '201':
+          description: Nested or root Collection created for the signed-in User.
+        '400':
+          description: Invalid Collection title or parent.
+        '401':
+          description: Login required.
+        '404':
+          description: Parent Collection is not owned by the User.
+  /v1/collection/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      responses:
+        '200':
+          description: Authorized Collection with numeric Resource ID.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
+    put:
+      responses:
+        '200':
+          description: Collection title or parent updated.
+        '400':
+          description: Invalid Collection update.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection or parent not found for this User.
+    delete:
+      responses:
+        '200':
+          description: Collection and descendants removed; contained Bookmarks become unsorted.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
+  /v1/tags/{collectionId}:
+    parameters:
+      - in: path
+        name: collectionId
+        required: true
+        schema:
+          type: integer
+    get:
+      parameters:
+        - in: query
+          name: search
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: tagsSort
+          required: false
+          schema:
+            type: string
+            enum: [_id, -count]
+      responses:
+        '200':
+          description: Tags from authorized active Bookmarks.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
+  /v1/tags/recent:
+    get:
+      responses:
+        '200':
+          description: Recently updated authorized Tags.
+        '401':
+          description: Login required.
+  /v1/tags/0:
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tag, replace]
+              properties:
+                tag:
+                  type: string
+                replace:
+                  type: string
+      responses:
+        '200':
+          description: Tag renamed on the User's active Bookmarks.
+        '400':
+          description: Invalid Tag name.
+        '401':
+          description: Login required.
+  /v1/tag:
+    delete:
+      parameters:
+        - in: query
+          name: tag
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tag removed from the User's active Bookmarks.
+        '400':
+          description: Invalid Tag name.
+        '401':
+          description: Login required.
+  /v1/filters/{collectionId}:
+    parameters:
+      - in: path
+        name: collectionId
+        required: true
+        schema:
+          type: integer
+    get:
+      responses:
+        '200':
+          description: Authorized tag filters for a Collection.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
   /v1/raindrop:
     post:
       responses:
@@ -95,6 +244,36 @@ paths:
       responses:
         '200':
           description: Bookmark moved to the Recycle Bin and a Change Version emitted.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+  /v1/raindrop/{id}/highlights.txt:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      responses:
+        '200':
+          description: Plain-text Highlights for the authorized Bookmark.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+  /v1/raindrop/{id}/highlights.csv:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      responses:
+        '200':
+          description: CSV Highlights for the authorized Bookmark.
         '401':
           description: Login required.
         '404':
