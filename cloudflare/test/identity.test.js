@@ -16,6 +16,8 @@ class MemoryDatabase {
         this.oauthStates = []
         this.deletions = []
         this.collaborators = []
+        this.changes = []
+        this.nextChangeVersion = 1
     }
 
     prepare(sql) {
@@ -56,6 +58,9 @@ class MemoryDatabase {
 
             if (sql.includes('FROM bookmarks WHERE id'))
                 return this.bookmarks.find(item => item.id === values[0] && item.user_id === values[1]) || null
+
+            if (sql.includes('FROM bookmark_changes WHERE user_id'))
+                return this.changes.filter(item => item.user_id === values[0]).sort((left, right) => right.version - left.version)[0] || null
 
             if (sql.includes('FROM collections WHERE id'))
                 return this.collections.find(item => item.id === values[0] && item.user_id === values[1]) || null
@@ -99,8 +104,9 @@ class MemoryDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('INSERT INTO bookmarks')) {
-                const bookmark = { id: this.bookmarks.length + 1, user_id: values[0], url: values[1], title: values[2], created_at: values[3], updated_at: values[4], collection_id: values[5], tags: values[6], removed_at: null }
+                const bookmark = { id: this.bookmarks.length + 1, user_id: values[0], url: values[1], title: values[2], created_at: values[3], updated_at: values[4], collection_id: values[5], tags: values[6], removed_at: null, change_version: this.nextChangeVersion }
                 this.bookmarks.push(bookmark)
+                this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { last_row_id: bookmark.id, changes: 1 } }
             }
             if (sql.includes('INSERT INTO collections')) {
@@ -124,12 +130,14 @@ class MemoryDatabase {
             }
             if (sql.includes('UPDATE bookmarks SET url')) {
                 const bookmark = this.bookmarks.find(item => item.id === values[6] && item.user_id === values[7])
-                Object.assign(bookmark, { url: values[0], title: values[1], collection_id: values[2], tags: values[3], removed_at: values[4], updated_at: values[5] })
+                Object.assign(bookmark, { url: values[0], title: values[1], collection_id: values[2], tags: values[3], removed_at: values[4], updated_at: values[5], change_version: this.nextChangeVersion })
+                this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE bookmarks SET removed_at')) {
                 const bookmark = this.bookmarks.find(item => item.id === values[2] && item.user_id === values[3])
-                Object.assign(bookmark, { removed_at: values[0], updated_at: values[1] })
+                Object.assign(bookmark, { removed_at: values[0], updated_at: values[1], change_version: this.nextChangeVersion })
+                this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE users SET email_verified_at')) {
@@ -170,6 +178,10 @@ class MemoryDatabase {
                 this.bookmarks = this.bookmarks.filter(item => item.user_id !== values[0])
                 return { meta: { changes: 1 } }
             }
+            if (sql.includes('DELETE FROM bookmark_changes')) {
+                this.changes = this.changes.filter(item => item.user_id !== values[0])
+                return { meta: { changes: 1 } }
+            }
             if (sql.includes('DELETE FROM collections')) {
                 this.collections = this.collections.filter(item => item.user_id !== values[0])
                 return { meta: { changes: 1 } }
@@ -199,6 +211,14 @@ class MemoryDatabase {
                 }
             if (sql.includes('FROM collections c'))
                 return { results: this.collections.filter(item => item.user_id === values[0]).map(item => ({ ...item, count: this.bookmarks.filter(bookmark => bookmark.collection_id === item.id && !bookmark.removed_at).length })) }
+            if (sql.includes('FROM bookmark_changes c JOIN bookmarks')) {
+                return {
+                    results: this.changes
+                        .filter(item => item.user_id === values[0] && item.version > values[1])
+                        .sort((left, right) => left.version - right.version)
+                        .map(change => ({ ...this.bookmarks.find(bookmark => bookmark.id === change.bookmark_id), sync_version: change.version }))
+                }
+            }
             if (sql.includes('FROM bookmarks WHERE')) {
                 let items = this.bookmarks.filter(item => item.user_id === values[0])
                 if (sql.includes('removed_at IS NOT NULL')) items = items.filter(item => item.removed_at)
@@ -527,4 +547,69 @@ test('Google identity conflicts stay separate, logout-all revokes every session,
     assert.equal(db.sessions.some(session => session.user_id === 1), false)
     assert.equal(db.identities.some(identity => identity.user_id === 1), false)
     assert.equal(db.bookmarks.some(bookmark => bookmark.user_id === 1), false)
+})
+
+test('bookmark sync markers are monotonic and incremental reads return changes', async () => {
+    const db = new MemoryDatabase()
+    const testEnv = { ...env(db), TURNSTILE_ENABLED: 'false' }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options) => {
+        if (url === 'https://api.resend.com/emails') return Response.json({ id: 'email_sync' })
+        return originalFetch(url, options)
+    }
+
+    try {
+        const signup = await worker.fetch(request('/v1/auth/email/signup', {
+            name: 'Sync User', email: 'sync.user@example.test', password: 'correct horse battery staple', betaAccessPassword: 'invite-only'
+        }), testEnv)
+        assert.equal(signup.status, 201)
+        const login = await worker.fetch(request('/v1/auth/email/login', {
+            email: 'sync.user@example.test', password: 'correct horse battery staple'
+        }), testEnv)
+        const cookie = login.headers.get('Set-Cookie').split(';')[0]
+
+        const initial = await worker.fetch(request('/v1/collection/0/lastAction', null, { Cookie: cookie }), testEnv)
+        const initialMarker = await initial.json()
+        assert.equal(initialMarker.version, 0)
+
+        const created = await worker.fetch(request('/v1/raindrop', {
+            link: 'https://example.com/sync', title: 'Sync before'
+        }, { Cookie: cookie }), testEnv)
+        const createdBody = await created.json()
+        assert.equal(createdBody.item.changeVersion, 1)
+
+        const marker = await worker.fetch(request('/v1/collection/0/lastAction', null, { Cookie: cookie }), testEnv)
+        const currentMarker = await marker.json()
+        assert.equal(currentMarker.version, 1)
+        assert.ok(currentMarker.lastAction > 0)
+
+        const updated = await worker.fetch(new Request('https://api.example.test/v1/raindrop/1', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+            body: JSON.stringify({ title: 'Sync after' })
+        }), testEnv)
+        const updatedBody = await updated.json()
+        assert.equal(updatedBody.item.changeVersion, 2)
+
+        const changes = await worker.fetch(request('/v1/raindrops/0?version=1', null, { Cookie: cookie }), testEnv)
+        const changesBody = await changes.json()
+        assert.equal(changesBody.items.length, 1)
+        assert.equal(changesBody.items[0].title, 'Sync after')
+        assert.equal(changesBody.items[0].changeVersion, 2)
+        assert.equal(changesBody.version, 2)
+
+        const concurrent = await Promise.all(['Sync winner A', 'Sync winner B'].map(title => worker.fetch(new Request('https://api.example.test/v1/raindrop/1', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+            body: JSON.stringify({ title })
+        }), testEnv).then(response => response.json())))
+        const latestVersion = Math.max(...concurrent.map(body => body.version))
+        const final = await worker.fetch(request('/v1/raindrop/1', null, { Cookie: cookie }), testEnv)
+        const finalBody = await final.json()
+        assert.equal(finalBody.item.changeVersion, latestVersion)
+        assert.equal(finalBody.item.title, concurrent.find(body => body.version === latestVersion).item.title)
+
+        const changesRoute = await worker.fetch(request('/v1/raindrops/changes?since=2', null, { Cookie: cookie }), testEnv)
+        assert.equal((await changesRoute.json()).items[0].changeVersion, latestVersion)
+    } finally {
+        globalThis.fetch = originalFetch
+    }
 })

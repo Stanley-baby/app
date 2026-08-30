@@ -50,6 +50,48 @@
             "responses": [201, 400, 401]
         },
         {
+            "method": "GET",
+            "path": "/v1/raindrop/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/raindrop/:id",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/raindrop/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/raindrops",
+            "authentication": "required",
+            "responses": [201, 400, 401]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/raindrops/:collectionId",
+            "authentication": "required",
+            "responses": [200, 400, 401]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/raindrops/changes",
+            "authentication": "required",
+            "responses": [200, 400, 401]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/collection/:id/lastAction",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
             "method": "DELETE",
             "path": "/v1/sessions/:id",
             "authentication": "required",

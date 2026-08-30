@@ -66,6 +66,100 @@ paths:
           description: Basic Bookmark created for the signed-in User.
         '401':
           description: Login required.
+  /v1/raindrop/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      responses:
+        '200':
+          description: Bookmark with its numeric Resource ID and Change Version.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+    put:
+      responses:
+        '200':
+          description: Bookmark updated with the winning Change Version.
+        '400':
+          description: Invalid Bookmark fields.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+    delete:
+      responses:
+        '200':
+          description: Bookmark moved to the Recycle Bin and a Change Version emitted.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+  /v1/raindrops:
+    post:
+      responses:
+        '201':
+          description: Multiple Bookmarks created with one Change Version per item.
+        '400':
+          description: Invalid Bookmark batch.
+        '401':
+          description: Login required.
+  /v1/raindrops/{collectionId}:
+    parameters:
+      - in: path
+        name: collectionId
+        required: true
+        schema:
+          type: integer
+      - in: query
+        name: version
+        required: false
+        description: Return only the latest state for Bookmarks changed after this Change Version.
+        schema:
+          type: integer
+          minimum: 0
+    get:
+      responses:
+        '200':
+          description: Bookmark list and the current lastAction/version marker.
+        '400':
+          description: Invalid Change Version.
+        '401':
+          description: Login required.
+  /v1/raindrops/changes:
+    get:
+      parameters:
+        - in: query
+          name: since
+          required: true
+          description: Return the latest state for each Bookmark changed after this Change Version.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Incremental Bookmark changes and the current marker.
+        '400':
+          description: A non-negative Change Version is required.
+        '401':
+          description: Login required.
+  /v1/collection/{id}/lastAction:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Monotonic lastAction timestamp and numeric Change Version.
+        '401':
+          description: Login required.
   /v1/user:
     get:
       responses:
