@@ -335,6 +335,46 @@ const validateFetchableUrl = value => {
     }
 }
 
+const resolvePublicAddress = async (url, env) => {
+    const resolver = String(env.FETCH_DNS_RESOLVER || '').trim()
+    const address = ipv4Parts(url.hostname) || ipv6Parts(url.hostname)
+    if (!resolver || address) return
+
+    let endpoint
+    try {
+        endpoint = new URL(resolver)
+        if (!['http:', 'https:'].includes(endpoint.protocol)) throw new Error('invalid resolver')
+    } catch {
+        throw metadataFailure('metadata_dns_failed', 'The remote address could not be resolved', true)
+    }
+
+    const answers = []
+    for (const [type, typeNumber] of [['A', 1], ['AAAA', 28]]) {
+        endpoint.search = new URLSearchParams({ name: url.hostname, type }).toString()
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), metadataFetchTimeoutMs)
+        let response
+        try {
+            response = await fetch(endpoint.toString(), {
+                headers: { Accept: 'application/dns-json' },
+                signal: controller.signal
+            })
+            if (!response.ok) throw new Error('resolver response')
+            const body = await response.json()
+            answers.push(...(body.Answer || []).filter(item => Number(item.type) === typeNumber).map(item => String(item.data || '')))
+        } catch {
+            throw metadataFailure('metadata_dns_failed', 'The remote address could not be resolved', true)
+        } finally {
+            clearTimeout(timer)
+        }
+    }
+
+    if (!answers.length)
+        throw metadataFailure('metadata_dns_failed', 'The remote address could not be resolved', true)
+    if (answers.some(value => privateIpv4(ipv4Parts(value)) || privateIpv6(ipv6Parts(value))))
+        throw metadataFailure('url_not_public', 'The remote address is not public', true)
+}
+
 const metadataFailure = (code, message, fatal = false) => Object.assign(new Error(message), { code, fatal })
 
 const readLimitedText = async response => {
@@ -395,11 +435,12 @@ const parsePageMetadata = html => {
     }
 }
 
-const fetchPageMetadata = async source => {
+const fetchPageMetadata = async (source, env = {}) => {
     let current = validateFetchableUrl(source)
     if (!current.ok) throw metadataFailure(current.code, current.message, true)
 
     for (let redirect = 0; redirect <= metadataMaxRedirects; redirect++) {
+        await resolvePublicAddress(current.url, env)
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), metadataFetchTimeoutMs)
         let response
@@ -521,7 +562,9 @@ const taskFailureDetails = failure => {
         metadata_upstream_error: 'The remote page returned an error',
         metadata_redirect_failed: 'The remote page returned too many redirects',
         redirect_not_public: 'The remote page redirected to a private address',
-        metadata_too_large: 'The remote page is too large to process'
+        metadata_too_large: 'The remote page is too large to process',
+        metadata_dns_failed: 'The remote address could not be resolved',
+        url_not_public: 'The remote address is not public'
     }
     const code = messages[failure?.code] ? failure.code : 'metadata_failed'
     return { code, message: messages[code] || 'Metadata enrichment failed' }
@@ -583,7 +626,7 @@ const processMetadataTask = async (env, taskId) => {
     if (claimed.action !== 'process') return claimed
 
     try {
-        const metadata = await fetchPageMetadata(claimed.task.source_url)
+        const metadata = await fetchPageMetadata(claimed.task.source_url, env)
         const bookmark = await env.DB.prepare('SELECT id, url, title, description FROM bookmarks WHERE id = ? AND user_id = ? AND removed_at IS NULL AND url = ?')
             .bind(claimed.task.bookmark_id, claimed.task.user_id, claimed.task.source_url).first()
         if (bookmark && (metadata.title && !bookmark.title || metadata.description && !bookmark.description)) {

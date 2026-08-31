@@ -37,3 +37,5 @@ HTTP(S) URLs. The Queue consumer follows redirects manually and validates each
 target, records progress in `background_tasks`, retries failures three times
 with backoff, then marks the task `dead_letter` and exposes `POST
 /v1/tasks/:id/retry` for an explicit retry.
+When `FETCH_DNS_RESOLVER` is configured, each hostname is resolved over HTTPS
+and private or non-public A/AAAA answers are rejected before the fetch.

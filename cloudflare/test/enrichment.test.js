@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { webcrypto } from 'node:crypto'
 import test from 'node:test'
-import worker, { createMetadataTask, processMetadataTask, validateFetchableUrl } from '../src/index.js'
+import worker, { createMetadataTask, fetchPageMetadata, processMetadataTask, validateFetchableUrl } from '../src/index.js'
 
 globalThis.crypto ||= webcrypto
 
@@ -167,6 +167,23 @@ test('fetchable URL validation rejects internal destinations and accepts public 
     ]) assert.equal(validateFetchableUrl(value).ok, false, value)
     assert.equal(validateFetchableUrl('https://public.example.test/page').ok, true)
     assert.equal(validateFetchableUrl('http://public.example.test:80/page').ok, true)
+})
+
+test('configured DNS resolution rejects private answers before fetching a hostname', async t => {
+    const originalFetch = globalThis.fetch
+    let originFetches = 0
+    globalThis.fetch = async url => {
+        if (String(url).startsWith('https://dns.example.test/resolve'))
+            return Response.json({ Status: 0, Answer: [{ type: 1, data: '127.0.0.1' }] })
+        originFetches++
+        return new Response('', { status: 200 })
+    }
+    t.after(() => { globalThis.fetch = originalFetch })
+    await assert.rejects(
+        () => fetchPageMetadata('https://public.example.test/page', { FETCH_DNS_RESOLVER: 'https://dns.example.test/resolve' }),
+        error => error.code === 'url_not_public'
+    )
+    assert.equal(originFetches, 0)
 })
 
 test('metadata task creation is idempotent and queue payload contains no URL or secret', async () => {

@@ -18,6 +18,7 @@ MAIL_PROVIDER = "resend"
 TURNSTILE_ENABLED = "false"
 USAGE_QUOTA_DAILY = "1000"
 RATE_LIMIT_PER_MINUTE = "60"
+FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 
 [[d1_databases]]
 binding = "DB"
@@ -66,6 +67,7 @@ MAIL_PROVIDER = "resend"
 TURNSTILE_ENABLED = "false"
 USAGE_QUOTA_DAILY = "1000"
 RATE_LIMIT_PER_MINUTE = "60"
+FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 
 [[env.preview.d1_databases]]
 binding = "DB"
@@ -114,6 +116,7 @@ MAIL_PROVIDER = "resend"
 TURNSTILE_ENABLED = "false"
 USAGE_QUOTA_DAILY = "1000"
 RATE_LIMIT_PER_MINUTE = "60"
+FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 
 [[env.beta.d1_databases]]
 binding = "DB"
@@ -166,6 +169,7 @@ MAIL_PROVIDER = "resend"
 TURNSTILE_ENABLED = "false"
 USAGE_QUOTA_DAILY = "1000"
 RATE_LIMIT_PER_MINUTE = "60"
+FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 
 [[env.production.d1_databases]]
 binding = "DB"
