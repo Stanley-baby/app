@@ -61,9 +61,48 @@ paths:
           description: Login required.
   /v1/collections/all:
     get:
+      parameters:
+        - in: query
+          name: removed
+          required: false
+          description: Return the signed-in User's Recycle Bin Collections when true.
+          schema:
+            type: boolean
       responses:
         '200':
-          description: Authorized Collections with numeric Resource IDs and parent IDs.
+          description: Authorized active or removed Collections with numeric Resource IDs and parent IDs.
+        '401':
+          description: Login required.
+  /v1/collections:
+    delete:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: integer
+                    minimum: 1
+      responses:
+        '200':
+          description: Owned Collections and descendants moved to the Recycle Bin.
+        '400':
+          description: Invalid Collection IDs.
+        '401':
+          description: Login required.
+        '404':
+          description: A Collection is not owned by this User.
+  /v1/collections/clean:
+    put:
+      responses:
+        '200':
+          description: Empty owned Collections permanently removed.
         '401':
           description: Login required.
   /v1/collection:
@@ -128,6 +167,8 @@ paths:
                     - type: string
                       enum: [root]
                   nullable: true
+                removed:
+                  type: boolean
       responses:
         '200':
           description: Collection title or parent updated.
@@ -137,6 +178,14 @@ paths:
           description: Login required.
         '404':
           description: Collection or parent not found for this User.
+    delete:
+      responses:
+        '200':
+          description: Owned Collection and descendants moved to the Recycle Bin, or the Recycle Bin was permanently cleared for the special -99 ID.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
   /v1/tags/{collectionId}:
     parameters:
       - in: path
@@ -248,6 +297,15 @@ paths:
                 title:
                   type: string
                   maxLength: 500
+                description:
+                  type: string
+                  maxLength: 10000
+                excerpt:
+                  type: string
+                  maxLength: 10000
+                note:
+                  type: string
+                  maxLength: 10000
                 collectionId:
                   type: integer
                   minimum: -1
@@ -256,6 +314,10 @@ paths:
                   items:
                     type: string
                     maxLength: 100
+                highlights:
+                  type: array
+                  items:
+                    type: object
       responses:
         '201':
           description: Basic Bookmark created for the signed-in User.
@@ -290,6 +352,15 @@ paths:
                 title:
                   type: string
                   maxLength: 500
+                description:
+                  type: string
+                  maxLength: 10000
+                excerpt:
+                  type: string
+                  maxLength: 10000
+                note:
+                  type: string
+                  maxLength: 10000
                 collectionId:
                   type: integer
                   minimum: -1
@@ -388,6 +459,15 @@ paths:
                       title:
                         type: string
                         maxLength: 500
+                      description:
+                        type: string
+                        maxLength: 10000
+                      excerpt:
+                        type: string
+                        maxLength: 10000
+                      note:
+                        type: string
+                        maxLength: 10000
                       collectionId:
                         type: integer
                         minimum: -1
@@ -396,6 +476,10 @@ paths:
                         items:
                           type: string
                           maxLength: 100
+                      highlights:
+                        type: array
+                        items:
+                          type: object
       responses:
         '201':
           description: Multiple Bookmarks created with one Change Version per item.
@@ -417,6 +501,18 @@ paths:
         schema:
           type: integer
           minimum: 0
+      - in: query
+        name: search
+        required: false
+        description: Match only authorized Bookmark title, URL, description, tags, note, or Highlights; Saved-page Snapshot body is excluded.
+        schema:
+          type: string
+      - in: query
+        name: dangerAll
+        required: false
+        description: Required by bulk Bookmark deletion clients.
+        schema:
+          type: boolean
     get:
       responses:
         '200':
@@ -425,6 +521,28 @@ paths:
           description: Invalid Change Version.
         '401':
           description: Login required.
+    delete:
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: integer
+                    minimum: 1
+      responses:
+        '200':
+          description: Owned active Bookmarks moved to the Recycle Bin, or the -99 Recycle Bin was permanently cleared.
+        '400':
+          description: Invalid Bookmark IDs.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
   /v1/raindrops/changes:
     get:
       parameters:

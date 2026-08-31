@@ -65,8 +65,13 @@ class MemoryDatabase {
             if (sql.includes('FROM bookmark_changes WHERE user_id'))
                 return this.changes.filter(item => item.user_id === values[0]).sort((left, right) => right.version - left.version)[0] || null
 
-            if (sql.includes('FROM collections WHERE id'))
-                return this.collections.find(item => item.id === values[0] && item.user_id === values[1]) || null
+            if (sql.includes('FROM collections WHERE id')) {
+                const item = this.collections.find(item => item.id === values[0] && item.user_id === values[1])
+                return item && (!sql.includes('removed_at IS NULL') || !item.removed_at) ? item : null
+            }
+
+            if (sql.includes('FROM collections WHERE user_id'))
+                return this.collections.find(item => item.user_id === values[0]) || null
 
             if (sql.includes('SELECT c.*')) {
                 const item = this.collections.find(item => item.id === values[0] && item.user_id === values[1])
@@ -107,13 +112,16 @@ class MemoryDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('INSERT INTO bookmarks')) {
-                const bookmark = { id: this.bookmarks.length + 1, user_id: values[0], url: values[1], title: values[2], created_at: values[3], updated_at: values[4], collection_id: values[5], tags: values[6], highlights: '[]', removed_at: null, change_version: this.nextChangeVersion }
+                const modern = sql.includes('description')
+                const bookmark = modern
+                    ? { id: this.bookmarks.length + 1, user_id: values[0], url: values[1], title: values[2], description: values[3], note: values[4], highlights: values[5], created_at: values[6], updated_at: values[7], collection_id: values[8], tags: values[9], removed_at: null, change_version: this.nextChangeVersion }
+                    : { id: this.bookmarks.length + 1, user_id: values[0], url: values[1], title: values[2], description: '', note: '', created_at: values[3], updated_at: values[4], collection_id: values[5], tags: values[6], highlights: '[]', removed_at: null, change_version: this.nextChangeVersion }
                 this.bookmarks.push(bookmark)
                 this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { last_row_id: bookmark.id, changes: 1 } }
             }
             if (sql.includes('INSERT INTO collections')) {
-                const collection = { id: this.collections.length + 1, user_id: values[0], title: values[1], parent_id: values[2], created_at: values[3], updated_at: values[4] }
+                const collection = { id: this.collections.length + 1, user_id: values[0], title: values[1], parent_id: values[2], created_at: values[3], updated_at: values[4], removed_at: null }
                 this.collections.push(collection)
                 return { meta: { last_row_id: collection.id, changes: 1 } }
             }
@@ -132,16 +140,53 @@ class MemoryDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE bookmarks SET url')) {
-                const bookmark = this.bookmarks.find(item => item.id === values[7] && item.user_id === values[8])
-                Object.assign(bookmark, { url: values[0], title: values[1], collection_id: values[2], tags: values[3], highlights: values[4], removed_at: values[5], updated_at: values[6], change_version: this.nextChangeVersion })
+                const modern = sql.includes('description = ?')
+                const bookmark = this.bookmarks.find(item => item.id === values[modern ? 9 : 7] && item.user_id === values[modern ? 10 : 8])
+                Object.assign(bookmark, modern
+                    ? { url: values[0], title: values[1], description: values[2], note: values[3], collection_id: values[4], tags: values[5], highlights: values[6], removed_at: values[7], updated_at: values[8], change_version: this.nextChangeVersion }
+                    : { url: values[0], title: values[1], collection_id: values[2], tags: values[3], highlights: values[4], removed_at: values[5], updated_at: values[6], change_version: this.nextChangeVersion })
                 this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE bookmarks SET removed_at')) {
-                const bookmark = this.bookmarks.find(item => item.id === values[2] && item.user_id === values[3])
-                Object.assign(bookmark, { removed_at: values[0], updated_at: values[1], change_version: this.nextChangeVersion })
-                this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
-                return { meta: { changes: 1 } }
+                if (sql.includes('removed_at = NULL')) {
+                    const userId = values[1]
+                    const threshold = Number(values[values.length - 1])
+                    const ids = new Set(values.slice(2, -1).map(Number))
+                    const matches = this.bookmarks.filter(item => item.user_id === userId && ids.has(item.collection_id) && item.removed_at >= threshold)
+                    for (const bookmark of matches) {
+                        Object.assign(bookmark, { removed_at: null, updated_at: values[0], change_version: this.nextChangeVersion })
+                        this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
+                    }
+                    return { meta: { changes: matches.length } }
+                }
+                if (sql.includes('WHERE id = ?')) {
+                    const bookmark = this.bookmarks.find(item => item.id === values[2] && item.user_id === values[3])
+                    if (!bookmark) return { meta: { changes: 0 } }
+                    Object.assign(bookmark, { removed_at: values[0], updated_at: values[1], change_version: this.nextChangeVersion })
+                    this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
+                    return { meta: { changes: 1 } }
+                }
+                const userId = values[2]
+                let matches = this.bookmarks.filter(item => item.user_id === userId && !item.removed_at)
+                if (sql.includes('collection_id = ?')) matches = matches.filter(item => item.collection_id === values[3])
+                if (sql.includes('id IN')) {
+                    const ids = new Set(values.slice(sql.includes('collection_id = ?') ? 4 : 3).map(Number))
+                    matches = matches.filter(item => ids.has(item.id))
+                }
+                for (const bookmark of matches) {
+                    Object.assign(bookmark, { removed_at: values[0], updated_at: values[1], change_version: this.nextChangeVersion })
+                    this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
+                }
+                return { meta: { changes: matches.length } }
+            }
+            if (sql.includes('UPDATE collections SET removed_at')) {
+                const restore = sql.includes('removed_at = NULL')
+                const userId = restore ? values[1] : values[2]
+                const ids = new Set(values.slice(restore ? 2 : 3).map(Number))
+                const matches = this.collections.filter(item => item.user_id === userId && ids.has(item.id) && (restore ? Boolean(item.removed_at) : !item.removed_at))
+                for (const item of matches) Object.assign(item, restore ? { removed_at: null, updated_at: values[0] } : { removed_at: values[0], updated_at: values[1] })
+                return { meta: { changes: matches.length } }
             }
             if (sql.includes('UPDATE bookmarks SET tags')) {
                 const bookmark = this.bookmarks.find(item => item.id === values[2] && item.user_id === values[3])
@@ -180,22 +225,42 @@ class MemoryDatabase {
                 else this.identities = this.identities.filter(item => item.user_id !== values[0])
                 return { meta: { changes: before - this.identities.length } }
             }
+            if (sql.includes('DELETE FROM collection_collaborators')) {
+                const before = this.collaborators.length
+                const ids = sql.includes('collection_id = ?') ? [values[0]] : values.map(Number)
+                this.collaborators = this.collaborators.filter(item => !ids.includes(Number(item.collection_id)))
+                return { meta: { changes: before - this.collaborators.length } }
+            }
             if (sql.includes('DELETE FROM account_deletions')) {
                 const before = this.deletions.length
                 this.deletions = this.deletions.filter(item => item.user_id !== values[0])
                 return { meta: { changes: before - this.deletions.length } }
             }
             if (sql.includes('DELETE FROM bookmarks')) {
-                this.bookmarks = this.bookmarks.filter(item => item.user_id !== values[0])
-                return { meta: { changes: 1 } }
+                const before = this.bookmarks.length
+                if (sql.includes('id IN')) {
+                    const ids = new Set(values.slice(1).map(Number))
+                    this.bookmarks = this.bookmarks.filter(item => !(item.user_id === values[0] && ids.has(item.id) && (!sql.includes('removed_at IS NOT NULL') || item.removed_at)))
+                } else this.bookmarks = this.bookmarks.filter(item => item.user_id !== values[0])
+                return { meta: { changes: before - this.bookmarks.length } }
             }
             if (sql.includes('DELETE FROM bookmark_changes')) {
-                this.changes = this.changes.filter(item => item.user_id !== values[0])
-                return { meta: { changes: 1 } }
+                const before = this.changes.length
+                if (sql.includes('bookmark_id IN')) {
+                    const ids = new Set(values.slice(1).map(Number))
+                    this.changes = this.changes.filter(item => !(item.user_id === values[0] && ids.has(item.bookmark_id)))
+                } else this.changes = this.changes.filter(item => item.user_id !== values[0])
+                return { meta: { changes: before - this.changes.length } }
             }
             if (sql.includes('DELETE FROM collections')) {
-                this.collections = this.collections.filter(item => item.user_id !== values[0])
-                return { meta: { changes: 1 } }
+                const before = this.collections.length
+                if (sql.includes('id IN')) {
+                    const ids = new Set(values.slice(1).map(Number))
+                    this.collections = this.collections.filter(item => !(item.user_id === values[0] && ids.has(item.id) && (!sql.includes('removed_at IS NOT NULL') || item.removed_at)))
+                } else if (sql.includes('id = ?')) {
+                    this.collections = this.collections.filter(item => !(item.user_id === values[0] && item.id === values[1] && (!sql.includes('removed_at IS NULL') || !item.removed_at)))
+                } else this.collections = this.collections.filter(item => item.user_id !== values[0])
+                return { meta: { changes: before - this.collections.length } }
             }
             if (sql.includes('DELETE FROM email_tokens')) {
                 this.tokens = this.tokens.filter(item => item.user_id !== values[0])
@@ -220,8 +285,14 @@ class MemoryDatabase {
                         .filter(item => item.user_id === values[0] && !item.revoked_at && item.expires_at > values[1])
                         .map(item => ({ ...item }))
                 }
-            if (sql.includes('FROM collections c'))
-                return { results: this.collections.filter(item => item.user_id === values[0]).map(item => ({ ...item, count: this.bookmarks.filter(bookmark => bookmark.collection_id === item.id && !bookmark.removed_at).length })) }
+            if (sql.includes('FROM collections c')) {
+                let items = this.collections.filter(item => item.user_id === values[0])
+                if (sql.includes('removed_at IS NOT NULL')) items = items.filter(item => item.removed_at)
+                else if (sql.includes('removed_at IS NULL')) items = items.filter(item => !item.removed_at)
+                return { results: items.map(item => ({ ...item, count: this.bookmarks.filter(bookmark => bookmark.collection_id === item.id && !bookmark.removed_at).length })) }
+            }
+            if (sql.includes('FROM collections WHERE user_id'))
+                return { results: this.collections.filter(item => item.user_id === values[0]).map(item => ({ ...item })) }
             if (sql.includes('FROM bookmark_changes c JOIN bookmarks')) {
                 return {
                     results: this.changes
@@ -235,6 +306,16 @@ class MemoryDatabase {
                 if (sql.includes('removed_at IS NOT NULL')) items = items.filter(item => item.removed_at)
                 else items = items.filter(item => !item.removed_at)
                 if (sql.includes('collection_id = ?')) items = items.filter(item => item.collection_id === values[1])
+                if (sql.includes('id IN')) {
+                    const offset = sql.includes('collection_id = ?') ? 2 : 1
+                    const ids = new Set(values.slice(offset).map(Number))
+                    items = items.filter(item => ids.has(item.id))
+                }
+                if (sql.includes('title LIKE ?')) {
+                    const offset = sql.includes('collection_id = ?') ? 2 : 1
+                    const terms = values.slice(offset).map(value => String(value).replace(/^%|%$/g, '').toLowerCase())
+                    items = items.filter(item => terms.some(term => [item.title, item.url, item.description, item.note, item.tags, item.highlights].some(value => String(value || '').toLowerCase().includes(term))))
+                }
                 return { results: items }
             }
             return { results: [] }
@@ -799,6 +880,130 @@ test('nested collections, bookmark moves, tags, and highlights stay user-scoped'
 
         const unauthorized = await worker.fetch(request('/v1/collections/all'), testEnv)
         assert.equal(unauthorized.status, 401)
+    } finally {
+        globalThis.fetch = originalFetch
+    }
+})
+
+test('recycle bin, metadata search, and last-write-wins stay user-scoped', async () => {
+    const db = new MemoryDatabase()
+    const testEnv = { ...env(db), TURNSTILE_ENABLED: 'false' }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options) => {
+        if (url === 'https://api.resend.com/emails') return Response.json({ id: 'email_issue7' })
+        return originalFetch(url, options)
+    }
+
+    const jsonRequest = (path, method, body, cookie) => new Request('https://api.example.test' + path, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    })
+
+    const signIn = async email => {
+        const signup = await worker.fetch(request('/v1/auth/email/signup', {
+            name: email.split('@')[0], email, password: 'correct horse battery staple', betaAccessPassword: 'invite-only'
+        }), testEnv)
+        assert.equal(signup.status, 201)
+        const login = await worker.fetch(request('/v1/auth/email/login', {
+            email, password: 'correct horse battery staple'
+        }), testEnv)
+        assert.equal(login.status, 200)
+        return login.headers.get('Set-Cookie').split(';')[0]
+    }
+
+    try {
+        const ownerCookie = await signIn('issue7.owner@example.test')
+        const outsiderCookie = await signIn('issue7.outsider@example.test')
+        const rootResponse = await worker.fetch(request('/v1/collection', { title: 'Issue 7 root' }, { Cookie: ownerCookie }), testEnv)
+        const rootId = (await rootResponse.json()).item._id
+        const childResponse = await worker.fetch(request('/v1/collection', { title: 'Issue 7 child', parentId: rootId }, { Cookie: ownerCookie }), testEnv)
+        const childId = (await childResponse.json()).item._id
+        const created = await worker.fetch(request('/v1/raindrop', {
+            link: 'https://example.test/issue7',
+            title: 'Issue 7 searchable title',
+            description: 'Issue 7 searchable description',
+            note: 'Issue 7 searchable note',
+            tags: ['issue7-search-tag'],
+            highlights: [{ text: 'Issue 7 searchable highlight' }],
+            collectionId: childId
+        }, { Cookie: ownerCookie }), testEnv)
+        assert.equal(created.status, 201)
+        const bookmark = (await created.json()).item
+        const stored = db.bookmarks.find(item => item.id === bookmark._id)
+        stored.snapshot_body = 'Issue 7 private snapshot body'
+        assert.equal(bookmark.description, 'Issue 7 searchable description')
+        assert.equal(bookmark.note, 'Issue 7 searchable note')
+
+        const partialUpdate = await worker.fetch(jsonRequest('/v1/raindrop/' + bookmark._id, 'PUT', { title: 'Issue 7 searchable title' }, ownerCookie), testEnv)
+        assert.equal(partialUpdate.status, 200)
+        assert.equal((await partialUpdate.json()).item.description, 'Issue 7 searchable description')
+
+        for (const term of ['description', 'searchable note', 'search-tag', 'searchable highlight']) {
+            const searched = await worker.fetch(request('/v1/raindrops/0?search=' + encodeURIComponent(term), null, { Cookie: ownerCookie }), testEnv)
+            assert.equal(searched.status, 200)
+            assert.equal((await searched.json()).items.length, 1)
+        }
+        const snapshotSearch = await worker.fetch(request('/v1/raindrops/0?search=' + encodeURIComponent('private snapshot body'), null, { Cookie: ownerCookie }), testEnv)
+        assert.equal((await snapshotSearch.json()).items.length, 0)
+
+        const removed = await worker.fetch(jsonRequest('/v1/raindrop/' + bookmark._id, 'DELETE', undefined, ownerCookie), testEnv)
+        assert.equal(removed.status, 200)
+        const removedVersion = (await removed.json()).version
+        const trash = await worker.fetch(request('/v1/raindrops/-99', null, { Cookie: ownerCookie }), testEnv)
+        assert.equal((await trash.json()).items.length, 1)
+        const restored = await worker.fetch(jsonRequest('/v1/raindrop/' + bookmark._id, 'PUT', { removed: false }, ownerCookie), testEnv)
+        const restoredBody = await restored.json()
+        assert.equal(restored.status, 200)
+        assert.equal(restoredBody.item.removed, false)
+        assert.ok(restoredBody.item.changeVersion > removedVersion)
+
+        const removedCollection = await worker.fetch(jsonRequest('/v1/collection/' + rootId, 'DELETE', undefined, ownerCookie), testEnv)
+        assert.equal(removedCollection.status, 200)
+        const activeCollections = await worker.fetch(request('/v1/collections/all', null, { Cookie: ownerCookie }), testEnv)
+        assert.equal((await activeCollections.json()).items.some(item => item._id === rootId), false)
+        const removedCollections = await worker.fetch(request('/v1/collections/all?removed=true', null, { Cookie: ownerCookie }), testEnv)
+        assert.deepEqual((await removedCollections.json()).items.map(item => item._id).sort(), [rootId, childId].sort())
+        const restoredCollection = await worker.fetch(jsonRequest('/v1/collection/' + rootId, 'PUT', { removed: false }, ownerCookie), testEnv)
+        assert.equal(restoredCollection.status, 200)
+        const restoredBookmarks = await worker.fetch(request('/v1/raindrops/' + childId, null, { Cookie: ownerCookie }), testEnv)
+        assert.equal((await restoredBookmarks.json()).items.length, 1)
+
+        const second = await worker.fetch(request('/v1/raindrop', {
+            link: 'https://example.test/issue7-second', title: 'Issue 7 second', collectionId: childId
+        }, { Cookie: ownerCookie }), testEnv)
+        const secondId = (await second.json()).item._id
+        const bulkRemoved = await worker.fetch(jsonRequest('/v1/raindrops/' + childId + '?dangerAll=true', 'DELETE', { ids: [secondId] }, ownerCookie), testEnv)
+        assert.equal(bulkRemoved.status, 200)
+        const cleared = await worker.fetch(jsonRequest('/v1/collection/-99', 'DELETE', undefined, ownerCookie), testEnv)
+        assert.equal(cleared.status, 200)
+        assert.equal((await worker.fetch(request('/v1/raindrops/-99', null, { Cookie: ownerCookie }), testEnv).then(response => response.json())).items.length, 0)
+
+        const bulkCollection = await worker.fetch(request('/v1/collection', { title: 'Issue 7 bulk collection' }, { Cookie: ownerCookie }), testEnv)
+        const bulkCollectionId = (await bulkCollection.json()).item._id
+        const bulkCollectionDelete = await worker.fetch(jsonRequest('/v1/collections', 'DELETE', { ids: [bulkCollectionId] }, ownerCookie), testEnv)
+        assert.equal(bulkCollectionDelete.status, 200)
+        assert.equal((await worker.fetch(request('/v1/collections/all?removed=true', null, { Cookie: ownerCookie }), testEnv).then(response => response.json())).items.some(item => item._id === bulkCollectionId), true)
+        assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + bulkCollectionId, 'PUT', { removed: false }, ownerCookie), testEnv)).status, 200)
+
+        const emptyCollection = await worker.fetch(request('/v1/collection', { title: 'Issue 7 empty collection' }, { Cookie: ownerCookie }), testEnv)
+        const emptyCollectionId = (await emptyCollection.json()).item._id
+        const cleaned = await worker.fetch(jsonRequest('/v1/collections/clean', 'PUT', {}, ownerCookie), testEnv)
+        assert.equal((await cleaned.json()).count, 2)
+        assert.equal((await worker.fetch(request('/v1/collection/' + emptyCollectionId, null, { Cookie: ownerCookie }), testEnv)).status, 404)
+        assert.equal((await worker.fetch(request('/v1/collection/' + bulkCollectionId, null, { Cookie: ownerCookie }), testEnv)).status, 404)
+
+        const foreignDelete = await worker.fetch(jsonRequest('/v1/raindrop/' + bookmark._id, 'DELETE', undefined, outsiderCookie), testEnv)
+        assert.equal(foreignDelete.status, 404)
+        const foreignCollectionDelete = await worker.fetch(jsonRequest('/v1/collection/' + rootId, 'DELETE', undefined, outsiderCookie), testEnv)
+        assert.equal(foreignCollectionDelete.status, 404)
+        const winner = await Promise.all(['Issue 7 winner A', 'Issue 7 winner B'].map(title =>
+            worker.fetch(jsonRequest('/v1/raindrop/' + bookmark._id, 'PUT', { title }, ownerCookie), testEnv).then(response => response.json())
+        ))
+        const latest = await worker.fetch(request('/v1/raindrop/' + bookmark._id, null, { Cookie: ownerCookie }), testEnv)
+        const latestBody = await latest.json()
+        const winningResponse = winner.find(body => body.item.changeVersion === latestBody.item.changeVersion)
+        assert.equal(latestBody.item.title, winningResponse.item.title)
     } finally {
         globalThis.fetch = originalFetch
     }
