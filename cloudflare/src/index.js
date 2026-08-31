@@ -551,14 +551,15 @@ const markTaskFailure = async (env, task, failure) => {
         return { action: 'retry', delaySeconds }
     }
 
+    const finalRetryCount = failure?.fatal ? Number(task.retry_count || 0) : Math.min(metadataMaxRetries, retryCount)
     await env.DB.prepare(`UPDATE background_tasks SET status = 'dead_letter', progress = 0,
         retry_count = ?, error_code = ?, error_message = ?, next_retry_at = NULL,
         updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`).bind(
-        Math.min(metadataMaxRetries, retryCount), details.code, details.message, now, now, task.id).run()
+        finalRetryCount, details.code, details.message, now, now, task.id).run()
     await recordAlert(env, taskRequest(env, task.id), {
         userId: task.user_id,
         kind: 'metadata_enrichment_failed',
-        metadata: { taskId: task.id, code: details.code, retryCount: Math.min(metadataMaxRetries, retryCount) }
+        metadata: { taskId: task.id, code: details.code, retryCount: finalRetryCount }
     })
     return { action: 'dead_letter', failure: details }
 }
