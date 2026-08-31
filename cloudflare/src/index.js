@@ -11,7 +11,8 @@ const rateWindowMs = 60 * 1000
 const metadataTaskType = 'metadata_enrichment'
 const attachmentTaskType = 'attachment_scan'
 const captureTaskType = 'capture'
-const contentTaskTypes = new Set([attachmentTaskType, captureTaskType])
+const migrationTaskType = 'migration_import'
+const backgroundTaskTypes = new Set([metadataTaskType, attachmentTaskType, captureTaskType, migrationTaskType])
 const metadataMaxRetries = 3
 const metadataMaxRedirects = 5
 const metadataBodyLimit = 256 * 1024
@@ -23,6 +24,8 @@ const metadataLeaseMs = 60 * 1000
 const metadataRetryDelays = [5, 30, 300]
 const invitationDays = 7
 const collectionRoles = new Set(['owner', 'editor', 'viewer'])
+const migrationDefaultMaxBytes = 2 * 1024 * 1024
+const migrationMaxItems = 10000
 
 const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
 
@@ -229,6 +232,72 @@ const validHighlightChanges = changes => Array.isArray(changes) && changes.every
     const note = String(change?.note || '')
     return text.length <= 10000 && note.length <= 10000 && (id || text.trim())
 })
+
+const migrationSourceId = (item, index, type) => {
+    const value = item?.sourceId ?? item?.source_id ?? item?._id ?? item?.id
+    return String(value === undefined || value === null || value === '' ? type + ':' + index : value).trim().slice(0, 200)
+}
+
+const migrationArray = (root, names) => {
+    for (const name of names)
+        if (Array.isArray(root?.[name])) return root[name]
+    return []
+}
+
+const migrationCollectionSourceId = value => {
+    if (value === undefined || value === null || value === '' || value === 0 || value === '0' || value === 'root') return null
+    return String(value).trim().slice(0, 200) || null
+}
+
+const normalizeMigrationArchive = input => {
+    const root = input && typeof input === 'object' && !Array.isArray(input)
+        ? (input.archive && typeof input.archive === 'object' && !Array.isArray(input.archive) ? input.archive : input)
+        : { bookmarks: Array.isArray(input) ? input : [] }
+    const collections = migrationArray(root, ['collections', 'folders', 'spaces']).map((item, index) => ({
+        sourceId: migrationSourceId(item, index, 'collection'),
+        title: String(item?.title || item?.name || '').trim(),
+        parentSourceId: migrationCollectionSourceId(item?.parentId ?? item?.parent_id ?? item?.parent),
+        slug: slugify(item?.slug)
+    }))
+    const bookmarks = migrationArray(root, ['bookmarks', 'raindrops', 'items']).map((item, index) => {
+        const link = String(item?.link ?? item?.url ?? '').trim()
+        const tags = bookmarkTags(item?.tags)
+        const highlights = item?.highlights === undefined ? [] : item.highlights
+        return {
+            sourceId: migrationSourceId(item, index, 'bookmark'),
+            url: link,
+            title: String(item?.title || '').trim(),
+            description: String(item?.description ?? item?.excerpt ?? '').trim(),
+            note: String(item?.note || '').trim(),
+            tags,
+            highlights,
+            collectionSourceId: migrationCollectionSourceId(item?.collectionId ?? item?.collection_id ?? item?.collection)
+        }
+    })
+
+    if (collections.length + bookmarks.length > migrationMaxItems)
+        throw metadataFailure('migration_too_large', 'The migration archive contains too many records', true)
+    if (!collections.length && !bookmarks.length)
+        throw metadataFailure('migration_empty', 'The migration archive has no Collections or Bookmarks', true)
+    const seen = new Set()
+    for (const item of collections) {
+        if (!item.title || item.title.length > 200 || seen.has('collection:' + item.sourceId))
+            throw metadataFailure('migration_invalid', 'The migration archive contains invalid Collections', true)
+        seen.add('collection:' + item.sourceId)
+    }
+    for (const item of bookmarks) {
+        const urlCheck = validateFetchableUrl(item.url)
+        if (!urlCheck.ok || item.title.length > 500 || item.description.length > 10000 || item.note.length > 10000 ||
+            !validTagList(item.tags) || !validHighlightChanges(item.highlights) || seen.has('bookmark:' + item.sourceId))
+            throw metadataFailure('migration_invalid', 'The migration archive contains invalid Bookmarks', true)
+        seen.add('bookmark:' + item.sourceId)
+    }
+    return {
+        source: String(root.source || root.provider || 'archive').trim().slice(0, 100) || 'archive',
+        collections,
+        bookmarks
+    }
+}
 
 const bookmarkItem = item => {
     const changeVersion = Number(item.change_version || 0)
@@ -593,23 +662,27 @@ const parseTaskMetadata = value => {
     }
 }
 
-const publicTask = task => ({
-    id: String(task.id),
-    taskId: String(task.id),
-    type: task.type,
-    bookmarkId: Number(task.bookmark_id),
-    ...(task.content_id ? { contentId: String(task.content_id) } : {}),
-    status: task.status,
-    progress: Number(task.progress || 0),
-    retryCount: Number(task.retry_count || 0),
-    attempts: task.status === 'queued' ? 0 : Number(task.retry_count || 0) + 1,
-    metadata: parseTaskMetadata(task.result_metadata),
-    failure: task.error_code ? { code: task.error_code, message: task.error_message } : null,
-    createdAt: taskDate(task.created_at),
-    updatedAt: taskDate(task.updated_at),
-    nextRetryAt: taskDate(task.next_retry_at),
-    completedAt: taskDate(task.completed_at)
-})
+const publicTask = task => {
+    const payload = parseTaskMetadata(task.payload)
+    return {
+        id: String(task.id),
+        taskId: String(task.id),
+        type: task.type,
+        ...(task.bookmark_id === null || task.bookmark_id === undefined ? {} : { bookmarkId: Number(task.bookmark_id) }),
+        ...(task.content_id ? { contentId: String(task.content_id) } : {}),
+        ...(payload.archiveId ? { archiveId: String(payload.archiveId) } : {}),
+        status: task.status,
+        progress: Number(task.progress || 0),
+        retryCount: Number(task.retry_count || 0),
+        attempts: task.status === 'queued' ? 0 : Number(task.retry_count || 0) + 1,
+        metadata: parseTaskMetadata(task.result_metadata),
+        failure: task.error_code ? { code: task.error_code, message: task.error_message } : null,
+        createdAt: taskDate(task.created_at),
+        updatedAt: taskDate(task.updated_at),
+        nextRetryAt: taskDate(task.next_retry_at),
+        completedAt: taskDate(task.completed_at)
+    }
+}
 
 const publicContent = content => ({
     id: String(content.id),
@@ -912,7 +985,14 @@ const taskFailureDetails = failure => {
         capture_redirect_failed: 'The linked page returned too many redirects',
         capture_too_large: 'The captured page is too large to store',
         content_storage_unavailable: 'Content storage is not configured',
-        content_too_large: 'The content exceeds the size limit'
+        content_too_large: 'The content exceeds the size limit',
+        migration_too_large: 'The migration archive is too large',
+        migration_empty: 'The migration archive has no Collections or Bookmarks',
+        migration_invalid: 'The migration archive contains invalid data',
+        migration_archive_missing: 'The migration archive is no longer available',
+        migration_write_failed: 'The migration could not be written',
+        migration_duplicate_target_missing: 'The duplicate target is no longer available',
+        duplicate_review_required: 'Duplicate review is incomplete'
     }
     const code = messages[failure?.code] ? failure.code : 'metadata_failed'
     return { code, message: messages[code] || 'Metadata enrichment failed' }
@@ -954,7 +1034,7 @@ const markTaskFailure = async (env, task, failure) => {
 
 const claimTask = async (env, taskId) => {
     const task = await selectTask(env, taskId)
-    if (!task || task.type !== metadataTaskType && !contentTaskTypes.has(task.type)) return { action: 'skip' }
+    if (!task || !backgroundTaskTypes.has(task.type)) return { action: 'skip' }
     if (['succeeded', 'dead_letter'].includes(task.status)) return { action: 'skip' }
     const now = Date.now()
     if (task.status === 'retrying' && task.next_retry_at > now)
@@ -1064,6 +1144,7 @@ const processTask = async (env, taskId, type) => {
     if (type === metadataTaskType) return processMetadataTask(env, taskId)
     if (type === attachmentTaskType) return processAttachmentScanTask(env, taskId)
     if (type === captureTaskType) return processCaptureTask(env, taskId)
+    if (type === migrationTaskType) return processMigrationTask(env, taskId)
     return { action: 'skip' }
 }
 
@@ -1120,6 +1201,276 @@ const retryDeadLetterTask = async (env, request, task, userId) => {
     if (!await enqueueTask(env, next)) next = await selectTask(env, task.id, userId) || next
     await recordAudit(env, request, { userId, action: 'task.retry', resourceType: 'background_task', resourceId: task.id, outcome: 'success' })
     return { task: next, status: 202 }
+}
+
+const migrationMaxBytes = env => Math.min(
+    migrationDefaultMaxBytes,
+    integerEnv(env, ['MIGRATION_MAX_BYTES', 'IMPORT_MAX_BYTES'], migrationDefaultMaxBytes)
+)
+
+const readMigrationArchive = async (request, env) => {
+    const contentLength = Number(request.headers.get('Content-Length'))
+    if (Number.isSafeInteger(contentLength) && contentLength > migrationMaxBytes(env))
+        throw metadataFailure('migration_too_large', 'The migration archive is too large', true)
+    const { data, form } = await readBody(request)
+    let value = data?.archive ?? data?.payload ?? (form && data?.file ? data.file : data)
+    if (value && typeof value.text === 'function') value = await value.text()
+    if (typeof value === 'string') {
+        if (encoder.encode(value).byteLength > migrationMaxBytes(env))
+            throw metadataFailure('migration_too_large', 'The migration archive is too large', true)
+        try { value = JSON.parse(value) } catch { throw metadataFailure('migration_invalid', 'The migration archive is not valid JSON', true) }
+    }
+    let encoded
+    try { encoded = encoder.encode(JSON.stringify(value ?? {})) } catch { encoded = new Uint8Array(migrationMaxBytes(env) + 1) }
+    if (encoded.byteLength > migrationMaxBytes(env))
+        throw metadataFailure('migration_too_large', 'The migration archive is too large', true)
+    return normalizeMigrationArchive(value)
+}
+
+const migrationDuplicateItems = async (env, userId, archive) => {
+    const rows = await env.DB.prepare('SELECT id, url, title, collection_id FROM bookmarks WHERE user_id = ? AND removed_at IS NULL')
+        .bind(userId).all()
+    const existing = new Map()
+    for (const row of rows.results || [])
+        if (!existing.has(String(row.url))) existing.set(String(row.url), row)
+
+    const seen = new Map()
+    const duplicates = []
+    for (const item of archive.bookmarks) {
+        const prior = seen.get(item.url)
+        const match = existing.get(item.url)
+        if (match || prior)
+            duplicates.push({
+                sourceId: item.sourceId,
+                sourceType: 'bookmark',
+                url: item.url,
+                title: item.title,
+                existingResourceId: match ? Number(match.id) : null,
+                duplicateOfSourceId: prior?.sourceId || null
+            })
+        if (!prior) seen.set(item.url, item)
+    }
+    return duplicates
+}
+
+const migrationDecision = value => {
+    if (value === true || ['keep', 'import', 'create'].includes(String(value || '').toLowerCase())) return 'keep'
+    if (value === false || ['skip', 'ignore'].includes(String(value || '').toLowerCase())) return 'skip'
+    return null
+}
+
+const parseMigrationDecisions = value => {
+    try {
+        const parsed = JSON.parse(value || '{}')
+        return parsed && typeof parsed === 'object' && parsed.decisions && typeof parsed.decisions === 'object'
+            ? parsed.decisions
+            : {}
+    } catch {
+        return {}
+    }
+}
+
+const migrationReviewItems = (archive, decisions) => (archive?.duplicates || []).map(item => ({
+    ...item,
+    decision: migrationDecision(decisions['bookmark:' + item.sourceId])
+}))
+
+const migrationOutput = async (env, row, task = null) => {
+    const archive = parseTaskMetadata(row.archive_json)
+    const preflight = parseTaskMetadata(row.preflight_json)
+    const decisions = parseMigrationDecisions(row.review_json)
+    const duplicates = migrationReviewItems(preflight, decisions)
+    return {
+        archiveId: String(row.id),
+        source: row.source,
+        status: row.status,
+        counts: {
+            collections: Number(row.collection_count || archive.collections?.length || 0),
+            bookmarks: Number(row.bookmark_count || archive.bookmarks?.length || 0),
+            total: Number(row.total_items || (archive.collections?.length || 0) + (archive.bookmarks?.length || 0)),
+            duplicates: duplicates.length,
+            mapped: Number(row.completed_items || 0)
+        },
+        duplicates,
+        unresolvedDuplicates: duplicates.filter(item => !item.decision).length,
+        taskId: row.task_id ? String(row.task_id) : null,
+        task: task ? publicTask(task) : null,
+        error: row.error_code ? { code: row.error_code, message: row.error_message } : null,
+        createdAt: taskDate(row.created_at),
+        updatedAt: taskDate(row.updated_at)
+    }
+}
+
+const selectMigrationArchive = async (env, archiveId, userId = null) => {
+    const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
+    const values = userId === null ? [archiveId] : [archiveId, userId]
+    return env.DB.prepare(`SELECT id, user_id, source, archive_json, preflight_json, review_json, status,
+        collection_count, bookmark_count, total_items, completed_items, task_id, error_code, error_message,
+        created_at, updated_at FROM migration_archives WHERE ${where}`).bind(...values).first()
+}
+
+const createMigrationTask = async (env, request, userId, archiveId) => {
+    const idempotencyKey = migrationTaskType + ':' + archiveId
+    const now = Date.now()
+    const id = randomToken(18)
+    const inserted = await env.DB.prepare(`INSERT INTO background_tasks
+        (id, user_id, bookmark_id, type, status, progress, retry_count, idempotency_key,
+         source_url, content_id, payload, created_at, updated_at)
+        VALUES (?, ?, NULL, ?, 'queued', 0, 0, ?, ?, NULL, ?, ?, ?)
+        ON CONFLICT(idempotency_key) DO NOTHING`).bind(
+        id, userId, migrationTaskType, idempotencyKey, 'migration://' + archiveId,
+        JSON.stringify({ archiveId: String(archiveId) }), now, now).run()
+    let task = await selectTask(env, id, userId)
+    if (!task)
+        task = await env.DB.prepare(`SELECT id, user_id, bookmark_id, type, status, progress, retry_count,
+            idempotency_key, source_url, content_id, payload, result_metadata, error_code, error_message,
+            next_retry_at, created_at, updated_at, completed_at FROM background_tasks
+            WHERE idempotency_key = ? AND user_id = ?`).bind(idempotencyKey, userId).first()
+    if (!task) return null
+    if (Number(inserted?.meta?.changes || 0) === 1) {
+        await enqueueTask(env, task)
+        task = await selectTask(env, task.id, userId) || task
+        if (request) await recordAudit(env, request, { userId, action: 'migration.task.created', resourceType: 'background_task', resourceId: task.id, outcome: 'success' })
+    }
+    return task
+}
+
+const migrationMappingKey = (sourceType, sourceId) => sourceType + ':' + String(sourceId)
+
+const migrationMappings = async (env, archiveId, userId) => {
+    const rows = await env.DB.prepare(`SELECT source_type, source_id, resource_type, resource_id, decision
+        FROM migration_mappings WHERE archive_id = ? AND user_id = ?`).bind(archiveId, userId).all()
+    return new Map((rows.results || []).map(row => [migrationMappingKey(row.source_type, row.source_id), {
+        sourceType: row.source_type,
+        sourceId: String(row.source_id),
+        resourceType: row.resource_type,
+        resourceId: Number(row.resource_id),
+        decision: row.decision || 'keep'
+    }]))
+}
+
+const addMigrationMapping = async (env, { archiveId, userId, sourceType, sourceId, resourceType, resourceId, decision = 'keep' }) => {
+    await env.DB.prepare(`INSERT OR IGNORE INTO migration_mappings
+        (archive_id, user_id, source_type, source_id, resource_type, resource_id, decision, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+        archiveId, userId, sourceType, String(sourceId), resourceType, Number(resourceId), decision, Date.now()).run()
+}
+
+const updateMigrationProgress = async (env, task, archiveId, completed, total, status = 'processing') => {
+    const progress = total ? Math.min(99, Math.floor(completed * 100 / total)) : 99
+    const now = Date.now()
+    await env.DB.prepare('UPDATE background_tasks SET status = ?, progress = ?, result_metadata = ?, updated_at = ? WHERE id = ?')
+        .bind(status, progress, JSON.stringify({ archiveId: String(archiveId), completed, total }), now, task.id).run()
+    await env.DB.prepare('UPDATE migration_archives SET status = ?, completed_items = ?, updated_at = ? WHERE id = ?')
+        .bind(status, completed, now, archiveId).run()
+}
+
+const processMigrationTask = async (env, taskId) => {
+    const claimed = await claimTask(env, taskId)
+    if (claimed.action !== 'process') return claimed
+
+    const task = claimed.task
+    let archiveId = null
+    try {
+        const payload = parseTaskMetadata(task.payload)
+        archiveId = String(payload.archiveId || '')
+        if (!archiveId) throw metadataFailure('migration_archive_missing', 'The migration archive is no longer available', true)
+        const archiveRow = await selectMigrationArchive(env, archiveId, task.user_id)
+        if (!archiveRow) throw metadataFailure('migration_archive_missing', 'The migration archive is no longer available', true)
+        const archive = parseTaskMetadata(archiveRow.archive_json)
+        const decisions = parseMigrationDecisions(archiveRow.review_json)
+        const mappings = await migrationMappings(env, archiveId, task.user_id)
+        const total = Number(archiveRow.total_items || (archive.collections?.length || 0) + (archive.bookmarks?.length || 0))
+        let completed = mappings.size
+        await updateMigrationProgress(env, task, archiveId, completed, total)
+
+        const collectionsBySource = new Map((archive.collections || []).map(item => [item.sourceId, item]))
+        const orderedCollections = []
+        const visiting = new Set()
+        const visited = new Set()
+        const visit = item => {
+            if (visited.has(item.sourceId)) return
+            if (visiting.has(item.sourceId)) return
+            visiting.add(item.sourceId)
+            const parent = item.parentSourceId && collectionsBySource.get(item.parentSourceId)
+            if (parent) visit(parent)
+            visiting.delete(item.sourceId)
+            visited.add(item.sourceId)
+            orderedCollections.push(item)
+        }
+        for (const item of archive.collections || []) visit(item)
+
+        for (const item of orderedCollections) {
+            const key = migrationMappingKey('collection', item.sourceId)
+            if (mappings.has(key)) continue
+            const parent = item.parentSourceId && mappings.get(migrationMappingKey('collection', item.parentSourceId))
+            const now = Date.now()
+            const inserted = await env.DB.prepare(`INSERT INTO collections
+                (user_id, title, parent_id, created_at, updated_at, slug, is_public)
+                VALUES (?, ?, ?, ?, ?, ?, 0)`).bind(
+                task.user_id, item.title, parent?.resourceId || null, now, now, item.slug || slugify(item.title)).run()
+            const resourceId = Number(inserted?.meta?.last_row_id)
+            if (!Number.isSafeInteger(resourceId) || resourceId <= 0)
+                throw metadataFailure('migration_write_failed', 'The migration could not create a Collection', true)
+            await env.DB.prepare(`INSERT INTO collection_collaborators (collection_id, user_id, role)
+                VALUES (?, ?, 'owner') ON CONFLICT(collection_id, user_id) DO UPDATE SET role = 'owner'`)
+                .bind(resourceId, task.user_id).run()
+            await addMigrationMapping(env, { archiveId, userId: task.user_id, sourceType: 'collection', sourceId: item.sourceId, resourceType: 'collection', resourceId })
+            mappings.set(key, { resourceId, resourceType: 'collection', decision: 'keep' })
+            completed++
+            await updateMigrationProgress(env, task, archiveId, completed, total)
+        }
+
+        const duplicateBySource = new Map((archiveRow.preflight_json ? parseTaskMetadata(archiveRow.preflight_json).duplicates || [] : []).map(item => [item.sourceId, item]))
+        for (const item of archive.bookmarks || []) {
+            const key = migrationMappingKey('bookmark', item.sourceId)
+            if (mappings.has(key)) continue
+            const duplicate = duplicateBySource.get(item.sourceId)
+            const decision = migrationDecision(decisions['bookmark:' + item.sourceId]) || (duplicate ? null : 'keep')
+            if (!decision) throw metadataFailure('duplicate_review_required', 'Duplicate review is incomplete', true)
+            if (decision === 'skip') {
+                const duplicateTarget = duplicate?.existingResourceId || mappings.get(migrationMappingKey('bookmark', duplicate?.duplicateOfSourceId))?.resourceId
+                if (!duplicateTarget) throw metadataFailure('migration_duplicate_target_missing', 'The duplicate target is no longer available', true)
+                await addMigrationMapping(env, { archiveId, userId: task.user_id, sourceType: 'bookmark', sourceId: item.sourceId, resourceType: 'bookmark', resourceId: duplicateTarget, decision })
+                mappings.set(key, { resourceId: duplicateTarget, resourceType: 'bookmark', decision })
+                completed++
+                await updateMigrationProgress(env, task, archiveId, completed, total)
+                continue
+            }
+            const collection = item.collectionSourceId && mappings.get(migrationMappingKey('collection', item.collectionSourceId))
+            const now = Date.now()
+            const inserted = await env.DB.prepare(`INSERT INTO bookmarks
+                (user_id, url, title, description, note, highlights, created_at, updated_at, collection_id, tags)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+                task.user_id, item.url, item.title, item.description, item.note, JSON.stringify(applyHighlightChanges('[]', item.highlights)),
+                now, now, collection?.resourceId || -1, JSON.stringify(item.tags)).run()
+            const resourceId = Number(inserted?.meta?.last_row_id)
+            if (!Number.isSafeInteger(resourceId) || resourceId <= 0)
+                throw metadataFailure('migration_write_failed', 'The migration could not create a Bookmark', true)
+            await addMigrationMapping(env, { archiveId, userId: task.user_id, sourceType: 'bookmark', sourceId: item.sourceId, resourceType: 'bookmark', resourceId })
+            mappings.set(key, { resourceId, resourceType: 'bookmark', decision })
+            completed++
+            await updateMigrationProgress(env, task, archiveId, completed, total)
+        }
+
+        const now = Date.now()
+        await env.DB.prepare(`UPDATE background_tasks SET status = 'succeeded', progress = 100,
+            result_metadata = ?, error_code = NULL, error_message = NULL, next_retry_at = NULL,
+            updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`).bind(
+            JSON.stringify({ archiveId, completed, total, mappings: mappings.size }), now, now, taskId).run()
+        await env.DB.prepare(`UPDATE migration_archives SET status = 'succeeded', completed_items = ?, error_code = NULL,
+            error_message = NULL, updated_at = ? WHERE id = ?`).bind(completed, now, archiveId).run()
+        return { action: 'ack' }
+    } catch (failure) {
+        const result = await markTaskFailure(env, task, failure)
+        if (archiveId) {
+            const status = result.action === 'retry' ? 'retrying' : 'dead_letter'
+            const details = result.failure || taskFailureDetails(failure)
+            try { await env.DB.prepare('UPDATE migration_archives SET status = ?, error_code = ?, error_message = ?, updated_at = ? WHERE id = ?')
+                .bind(status, details.code, details.message, Date.now(), archiveId).run() } catch {}
+        }
+        return result
+    }
 }
 
 const collectionItem = item => ({
@@ -1525,7 +1876,8 @@ const auditRoute = request => {
         [/^\/v1\/raindrop\/\d+\/attachments?$/, '/v1/raindrop/:id/attachments'],
         [/^\/v1\/collection\/\d+\/sharing(?:\/\d+)?$/, '/v1/collection/:id/sharing'],
         [/^\/v1\/collection\/\d+\/(?:transfer|ownership|published-snapshots|snapshots)(?:\/[^/]+)?$/, '/v1/collection/:id/sharing'],
-        [/^\/v1\/content\/[^/]+\/publish$/, '/v1/content/:id/publish']
+        [/^\/v1\/content\/[^/]+\/publish$/, '/v1/content/:id/publish'],
+        [/^\/v1\/import\/[^/]+(?:\/(?:review|commit|status|retry|mappings))?$/, '/v1/import/:id']
     ]
     const match = patterns.find(([pattern]) => pattern.test(pathname))
     if (match) return pathname.replace(match[0], match[1])
@@ -1538,6 +1890,7 @@ const auditRoute = request => {
         '/v1/raindrops', '/v1/raindrops/changes', '/v1/raindrop', '/v1/user', '/v1/user/quota',
         '/v1/user/connect/google', '/v1/user/connect/google/revoke', '/v1/user/deletion',
         '/v1/tasks',
+        '/v1/import', '/v1/import/preflight',
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
         '/v1/raindrop/file', '/v1/content/upload', '/v1/collaborators/join'
     ])
@@ -1725,7 +2078,7 @@ const requiresVerification = pathname =>
     pathname.startsWith('/v1/collaborators/') ||
     pathname.includes('/sharing') ||
     pathname.startsWith('/v1/backups') ||
-    pathname.startsWith('/v1/import/') ||
+    pathname === '/v1/import' || pathname.startsWith('/v1/import/') ||
     pathname.includes('/capture') ||
     pathname.includes('/content') ||
     pathname.endsWith('/raindrop/file')
@@ -1831,6 +2184,8 @@ const deleteUserData = async (env, userId) => {
         env.DB.prepare('DELETE FROM published_snapshots WHERE published_by = ? OR bookmark_id IN (SELECT id FROM bookmarks WHERE user_id = ?)').bind(userId, userId),
         env.DB.prepare('DELETE FROM collection_invitations WHERE invited_by = ? OR collection_id IN (SELECT id FROM collections WHERE user_id = ?)').bind(userId, userId),
         env.DB.prepare('DELETE FROM collection_collaborators WHERE collection_id IN (SELECT id FROM collections WHERE user_id = ?) OR user_id = ?').bind(userId, userId),
+        env.DB.prepare('DELETE FROM migration_mappings WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM migration_archives WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM background_tasks WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM content_objects WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM bookmark_changes WHERE user_id = ?').bind(userId),
@@ -2159,6 +2514,138 @@ export default {
                 } }, 200, request, env)
             }
 
+            if ((url.pathname === '/v1/import/preflight' || url.pathname === '/v1/import') && request.method === 'POST') {
+                let archive
+                try { archive = await readMigrationArchive(request, env) } catch (failure) {
+                    const details = taskFailureDetails(failure)
+                    const status = failure?.code === 'migration_too_large' ? 413 : 400
+                    return error(details.code, status, request, env, details.message)
+                }
+                let duplicates
+                try { duplicates = await migrationDuplicateItems(env, session.user_id, archive) } catch {
+                    return error('migration_preflight_failed', 503, request, env, 'The migration archive could not be reviewed')
+                }
+                const archiveId = randomToken(18)
+                const now = Date.now()
+                const total = archive.collections.length + archive.bookmarks.length
+                await env.DB.prepare(`INSERT INTO migration_archives
+                    (id, user_id, source, archive_json, preflight_json, review_json, status,
+                     collection_count, bookmark_count, total_items, completed_items, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, '{}', 'review', ?, ?, ?, 0, ?, ?)`)
+                    .bind(archiveId, session.user_id, archive.source, JSON.stringify(archive), JSON.stringify({ duplicates }),
+                        archive.collections.length, archive.bookmarks.length, total, now, now).run()
+                await recordAudit(env, request, { userId: session.user_id, action: 'migration.preflight', resourceType: 'migration_archive', resourceId: archiveId, outcome: 'success' })
+                const review = migrationReviewItems({ duplicates }, {})
+                const preflight = {
+                    archiveId,
+                    source: archive.source,
+                    counts: { collections: archive.collections.length, bookmarks: archive.bookmarks.length, total, duplicates: review.length },
+                    duplicates: review,
+                    unresolvedDuplicates: review.length
+                }
+                return json({ result: true, archiveId, status: 'review', preflight, duplicates: review }, 201, request, env)
+            }
+
+            if (url.pathname === '/v1/import' && request.method === 'GET') {
+                const rows = await env.DB.prepare(`SELECT id, user_id, source, archive_json, preflight_json, review_json, status,
+                    collection_count, bookmark_count, total_items, completed_items, task_id, error_code, error_message,
+                    created_at, updated_at FROM migration_archives WHERE user_id = ? ORDER BY created_at DESC`).bind(session.user_id).all()
+                const items = []
+                for (const row of rows.results || []) items.push(await migrationOutput(env, row))
+                return json({ result: true, items }, 200, request, env)
+            }
+
+            const importMatch = url.pathname.match(/^\/v1\/import\/([^/]+)(?:\/(review|commit|status|retry|mappings))?$/)
+            if (importMatch) {
+                const archiveId = decodeURIComponent(importMatch[1])
+                const action = importMatch[2] || 'status'
+                const archiveRow = await selectMigrationArchive(env, archiveId, session.user_id)
+                if (!archiveRow) return error('migration_not_found', 404, request, env, 'Migration archive was not found')
+
+                if (action === 'status' && request.method === 'GET') {
+                    const task = archiveRow.task_id ? await selectTask(env, archiveRow.task_id, session.user_id) : null
+                    const output = await migrationOutput(env, archiveRow, task)
+                    return json({ result: true, ...output, migration: output }, 200, request, env)
+                }
+
+                if (action === 'mappings' && request.method === 'GET') {
+                    const rows = await env.DB.prepare(`SELECT source_type, source_id, resource_type, resource_id, decision, created_at
+                        FROM migration_mappings WHERE archive_id = ? AND user_id = ? ORDER BY id`).bind(archiveId, session.user_id).all()
+                    const items = (rows.results || []).map(item => ({
+                        sourceType: item.source_type,
+                        sourceId: String(item.source_id),
+                        resourceType: item.resource_type,
+                        resourceId: Number(item.resource_id),
+                        decision: item.decision || 'keep',
+                        createdAt: taskDate(item.created_at)
+                    }))
+                    return json({ result: true, archiveId, items, mappings: items }, 200, request, env)
+                }
+
+                if (action === 'review' && request.method === 'POST') {
+                    if (archiveRow.status !== 'review')
+                        return error('migration_not_reviewable', 409, request, env, 'The migration archive is no longer awaiting review')
+                    const { data } = await readBody(request)
+                    const supplied = data.decisions ?? data.review ?? data.duplicates ?? {}
+                    const entries = Array.isArray(supplied)
+                        ? supplied.map(item => [item?.sourceId ?? item?.source_id ?? item?.id, item?.decision ?? item?.action ?? item?.keep])
+                        : Object.entries(supplied || {}).map(([key, value]) => [key.replace(/^bookmark:/, ''), value])
+                    const allowed = new Set((parseTaskMetadata(archiveRow.preflight_json).duplicates || []).map(item => item.sourceId))
+                    const decisions = parseMigrationDecisions(archiveRow.review_json)
+                    for (const [sourceId, value] of entries) {
+                        const id = String(sourceId || '').trim()
+                        const decision = migrationDecision(value)
+                        if (!id || !allowed.has(id) || !decision)
+                            return error('validation_failed', 400, request, env, 'Provide keep or skip for every duplicate source')
+                        decisions['bookmark:' + id] = decision
+                    }
+                    await env.DB.prepare('UPDATE migration_archives SET review_json = ?, updated_at = ? WHERE id = ? AND user_id = ? AND status = \'review\'')
+                        .bind(JSON.stringify({ decisions }), Date.now(), archiveId, session.user_id).run()
+                    const duplicates = migrationReviewItems(parseTaskMetadata(archiveRow.preflight_json), decisions)
+                    await recordAudit(env, request, { userId: session.user_id, action: 'migration.review', resourceType: 'migration_archive', resourceId: archiveId, outcome: 'success' })
+                    return json({ result: true, archiveId, status: 'review', duplicates, unresolvedDuplicates: duplicates.filter(item => !item.decision).length }, 200, request, env)
+                }
+
+                if (action === 'commit' && request.method === 'POST') {
+                    const decisions = parseMigrationDecisions(archiveRow.review_json)
+                    const duplicates = migrationReviewItems(parseTaskMetadata(archiveRow.preflight_json), decisions)
+                    if (duplicates.some(item => !item.decision))
+                        return error('duplicate_review_required', 409, request, env, 'Review every duplicate before importing')
+                    if (['queued', 'processing', 'retrying'].includes(archiveRow.status) && archiveRow.task_id) {
+                        const task = await selectTask(env, archiveRow.task_id, session.user_id)
+                        if (task && task.status !== 'dead_letter')
+                            return json({ result: true, archiveId, status: task.status, task: publicTask(task), taskId: String(task.id) }, 202, request, env)
+                    }
+                    if (archiveRow.status === 'succeeded') {
+                        const task = archiveRow.task_id ? await selectTask(env, archiveRow.task_id, session.user_id) : null
+                        const output = await migrationOutput(env, archiveRow, task)
+                        return json({ result: true, archiveId, status: output.status, task: output.task, taskId: output.taskId }, 200, request, env)
+                    }
+                    const task = await createMigrationTask(env, request, session.user_id, archiveId)
+                    if (!task || task.status === 'dead_letter')
+                        return error('migration_task_unavailable', 503, request, env, 'The migration task could not be queued')
+                    await env.DB.prepare('UPDATE migration_archives SET status = \'queued\', task_id = ?, error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(task.id, Date.now(), archiveId, session.user_id).run()
+                    await recordAudit(env, request, { userId: session.user_id, action: 'migration.commit', resourceType: 'migration_archive', resourceId: archiveId, outcome: 'success' })
+                    return json({ result: true, archiveId, status: 'queued', task: publicTask(task), taskId: String(task.id) }, 202, request, env)
+                }
+
+                if (action === 'retry' && request.method === 'POST') {
+                    const task = archiveRow.task_id ? await selectTask(env, archiveRow.task_id, session.user_id) : null
+                    if (!task) return error('task_not_found', 404, request, env, 'Migration task was not found')
+                    if (task.type !== migrationTaskType)
+                        return error('task_not_retryable', 400, request, env, 'This migration cannot be retried')
+                    const retried = await retryDeadLetterTask(env, request, task, session.user_id)
+                    if (retried.status === 409)
+                        return error('task_not_retryable', 409, request, env, 'Only failed migration tasks can be retried')
+                    if (retried.status === 404)
+                        return error('task_not_found', 404, request, env, 'Migration task was not found')
+                    await env.DB.prepare('UPDATE migration_archives SET status = \'queued\', error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(Date.now(), archiveId, session.user_id).run()
+                    return json({ result: true, archiveId, status: 'queued', task: publicTask(retried.task), taskId: String(retried.task.id) }, 202, request, env)
+                }
+            }
+
             const sharingMatch = url.pathname.match(/^\/v1\/collection\/(\d+)\/sharing(?:\/(\d+))?$/)
             if (sharingMatch) {
                 const collectionId = Number(sharingMatch[1])
@@ -2328,7 +2815,7 @@ export default {
                         : json({ result: true, task: item }, 200, request, env)
                 }
                 if (request.method === 'POST' && action === 'retry') {
-                    if (task.type !== metadataTaskType && (!contentTaskTypes.has(task.type) || !task.content_id))
+                    if (!backgroundTaskTypes.has(task.type) || task.type !== migrationTaskType && task.type !== metadataTaskType && !task.content_id)
                         return error('task_not_retryable', 400, request, env, 'This background task cannot be retried')
                     const retried = await retryDeadLetterTask(env, request, task, session.user_id)
                     if (retried.status === 409)
@@ -3099,9 +3586,12 @@ export default {
 export {
     createContentTask,
     createMetadataTask,
+    createMigrationTask,
     fetchPageMetadata,
+    normalizeMigrationArchive,
     processAttachmentScanTask,
     processCaptureTask,
+    processMigrationTask,
     processMetadataTask,
     validateFetchableUrl
 }

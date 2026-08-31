@@ -248,6 +248,54 @@
             "responses": [202, 400, 401, 404, 409]
         },
         {
+            "method": "POST",
+            "path": "/v1/import/preflight",
+            "authentication": "required",
+            "responses": [201, 400, 401, 413, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/import",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/import/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/import/:id/review",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404, 409]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/import/:id/commit",
+            "authentication": "required",
+            "responses": [200, 202, 401, 404, 409, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/import/:id/status",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/import/:id/retry",
+            "authentication": "required",
+            "responses": [202, 400, 401, 404, 409]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/import/:id/mappings",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
             "method": "DELETE",
             "path": "/v1/user/deletion",
             "authentication": "required",

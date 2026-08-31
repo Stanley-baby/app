@@ -682,6 +682,137 @@ paths:
           description: Task not found for this User.
         '409':
           description: Task is not in a retryable failure state.
+  /v1/import/preflight:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Migration Archive containing collections and bookmarks (or items).
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Migration Preflight report with duplicate candidates awaiting review.
+        '400':
+          description: Invalid or empty Migration Archive.
+        '413':
+          description: Migration Archive exceeds the configured size limit.
+  /v1/import:
+    get:
+      responses:
+        '200':
+          description: Current User's Migration Archives and Background Task states.
+  /v1/import/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      responses:
+        '200':
+          description: Migration Archive status, duplicate decisions, and resumable task progress.
+        '404':
+          description: Migration Archive not found for this User.
+  /v1/import/{id}/review:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decisions]
+              properties:
+                decisions:
+                  oneOf:
+                    - type: object
+                      additionalProperties:
+                        type: string
+                        enum: [keep, skip]
+                    - type: array
+                      items:
+                        type: object
+                        required: [sourceId, decision]
+                        properties:
+                          sourceId:
+                            type: string
+                          decision:
+                            type: string
+                            enum: [keep, skip]
+      responses:
+        '200':
+          description: Duplicate Review decisions saved.
+        '400':
+          description: Invalid or unknown duplicate decision.
+        '409':
+          description: Archive is no longer awaiting review.
+  /v1/import/{id}/commit:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      responses:
+        '202':
+          description: Migration Archive accepted as a resumable Background Task.
+        '409':
+          description: Duplicate Review is incomplete.
+        '503':
+          description: Background Task could not be queued.
+  /v1/import/{id}/status:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      responses:
+        '200':
+          description: Current import progress and safe failure details.
+  /v1/import/{id}/retry:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      responses:
+        '202':
+          description: Failed import task queued for explicit retry.
+        '409':
+          description: Import task is not in a retryable state.
+  /v1/import/{id}/mappings:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      responses:
+        '200':
+          description: Source identifiers mapped to new numeric Resource IDs.
   /v1/raindrop/file:
     put:
       requestBody:

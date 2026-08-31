@@ -68,3 +68,12 @@ Protected Content and Saved-page Snapshots remain private until the Owner
 explicitly publishes a Cleared Snapshot through
 `collection/:id/published-snapshots`. Public snapshot streams still go through
 the Worker and never expose an R2 object URL.
+
+Migration Archives use `POST /v1/import/preflight` with JSON (`collections` and
+`bookmarks`, or `items`) or a JSON multipart file. The response lists duplicate
+Bookmarks before any write. Submit explicit `keep`/`skip` choices to
+`/v1/import/:id/review`, then start the resumable `migration_import`
+Background Task with `/v1/import/:id/commit`. `/v1/import/:id/status` and the
+existing `/v1/tasks/:id` endpoint expose progress; `/v1/import/:id/mappings`
+lists each source identifier and its assigned numeric Resource ID. A failed
+task can be retried explicitly with `/v1/import/:id/retry`.

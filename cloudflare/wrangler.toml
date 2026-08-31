@@ -24,6 +24,7 @@ RATE_LIMIT_PER_MINUTE = "60"
 FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 ATTACHMENT_MAX_BYTES = "52428800"
 ATTACHMENT_SCAN_ENABLED = "true"
+MIGRATION_MAX_BYTES = "2097152"
 
 [[d1_databases]]
 binding = "DB"
@@ -78,6 +79,7 @@ RATE_LIMIT_PER_MINUTE = "60"
 FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 ATTACHMENT_MAX_BYTES = "52428800"
 ATTACHMENT_SCAN_ENABLED = "true"
+MIGRATION_MAX_BYTES = "2097152"
 
 [[env.preview.d1_databases]]
 binding = "DB"
@@ -132,6 +134,7 @@ RATE_LIMIT_PER_MINUTE = "60"
 FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 ATTACHMENT_MAX_BYTES = "52428800"
 ATTACHMENT_SCAN_ENABLED = "false"
+MIGRATION_MAX_BYTES = "2097152"
 
 [[env.beta.d1_databases]]
 binding = "DB"
@@ -190,6 +193,7 @@ RATE_LIMIT_PER_MINUTE = "60"
 FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 ATTACHMENT_MAX_BYTES = "52428800"
 ATTACHMENT_SCAN_ENABLED = "true"
+MIGRATION_MAX_BYTES = "2097152"
 
 [[env.production.d1_databases]]
 binding = "DB"

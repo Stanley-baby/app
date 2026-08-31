@@ -35,6 +35,7 @@
             "SCANNER_API_KEY"
         ],
         "attachmentMaxBytes": 52428800,
+        "migrationMaxBytes": 2097152,
         "attachmentScanEnabled": true
     },
     "preview": {
@@ -71,6 +72,7 @@
             "SCANNER_API_KEY"
         ],
         "attachmentMaxBytes": 52428800,
+        "migrationMaxBytes": 2097152,
         "attachmentScanEnabled": true
     },
     "beta": {
@@ -107,6 +109,7 @@
             "SCANNER_API_KEY"
         ],
         "attachmentMaxBytes": 52428800,
+        "migrationMaxBytes": 2097152,
         "attachmentScanEnabled": false
     },
     "production": {
@@ -143,6 +146,7 @@
             "SCANNER_API_KEY"
         ],
         "attachmentMaxBytes": 52428800,
+        "migrationMaxBytes": 2097152,
         "attachmentScanEnabled": true
     }
 }
