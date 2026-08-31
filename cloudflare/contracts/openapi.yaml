@@ -580,6 +580,15 @@ paths:
           description: Authenticated User.
         '401':
           description: Login required.
+  /v1/user/quota:
+    get:
+      responses:
+        '200':
+          description: Current daily Usage Quota and its reset time for the authenticated User.
+        '401':
+          description: Login required.
+        '429':
+          description: Endpoint rate limit reached; retry after the Retry-After interval.
   /v1/user/connect/google:
     get:
       responses:

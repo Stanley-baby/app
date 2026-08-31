@@ -195,6 +195,12 @@
         },
         {
             "method": "GET",
+            "path": "/v1/user/quota",
+            "authentication": "required",
+            "responses": [200, 401, 429]
+        },
+        {
+            "method": "GET",
             "path": "/v1/user/connect/google",
             "authentication": "required",
             "responses": [302, 401, 503]

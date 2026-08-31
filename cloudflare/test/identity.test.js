@@ -365,6 +365,65 @@ class MemoryDatabase {
     }
 }
 
+class AccountingDatabase extends MemoryDatabase {
+    constructor() {
+        super()
+        this.usage = []
+        this.rateLimits = []
+        this.audits = []
+        this.alerts = []
+    }
+
+    prepare(sql) {
+        let values = []
+        const first = async () => {
+            if (sql.includes('FROM usage_counters'))
+                return this.usage.find(item => item.user_id === values[0] && item.window_start === values[1]) || null
+            if (sql.includes('FROM rate_limits'))
+                return this.rateLimits.find(item => item.scope_key === values[0] && item.route_key === values[1] && item.window_start === values[2]) || null
+            return super.prepare(sql).bind(...values).first()
+        }
+        const run = async () => {
+            if (sql.includes('INSERT INTO usage_counters')) {
+                const [userId, windowStart, units, updatedAt, limit] = values
+                const row = this.usage.find(item => item.user_id === userId && item.window_start === windowStart)
+                if (row) {
+                    if (row.units + units > limit) return { meta: { changes: 0 } }
+                    row.units += units
+                    row.updated_at = updatedAt
+                } else this.usage.push({ user_id: userId, window_start: windowStart, units, updated_at: updatedAt })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO rate_limits')) {
+                const [scopeKey, routeKey, windowStart, updatedAt, limit] = values
+                const row = this.rateLimits.find(item => item.scope_key === scopeKey && item.route_key === routeKey && item.window_start === windowStart)
+                if (row) {
+                    if (row.request_count >= limit) return { meta: { changes: 0 } }
+                    row.request_count++
+                    row.updated_at = updatedAt
+                } else this.rateLimits.push({ scope_key: scopeKey, route_key: routeKey, window_start: windowStart, request_count: 1, updated_at: updatedAt })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO audit_records')) {
+                this.audits.push({ user_id: values[0], request_id: values[1], action: values[2], resource_type: values[3], resource_id: values[4], outcome: values[5], created_at: values[6], metadata: values[7] })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO alerts')) {
+                this.alerts.push({ user_id: values[0], request_id: values[1], kind: values[2], severity: values[3], route: values[4], created_at: values[5], metadata: values[6] })
+                return { meta: { changes: 1 } }
+            }
+            return super.prepare(sql).bind(...values).run()
+        }
+        const all = async () => super.prepare(sql).bind(...values).all()
+        return {
+            bind: (...next) => {
+                values = next
+                return { first, run, all }
+            }
+        }
+    }
+}
+
 test('D1 batch mutations roll back all writes on failure', async () => {
     const db = new MemoryDatabase()
     db.bookmarks.push({ id: 1, user_id: 1, tags: '[]', updated_at: 1, change_version: 1 })
@@ -1054,6 +1113,88 @@ test('recycle bin, metadata search, and last-write-wins stay user-scoped', async
         const latestBody = await latest.json()
         const winningResponse = winner.find(body => body.item.changeVersion === latestBody.item.changeVersion)
         assert.equal(latestBody.item.title, winningResponse.item.title)
+    } finally {
+        globalThis.fetch = originalFetch
+    }
+})
+
+test('usage quota and endpoint rate limits return retryable responses with content-free audit records', async () => {
+    const db = new AccountingDatabase()
+    const testEnv = {
+        ...env(db),
+        TURNSTILE_ENABLED: 'false',
+        USAGE_QUOTA_DAILY: '2',
+        RATE_LIMIT_PER_MINUTE: '100'
+    }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options) => {
+        if (url === 'https://api.resend.com/emails') return Response.json({ id: 'email_issue8' })
+        return originalFetch(url, options)
+    }
+
+    try {
+        const signup = await worker.fetch(request('/v1/auth/email/signup', {
+            name: 'Issue 8 User', email: 'issue8.user@example.test', password: 'correct horse battery staple', betaAccessPassword: 'invite-only'
+        }), testEnv)
+        assert.equal(signup.status, 201)
+        const login = await worker.fetch(request('/v1/auth/email/login', {
+            email: 'issue8.user@example.test', password: 'correct horse battery staple'
+        }), testEnv)
+        assert.equal(login.status, 200)
+        const cookie = login.headers.get('Set-Cookie').split(';')[0]
+
+        const initialQuota = await worker.fetch(request('/v1/user/quota', null, { Cookie: cookie }), testEnv)
+        assert.equal(initialQuota.status, 200)
+        assert.equal((await initialQuota.json()).quota.remaining, 2)
+
+        for (const title of ['Issue 8 quota first', 'Issue 8 quota second']) {
+            const created = await worker.fetch(request('/v1/raindrop', { link: 'https://example.test/' + title.replaceAll(' ', '-'), title }, { Cookie: cookie }), testEnv)
+            assert.equal(created.status, 201)
+        }
+
+        const quota = await worker.fetch(request('/v1/user/quota', null, { Cookie: cookie }), testEnv)
+        const quotaBody = await quota.json()
+        assert.equal(quota.status, 200)
+        assert.equal(quotaBody.quota.used, 2)
+        assert.equal(quotaBody.quota.remaining, 0)
+        assert.ok(quotaBody.quota.resetAt)
+
+        const quotaBlocked = await worker.fetch(request('/v1/raindrop', { link: 'https://example.test/quota-blocked', title: 'Issue 8 quota blocked' }, { Cookie: cookie }), testEnv)
+        const quotaBlockedBody = await quotaBlocked.json()
+        assert.equal(quotaBlocked.status, 429)
+        assert.equal(quotaBlocked.headers.get('Retry-After') > '0', true)
+        assert.equal(quotaBlockedBody.error, 'usage_quota_exceeded')
+        assert.ok(quotaBlockedBody.retryAfter > 0)
+        assert.match(quotaBlockedBody.errorMessage, /retry/i)
+
+        const rateDb = new AccountingDatabase()
+        const rateEnv = { ...env(rateDb), TURNSTILE_ENABLED: 'false', USAGE_QUOTA_DAILY: '100', RATE_LIMIT_PER_MINUTE: '2' }
+        const rateSignup = await worker.fetch(request('/v1/auth/email/signup', {
+            name: 'Issue 8 Rate User', email: 'issue8.rate@example.test', password: 'correct horse battery staple', betaAccessPassword: 'invite-only'
+        }), rateEnv)
+        assert.equal(rateSignup.status, 201)
+        const rateLogin = await worker.fetch(request('/v1/auth/email/login', {
+            email: 'issue8.rate@example.test', password: 'correct horse battery staple'
+        }), rateEnv)
+        assert.equal(rateLogin.status, 200)
+        const rateCookie = rateLogin.headers.get('Set-Cookie').split(';')[0]
+        assert.equal((await worker.fetch(request('/v1/user', null, { Cookie: rateCookie }), rateEnv)).status, 200)
+        assert.equal((await worker.fetch(request('/v1/user', null, { Cookie: rateCookie }), rateEnv)).status, 200)
+        const rateBlocked = await worker.fetch(request('/v1/user', null, { Cookie: rateCookie }), rateEnv)
+        const rateBlockedBody = await rateBlocked.json()
+        assert.equal(rateBlocked.status, 429)
+        assert.equal(rateBlockedBody.error, 'rate_limited')
+        assert.ok(rateBlockedBody.retryAfter > 0)
+        assert.match(rateBlockedBody.errorMessage, /retry/i)
+
+        const records = JSON.stringify({ audits: db.audits, alerts: db.alerts, rateAudits: rateDb.audits, rateAlerts: rateDb.alerts })
+        for (const secret of ['correct horse battery staple', 'rd_session', 'snapshot body', 'attachment contents', 'turnstile-secret'])
+            assert.equal(records.includes(secret), false)
+        assert.ok(db.alerts.some(item => item.kind === 'usage_quota_threshold'))
+        assert.ok(db.alerts.some(item => item.kind === 'usage_quota_exceeded'))
+        assert.ok(rateDb.alerts.some(item => item.kind === 'rate_limit_exceeded'))
+        assert.ok(db.audits.some(item => item.action === 'usage.quota_exceeded' && item.outcome === 'blocked'))
+        assert.ok(rateDb.audits.some(item => item.action === 'rate.limit_exceeded' && item.outcome === 'blocked'))
     } finally {
         globalThis.fetch = originalFetch
     }

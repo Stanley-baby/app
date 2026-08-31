@@ -4,6 +4,8 @@ const verificationHours = 24
 const googleStateMinutes = 10
 const deletionDays = 30
 const passwordIterations = 100000
+const usageWindowMs = 24 * 60 * 60 * 1000
+const rateWindowMs = 60 * 1000
 
 const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
 
@@ -35,6 +37,23 @@ const json = (body, status, request, env, extraHeaders = {}) => {
 
 const error = (code, status, request, env, errorMessage = code) =>
     json({ result: false, error: code, errorMessage }, status, request, env)
+
+const integerEnv = (env, names, fallback) => {
+    for (const name of names) {
+        const value = Number(env[name])
+        if (Number.isSafeInteger(value) && value > 0) return value
+    }
+    return fallback
+}
+
+const retryableError = (code, request, env, errorMessage, retryAfterMs, details = {}) => {
+    const retryAfter = Math.max(1, Math.ceil(retryAfterMs / 1000))
+    const retryAt = details.retryAt || new Date(Date.now() + retryAfter * 1000).toISOString()
+    return json({ result: false, error: code, errorMessage, retryAfter, retryAt, ...details }, 429, request, env, {
+        'Retry-After': String(retryAfter),
+        'Cache-Control': 'no-store'
+    })
+}
 
 const cors = (request, env) => {
     const headers = addCorsHeaders(new Headers({
@@ -388,6 +407,136 @@ const getSession = async (request, env) => {
     return { ...session, token }
 }
 
+const auditRequestId = request => {
+    const value = request.headers.get('X-Request-ID')
+    return value && /^[A-Za-z0-9._:-]{1,80}$/.test(value) ? value : requestId(request)
+}
+
+const auditRoute = request => new URL(request.url).pathname
+
+const recordAudit = async (env, request, { userId = null, action, resourceType = 'api', resourceId = null, outcome }) => {
+    if (!env.DB?.prepare) return
+    try {
+        await env.DB.prepare(`INSERT INTO audit_records
+            (user_id, request_id, action, resource_type, resource_id, outcome, created_at, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+            .bind(
+                userId || null,
+                auditRequestId(request),
+                action,
+                resourceType,
+                resourceId === null || resourceId === undefined ? null : String(resourceId),
+                outcome,
+                Date.now(),
+                JSON.stringify({ method: request.method, route: auditRoute(request) })
+            ).run()
+    } catch {
+        // Audit failures must not turn an otherwise valid API request into an error.
+    }
+}
+
+const recordAlert = async (env, request, { userId = null, kind, severity = 'warning', metadata = {} }) => {
+    if (!env.DB?.prepare) return
+    try {
+        await env.DB.prepare(`INSERT INTO alerts
+            (user_id, request_id, kind, severity, route, created_at, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`)
+            .bind(
+                userId || null,
+                auditRequestId(request),
+                kind,
+                severity,
+                auditRoute(request),
+                Date.now(),
+                JSON.stringify(metadata)
+            ).run()
+    } catch {
+        // Alert failures must not change the API result.
+    }
+}
+
+const rateLimitScope = async (request, env, userId) => {
+    if (userId) return 'user:' + userId
+    const address = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For')?.split(',')[0].trim() || 'anonymous'
+    return 'ip:' + await hmac(address, env.SESSION_SECRET || 'rate-limit')
+}
+
+const rateLimit = async (request, env, url, userId = null) => {
+    if (!url.pathname.startsWith('/v1/') || !env.DB?.prepare) return null
+    const limit = integerEnv(env, url.pathname.startsWith('/v1/auth/')
+        ? ['AUTH_RATE_LIMIT_PER_MINUTE', 'RATE_LIMIT_PER_MINUTE']
+        : ['RATE_LIMIT_PER_MINUTE'], 60)
+    const now = Date.now()
+    const windowStart = Math.floor(now / rateWindowMs) * rateWindowMs
+    const scopeKey = await rateLimitScope(request, env, userId)
+    const routeKey = request.method + ' ' + url.pathname
+    try {
+        const result = await env.DB.prepare(`INSERT INTO rate_limits (scope_key, route_key, window_start, request_count, updated_at)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(scope_key, route_key, window_start) DO UPDATE SET request_count = request_count + 1, updated_at = excluded.updated_at
+            WHERE rate_limits.request_count < ?`).bind(scopeKey, routeKey, windowStart, now, limit).run()
+        if (Number(result?.meta?.changes || 0) === 1) return null
+
+        const retryAfterMs = windowStart + rateWindowMs - now
+        await recordAudit(env, request, { userId, action: 'rate.limit_exceeded', resourceType: 'route', resourceId: routeKey, outcome: 'blocked' })
+        await recordAlert(env, request, { userId, kind: 'rate_limit_exceeded', metadata: { limit, retryAfter: Math.ceil(retryAfterMs / 1000) } })
+        return retryableError('rate_limited', request, env, 'Too many requests. Retry after the indicated time.', retryAfterMs, {
+            limit,
+            remaining: 0
+        })
+    } catch {
+        return null
+    }
+}
+
+const usageWindow = now => {
+    const windowStart = Math.floor(now / usageWindowMs) * usageWindowMs
+    return { windowStart, resetAt: windowStart + usageWindowMs }
+}
+
+const usageLimit = env => integerEnv(env, ['USAGE_QUOTA_DAILY', 'USAGE_QUOTA', 'DAILY_USAGE_QUOTA'], 1000)
+
+const readUsage = async (env, userId) => {
+    const limit = usageLimit(env)
+    const { windowStart, resetAt } = usageWindow(Date.now())
+    try {
+        const row = await env.DB.prepare('SELECT units FROM usage_counters WHERE user_id = ? AND window_start = ?').bind(userId, windowStart).first()
+        const used = Number(row?.units || 0)
+        return { used, limit, remaining: Math.max(0, limit - used), resetAt }
+    } catch {
+        return { used: 0, limit, remaining: limit, resetAt }
+    }
+}
+
+const consumeUsage = async (env, request, userId) => {
+    const limit = usageLimit(env)
+    const now = Date.now()
+    const { windowStart, resetAt } = usageWindow(now)
+    const units = 1
+    try {
+        const current = await env.DB.prepare('SELECT units FROM usage_counters WHERE user_id = ? AND window_start = ?').bind(userId, windowStart).first()
+        const previous = Number(current?.units || 0)
+        const result = await env.DB.prepare(`INSERT INTO usage_counters (user_id, window_start, units, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, window_start) DO UPDATE SET units = units + excluded.units, updated_at = excluded.updated_at
+            WHERE usage_counters.units + excluded.units <= ?`).bind(userId, windowStart, units, now, limit).run()
+        if (Number(result?.meta?.changes || 0) !== 1) {
+            const retryAfterMs = resetAt - now
+            await recordAudit(env, request, { userId, action: 'usage.quota_exceeded', resourceType: 'quota', outcome: 'blocked' })
+            await recordAlert(env, request, { userId, kind: 'usage_quota_exceeded', severity: 'warning', metadata: { limit, used: previous, retryAfter: Math.ceil(retryAfterMs / 1000) } })
+            return { allowed: false, used: previous, limit, remaining: 0, resetAt, retryAfterMs }
+        }
+
+        const used = previous + units
+        const threshold = Math.max(1, Math.ceil(limit * 0.8))
+        if (previous < threshold && used >= threshold)
+            await recordAlert(env, request, { userId, kind: 'usage_quota_threshold', metadata: { limit, used, remaining: Math.max(0, limit - used) } })
+        return { allowed: true, used, limit, remaining: Math.max(0, limit - used), resetAt }
+    } catch {
+        return { allowed: true, used: 0, limit, remaining: limit, resetAt }
+    }
+}
+
 const verifyTurnstile = async (request, env, token) => {
     if (!env.TURNSTILE_SECRET_KEY) return null
     if (!token || String(token).length > 2048) return false
@@ -559,6 +708,19 @@ const purgeExpiredDeletions = async env => {
     }
 }
 
+const purgeAccounting = async env => {
+    if (!env.DB?.prepare) return
+    const now = Date.now()
+    try {
+        await env.DB.prepare('DELETE FROM usage_counters WHERE window_start < ?').bind(now - usageWindowMs * 2).run()
+        await env.DB.prepare('DELETE FROM rate_limits WHERE window_start < ?').bind(now - rateWindowMs * 2).run()
+        await env.DB.prepare('DELETE FROM audit_records WHERE created_at < ?').bind(now - 365 * usageWindowMs).run()
+        await env.DB.prepare('DELETE FROM alerts WHERE created_at < ?').bind(now - 365 * usageWindowMs).run()
+    } catch {
+        // Accounting tables may not exist while an environment is migrating.
+    }
+}
+
 const loginErrorPage = (request, env, message) => new Response(`<!doctype html><meta charset="utf-8"><title>Login failed</title><main><h1>Login failed</h1><p>${message}</p><p><a href="${env.APP_ORIGIN}/">Return to login</a></p></main>`, {
     status: 401,
     headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Request-ID': requestId(request) }
@@ -578,6 +740,12 @@ export default {
 
         if (url.pathname === '/version')
             return json({ result: true, environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
+
+        if (url.pathname.startsWith('/v1/')) {
+            const rateSession = authReady(env) ? await getSession(request, env) : null
+            const limited = await rateLimit(request, env, url, rateSession?.user_id)
+            if (limited) return limited
+        }
 
         if (url.pathname === '/v1/auth/google' && request.method === 'GET') {
             if (!googleReady(env)) return configurationError(request, env)
@@ -678,6 +846,7 @@ export default {
                 return error('email_delivery_failed', 502, request, env, 'Could not send confirmation email')
             }
 
+            await recordAudit(env, request, { userId, action: 'user.signup', resourceType: 'user', resourceId: userId, outcome: 'success' })
             return json({ result: true, email, verified: false }, 201, request, env)
         }
 
@@ -689,10 +858,14 @@ export default {
             const user = await env.DB.prepare('SELECT id, email, name, password_hash, password_salt, email_verified_at FROM users WHERE email = ?').bind(email).first()
 
             const validPassword = user && equal(await passwordHash(password, base64urlToBytes(user.password_salt)), user.password_hash)
-            if (!validPassword)
+            if (!validPassword) {
+                await recordAudit(env, request, { userId: user?.id || null, action: 'auth.login', resourceType: 'session', outcome: 'failed' })
+                await recordAlert(env, request, { userId: user?.id || null, kind: 'login_anomaly', metadata: { reason: 'invalid_credentials' } })
                 return form ? loginErrorPage(request, env, 'Email or password is invalid') : error('invalid_credentials', 401, request, env, 'Email or password is invalid')
+            }
 
             const session = await createSession(request, env, user.id)
+            await recordAudit(env, request, { userId: user.id, action: 'auth.login', resourceType: 'session', outcome: 'success' })
             if (form) return redirect(request, env, data.redirect, session.token)
             return json({ result: true, user: publicUser(user) }, 200, request, env, { 'Set-Cookie': sessionCookie(session.token) })
         }
@@ -720,6 +893,7 @@ export default {
                     : 'UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND id = ? AND revoked_at IS NULL'
                 const values = all ? [Date.now(), session.user_id] : [Date.now(), session.user_id, session.session_id]
                 await env.DB.prepare(query).bind(...values).run()
+                await recordAudit(env, request, { userId: session.user_id, action: all ? 'auth.logout_all' : 'auth.logout', resourceType: 'session', outcome: 'success' })
             }
             return json({ result: true }, 200, request, env, { 'Set-Cookie': expiredSessionCookie })
         }
@@ -738,6 +912,20 @@ export default {
 
             if (requiresVerification(url.pathname) && !session.email_verified_at)
                 return error('email_verification_required', 403, request, env, 'Confirm your email before this action')
+
+            if (!['GET', 'HEAD'].includes(request.method)) {
+                const usage = await consumeUsage(env, request, session.user_id)
+                if (!usage.allowed)
+                    return retryableError('usage_quota_exceeded', request, env, 'Daily usage quota reached. Retry after the quota resets.', usage.retryAfterMs, {
+                        quota: {
+                            used: usage.used,
+                            limit: usage.limit,
+                            remaining: usage.remaining,
+                            resetAt: new Date(usage.resetAt).toISOString()
+                        },
+                        retryAt: new Date(usage.resetAt).toISOString()
+                    })
+            }
 
             if (url.pathname === '/v1/user/connect/google' && request.method === 'GET') {
                 if (!googleReady(env)) return configurationError(request, env)
@@ -777,16 +965,28 @@ export default {
                     const purgeAfter = requestedAt + deletionDays * 86400 * 1000
                     await env.DB.prepare('INSERT INTO account_deletions (user_id, requested_at, purge_after) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET requested_at = excluded.requested_at, purge_after = excluded.purge_after')
                         .bind(session.user_id, requestedAt, purgeAfter).run()
+                    await recordAudit(env, request, { userId: session.user_id, action: 'account.deletion_scheduled', resourceType: 'account', outcome: 'success' })
                     return json({ result: true, purge_after: purgeAfter }, 202, request, env)
                 }
                 if (request.method === 'DELETE') {
                     const result = await env.DB.prepare('DELETE FROM account_deletions WHERE user_id = ?').bind(session.user_id).run()
+                    await recordAudit(env, request, { userId: session.user_id, action: 'account.deletion_cancelled', resourceType: 'account', outcome: result.meta.changes ? 'success' : 'not_found' })
                     return json({ result: true, cancelled: Boolean(result.meta.changes) }, 200, request, env)
                 }
             }
 
             if (url.pathname === '/v1/user' && request.method === 'GET')
                 return json({ result: true, user: publicUser(session) }, 200, request, env)
+
+            if (url.pathname === '/v1/user/quota' && request.method === 'GET') {
+                const usage = await readUsage(env, session.user_id)
+                return json({ result: true, quota: {
+                    used: usage.used,
+                    limit: usage.limit,
+                    remaining: usage.remaining,
+                    resetAt: new Date(usage.resetAt).toISOString()
+                } }, 200, request, env)
+            }
 
             if (url.pathname === '/v1/user/stats' && request.method === 'GET') {
                 const rows = await env.DB.prepare(`SELECT
@@ -825,6 +1025,7 @@ export default {
                     .bind(now, removedBatch, now, session.user_id, ...ids).run()
                 await env.DB.prepare(`UPDATE collections SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND id IN (${placeholders})`)
                     .bind(now, removedBatch, now, session.user_id, ...ids).run()
+                await recordAudit(env, request, { userId: session.user_id, action: 'collection.remove_bulk', resourceType: 'collection', resourceId: ids.join(','), outcome: 'success' })
                 return json({ result: true, count: ids.length, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
             }
 
@@ -839,6 +1040,7 @@ export default {
                 const now = Date.now()
                 const inserted = await env.DB.prepare('INSERT INTO collections (user_id, title, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
                     .bind(session.user_id, title, parentId || null, now, now).run()
+                await recordAudit(env, request, { userId: session.user_id, action: 'collection.create', resourceType: 'collection', resourceId: inserted.meta.last_row_id, outcome: 'success' })
                 return json({ result: true, item: collectionItem({ id: inserted.meta.last_row_id, title, parent_id: parentId || null }) }, 201, request, env)
             }
 
@@ -871,6 +1073,7 @@ export default {
                             .bind(now, session.user_id, ...ids, removedBatch).run()
                         await env.DB.prepare(`UPDATE bookmarks SET removed_at = NULL, removed_batch = NULL, updated_at = ? WHERE user_id = ? AND collection_id IN (${placeholders}) AND removed_batch = ?`)
                             .bind(now, session.user_id, ...ids, removedBatch).run()
+                        await recordAudit(env, request, { userId: session.user_id, action: 'collection.restore', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
                         const item = await env.DB.prepare(`SELECT c.*, COUNT(b.id) AS count FROM collections c
                             LEFT JOIN bookmarks b ON b.collection_id = c.id AND b.removed_at IS NULL
                             WHERE c.id = ? AND c.user_id = ? GROUP BY c.id`).bind(collectionId, session.user_id).first()
@@ -885,6 +1088,7 @@ export default {
                         return error('collection_not_found', 404, request, env)
                     await env.DB.prepare('UPDATE collections SET title = ?, parent_id = ?, updated_at = ? WHERE id = ? AND user_id = ?')
                         .bind(title, parentId || null, Date.now(), collectionId, session.user_id).run()
+                    await recordAudit(env, request, { userId: session.user_id, action: 'collection.update', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
                     return json({ result: true, item: collectionItem({ ...existing, title, parent_id: parentId || null }) }, 200, request, env)
                 }
                 if (request.method === 'DELETE') {
@@ -903,6 +1107,7 @@ export default {
                             await env.DB.prepare(`DELETE FROM collection_collaborators WHERE collection_id IN (${placeholders})`).bind(...collectionIds).run()
                             await env.DB.prepare(`DELETE FROM collections WHERE user_id = ? AND id IN (${placeholders}) AND removed_at IS NOT NULL`).bind(session.user_id, ...collectionIds).run()
                         }
+                        await recordAudit(env, request, { userId: session.user_id, action: 'collection.trash_clear', resourceType: 'recycle_bin', resourceId: -99, outcome: 'success' })
                         return json({ result: true, count: bookmarkIds.length, collections: collectionIds.length }, 200, request, env)
                     }
 
@@ -920,6 +1125,7 @@ export default {
                         .bind(now, removedBatch, now, session.user_id, ...ids).run()
                     await env.DB.prepare(`UPDATE collections SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND id IN (${placeholders})`)
                         .bind(now, removedBatch, now, session.user_id, ...ids).run()
+                    await recordAudit(env, request, { userId: session.user_id, action: 'collection.remove', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
                     return json({ result: true, count: ids.length, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }
             }
@@ -981,6 +1187,7 @@ export default {
                         await env.DB.prepare(`DELETE FROM bookmark_changes WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                         await env.DB.prepare(`DELETE FROM bookmarks WHERE user_id = ? AND id IN (${placeholders}) AND removed_at IS NOT NULL`).bind(session.user_id, ...bookmarkIds).run()
                     }
+                    await recordAudit(env, request, { userId: session.user_id, action: 'bookmark.trash_clear', resourceType: 'recycle_bin', resourceId: -99, outcome: 'success' })
                     return json({ result: true, count: bookmarkIds.length }, 200, request, env)
                 }
                 const now = Date.now()
@@ -998,6 +1205,7 @@ export default {
                     values.push(...ids)
                 }
                 const result = await env.DB.prepare(query).bind(...values).run()
+                await recordAudit(env, request, { userId: session.user_id, action: 'bookmark.remove_bulk', resourceType: 'bookmark', resourceId: collectionId, outcome: 'success' })
                 return json({ result: true, count: Number(result.meta?.changes || 0), ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
             }
             if (listMatch && request.method === 'GET') {
@@ -1063,6 +1271,7 @@ export default {
                     const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
                         .bind(inserted.meta.last_row_id, session.user_id).first()
                     items.push(bookmarkItem(item || { id: inserted.meta.last_row_id, url: link, title, description, note, highlights: JSON.stringify(highlights), created_at: now, updated_at: now, collection_id: collectionId, tags: JSON.stringify(tags), removed_at: null }))
+                    await recordAudit(env, request, { userId: session.user_id, action: 'bookmark.create_bulk', resourceType: 'bookmark', resourceId: inserted.meta.last_row_id, outcome: 'success' })
                 }
                 return json({ result: true, items, ...(await bookmarkSync(env, session.user_id)) }, 201, request, env)
             }
@@ -1096,6 +1305,7 @@ export default {
                     .bind(session.user_id, bookmarkUrl, title, description, note, JSON.stringify(applyHighlightChanges('[]', highlights)), now, now, collectionId, JSON.stringify(tags)).run()
                 const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
                     .bind(inserted.meta.last_row_id, session.user_id).first()
+                await recordAudit(env, request, { userId: session.user_id, action: 'bookmark.create', resourceType: 'bookmark', resourceId: inserted.meta.last_row_id, outcome: 'success' })
                 return json({
                     result: true,
                     item: bookmarkItem(item || { id: inserted.meta.last_row_id, url: bookmarkUrl, title, description, note, highlights: JSON.stringify(highlights), created_at: now, updated_at: now, collection_id: collectionId, tags: JSON.stringify(tags), removed_at: null }),
@@ -1158,6 +1368,7 @@ export default {
                     await env.DB.prepare('UPDATE bookmarks SET url = ?, title = ?, description = ?, note = ?, collection_id = ?, tags = ?, highlights = ?, removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
                         .bind(link, title, description, note, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)), removedAt, removedBatch, Date.now(), bookmarkId, session.user_id).run()
                     const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, session.user_id).first()
+                    await recordAudit(env, request, { userId: session.user_id, action: data.removed === false ? 'bookmark.restore' : 'bookmark.update', resourceType: 'bookmark', resourceId: bookmarkId, outcome: 'success' })
                     return json({ result: true, item: bookmarkItem(item), ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }
                 if (request.method === 'DELETE') {
@@ -1165,6 +1376,7 @@ export default {
                     const removedBatch = randomToken(16)
                     await env.DB.prepare('UPDATE bookmarks SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
                         .bind(now, removedBatch, now, bookmarkId, session.user_id).run()
+                    await recordAudit(env, request, { userId: session.user_id, action: 'bookmark.remove', resourceType: 'bookmark', resourceId: bookmarkId, outcome: 'success' })
                     return json({ result: true, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }
             }
@@ -1249,6 +1461,6 @@ export default {
     },
 
     async scheduled(controller, env, ctx) {
-        ctx.waitUntil(purgeExpiredDeletions(env))
+        ctx.waitUntil(Promise.all([purgeExpiredDeletions(env), purgeAccounting(env)]))
     }
 }

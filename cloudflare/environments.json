@@ -6,6 +6,8 @@
         "aiPageOrigin": "http://localhost:5173/ai",
         "turnstileSiteKey": "1x00000000000000000000AA",
         "turnstileEnabled": false,
+        "usageQuotaDaily": 1000,
+        "rateLimitPerMinute": 60,
         "corsOrigins": [
             "http://localhost:2000",
             "http://127.0.0.1:2000",
@@ -38,6 +40,8 @@
         "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
         "turnstileSiteKey": "",
         "turnstileEnabled": false,
+        "usageQuotaDaily": 1000,
+        "rateLimitPerMinute": 60,
         "corsOrigins": [
             "https://preview.raindrop.io",
             "chrome-extension://*"
@@ -68,6 +72,8 @@
         "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
         "turnstileSiteKey": "0x4AAAAAAEgrWY2vz8wLYW8D",
         "turnstileEnabled": false,
+        "usageQuotaDaily": 1000,
+        "rateLimitPerMinute": 60,
         "corsOrigins": [
             "https://raindrop-beta.pages.dev",
             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
@@ -98,6 +104,8 @@
         "aiPageOrigin": "https://ai.raindrop.io/ai",
         "turnstileSiteKey": "",
         "turnstileEnabled": false,
+        "usageQuotaDaily": 1000,
+        "rateLimitPerMinute": 60,
         "corsOrigins": [
             "https://app.raindrop.io",
             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"

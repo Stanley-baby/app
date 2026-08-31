@@ -23,3 +23,11 @@ the Web build. Apply the D1 migrations before deploying the Worker.
 
 The client build selects the same profiles with `--env environment=preview`.
 The contract test skeleton runs with `npm run test:contract`.
+
+Each profile also sets `USAGE_QUOTA_DAILY` (default `1000`) and
+`RATE_LIMIT_PER_MINUTE` (default `60`). Authenticated write requests consume
+one daily usage unit; every `/v1` route uses a per-user or privacy-preserving
+client rate bucket. A rejected request returns `429`, `Retry-After`,
+`retryAfter`, and `retryAt`. D1 `audit_records` and `alerts` store only actor,
+route, resource identifiers, outcome, and numeric reason metadata—never request
+bodies, cookies, passwords, tokens, page contents, or attachment contents.
