@@ -407,12 +407,34 @@ const getSession = async (request, env) => {
     return { ...session, token }
 }
 
-const auditRequestId = request => {
-    const value = request.headers.get('X-Request-ID')
-    return value && /^[A-Za-z0-9._:-]{1,80}$/.test(value) ? value : requestId(request)
-}
+const auditRequestId = () => randomToken(16)
 
-const auditRoute = request => new URL(request.url).pathname
+const auditRoute = request => {
+    const pathname = new URL(request.url).pathname
+    const patterns = [
+        [/^\/v1\/collection\/-?\d+\/lastAction$/, '/v1/collection/:id/lastAction'],
+        [/^\/v1\/collection\/-?\d+$/, '/v1/collection/:id'],
+        [/^\/v1\/raindrop\/\d+\/highlights\.(txt|csv)$/, '/v1/raindrop/:id/highlights.$1'],
+        [/^\/v1\/raindrop\/\d+$/, '/v1/raindrop/:id'],
+        [/^\/v1\/raindrops\/-?\d+$/, '/v1/raindrops/:collectionId'],
+        [/^\/v1\/tags\/-?\d+$/, '/v1/tags/:collectionId'],
+        [/^\/v1\/filters\/-?\d+$/, '/v1/filters/:collectionId'],
+        [/^\/v1\/sessions\/[^/]+$/, '/v1/sessions/:id']
+    ]
+    const match = patterns.find(([pattern]) => pattern.test(pathname))
+    if (match) return pathname.replace(match[0], match[1])
+
+    const known = new Set([
+        '/v1/auth/email/signup', '/v1/auth/email/login', '/v1/auth/email/confirm',
+        '/v1/auth/google', '/v1/auth/google/callback', '/v1/auth/logout',
+        '/v1/sessions', '/v1/collections/all', '/v1/collections', '/v1/collections/clean',
+        '/v1/collection', '/v1/tags/recent', '/v1/tags/0', '/v1/tag',
+        '/v1/raindrops', '/v1/raindrops/changes', '/v1/user', '/v1/user/quota',
+        '/v1/user/connect/google', '/v1/user/connect/google/revoke', '/v1/user/deletion',
+        '/v1/user/remove', '/v1/user/stats'
+    ])
+    return known.has(pathname) ? pathname : '/v1/unknown'
+}
 
 const recordAudit = async (env, request, { userId = null, action, resourceType = 'api', resourceId = null, outcome }) => {
     if (!env.DB?.prepare) return
@@ -468,9 +490,9 @@ const rateLimit = async (request, env, url, userId = null) => {
         : ['RATE_LIMIT_PER_MINUTE'], 60)
     const now = Date.now()
     const windowStart = Math.floor(now / rateWindowMs) * rateWindowMs
-    const scopeKey = await rateLimitScope(request, env, userId)
-    const routeKey = request.method + ' ' + url.pathname
     try {
+        const scopeKey = await rateLimitScope(request, env, userId)
+        const routeKey = request.method + ' ' + auditRoute(request)
         const result = await env.DB.prepare(`INSERT INTO rate_limits (scope_key, route_key, window_start, request_count, updated_at)
             VALUES (?, ?, ?, 1, ?)
             ON CONFLICT(scope_key, route_key, window_start) DO UPDATE SET request_count = request_count + 1, updated_at = excluded.updated_at
@@ -693,6 +715,7 @@ const deleteUserData = async (env, userId) => {
         env.DB.prepare('DELETE FROM bookmarks WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM collections WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM account_deletions WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM usage_counters WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId)
     ]
     if (env.DB.batch) return env.DB.batch(statements)

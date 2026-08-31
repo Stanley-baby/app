@@ -15,6 +15,7 @@ class MemoryDatabase {
         this.identities = []
         this.oauthStates = []
         this.deletions = []
+        this.usage = []
         this.collaborators = []
         this.changes = []
         this.nextChangeVersion = 1
@@ -244,6 +245,11 @@ class MemoryDatabase {
                 const before = this.deletions.length
                 this.deletions = this.deletions.filter(item => item.user_id !== values[0])
                 return { meta: { changes: before - this.deletions.length } }
+            }
+            if (sql.includes('DELETE FROM usage_counters')) {
+                const before = this.usage.length
+                this.usage = this.usage.filter(item => item.user_id !== values[0])
+                return { meta: { changes: before - this.usage.length } }
             }
             if (sql.includes('DELETE FROM bookmarks')) {
                 const before = this.bookmarks.length
@@ -737,6 +743,7 @@ test('Google identity conflicts stay separate, logout-all revokes every session,
 
     await worker.fetch(request('/v1/user/deletion', {}, { Cookie: googleCookie }), oauthEnv)
     db.bookmarks.push({ id: 1, user_id: 1, url: 'https://example.test', title: 'Private', created_at: 1, updated_at: 1, collection_id: -1, tags: '[]', removed_at: null })
+    db.usage.push({ user_id: 1, window_start: Date.now(), units: 1, updated_at: Date.now() })
     db.deletions[0].purge_after = Date.now() - 1
     db.collaborators.push({ owner_id: 1 })
     let purge
@@ -750,6 +757,7 @@ test('Google identity conflicts stay separate, logout-all revokes every session,
     assert.equal(db.sessions.some(session => session.user_id === 1), false)
     assert.equal(db.identities.some(identity => identity.user_id === 1), false)
     assert.equal(db.bookmarks.some(bookmark => bookmark.user_id === 1), false)
+    assert.equal(db.usage.some(item => item.user_id === 1), false)
 })
 
 test('bookmark sync markers are monotonic and incremental reads return changes', async () => {
@@ -1187,8 +1195,32 @@ test('usage quota and endpoint rate limits return retryable responses with conte
         assert.ok(rateBlockedBody.retryAfter > 0)
         assert.match(rateBlockedBody.errorMessage, /retry/i)
 
-        const records = JSON.stringify({ audits: db.audits, alerts: db.alerts, rateAudits: rateDb.audits, rateAlerts: rateDb.alerts })
-        for (const secret of ['correct horse battery staple', 'rd_session', 'snapshot body', 'attachment contents', 'turnstile-secret'])
+        const dynamicFirst = await worker.fetch(request('/v1/raindrop/1', null, { Cookie: rateCookie }), rateEnv)
+        const dynamicSecond = await worker.fetch(request('/v1/raindrop/2', null, { Cookie: rateCookie }), rateEnv)
+        const dynamicBlocked = await worker.fetch(new Request('https://api.example.test/v1/raindrop/3', {
+            headers: { Cookie: rateCookie, 'X-Request-ID': 'password-secret-should-not-persist' }
+        }), rateEnv)
+        assert.equal(dynamicFirst.status, 404)
+        assert.equal(dynamicSecond.status, 404)
+        assert.equal(dynamicBlocked.status, 429)
+        assert.equal(rateDb.rateLimits.filter(item => item.route_key === 'GET /v1/raindrop/:id').length, 1)
+
+        const unknownDb = new AccountingDatabase()
+        const unknownEnv = { ...env(unknownDb), TURNSTILE_ENABLED: 'false', RATE_LIMIT_PER_MINUTE: '2' }
+        const unknownHeaders = { 'CF-Connecting-IP': '203.0.113.10' }
+        assert.equal((await worker.fetch(new Request('https://api.example.test/v1/page-body-secret-1', { headers: unknownHeaders }), unknownEnv)).status, 401)
+        const unknownBlocked = await worker.fetch(new Request('https://api.example.test/v1/page-body-secret-2', {
+            headers: { ...unknownHeaders, 'X-Request-ID': 'token-secret-should-not-persist' }
+        }), unknownEnv)
+        assert.equal(unknownBlocked.status, 401)
+        const unknownRateBlocked = await worker.fetch(new Request('https://api.example.test/v1/page-body-secret-3', {
+            headers: { ...unknownHeaders, 'X-Request-ID': 'token-secret-should-not-persist' }
+        }), unknownEnv)
+        assert.equal(unknownRateBlocked.status, 429)
+        assert.equal(unknownDb.rateLimits.filter(item => item.route_key === 'GET /v1/unknown').length, 1)
+
+        const records = JSON.stringify({ audits: db.audits, alerts: db.alerts, rateAudits: rateDb.audits, rateAlerts: rateDb.alerts, unknownAudits: unknownDb.audits, unknownAlerts: unknownDb.alerts })
+        for (const secret of ['correct horse battery staple', 'rd_session', 'snapshot body', 'attachment contents', 'turnstile-secret', 'password-secret-should-not-persist', 'token-secret-should-not-persist', '/v1/page-body-secret'])
             assert.equal(records.includes(secret), false)
         assert.ok(db.alerts.some(item => item.kind === 'usage_quota_threshold'))
         assert.ok(db.alerts.some(item => item.kind === 'usage_quota_exceeded'))
