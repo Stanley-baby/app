@@ -11,6 +11,7 @@ const metadataMaxRetries = 3
 const metadataMaxRedirects = 5
 const metadataBodyLimit = 256 * 1024
 const metadataFetchTimeoutMs = 8000
+const metadataLeaseMs = 60 * 1000
 const metadataRetryDelays = [5, 30, 300]
 
 const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
@@ -464,15 +465,11 @@ const publicTask = task => ({
 })
 
 const selectTask = async (env, taskId, userId = null) => {
-    try {
-        const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
-        const values = userId === null ? [taskId] : [taskId, userId]
-        return await env.DB.prepare(`SELECT id, user_id, bookmark_id, type, status, progress, retry_count,
-            result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at
-            FROM background_tasks WHERE ${where}`).bind(...values).first()
-    } catch {
-        return null
-    }
+    const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
+    const values = userId === null ? [taskId] : [taskId, userId]
+    return await env.DB.prepare(`SELECT id, user_id, bookmark_id, type, status, progress, retry_count,
+        idempotency_key, source_url, result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at
+        FROM background_tasks WHERE ${where}`).bind(...values).first()
 }
 
 const taskPayload = task => ({ taskId: String(task.id), type: task.type })
@@ -504,7 +501,7 @@ const createMetadataTask = async (env, request, userId, bookmarkId, sourceUrl) =
             id, userId, bookmarkId, metadataTaskType, idempotencyKey, sourceUrl, now, now).run()
         let task = await selectTask(env, id, userId)
         if (!task)
-            task = await env.DB.prepare('SELECT id, user_id, bookmark_id, type, status, progress, retry_count, result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at FROM background_tasks WHERE idempotency_key = ? AND user_id = ?').bind(idempotencyKey, userId).first()
+            task = await env.DB.prepare('SELECT id, user_id, bookmark_id, type, status, progress, retry_count, idempotency_key, source_url, result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at FROM background_tasks WHERE idempotency_key = ? AND user_id = ?').bind(idempotencyKey, userId).first()
         if (!task) return null
 
         if (Number(inserted?.meta?.changes || 0) === 1) {
@@ -568,12 +565,15 @@ const claimTask = async (env, taskId) => {
     const task = await selectTask(env, taskId)
     if (!task || task.type !== metadataTaskType) return { action: 'skip' }
     if (['succeeded', 'dead_letter'].includes(task.status)) return { action: 'skip' }
-    if (task.status === 'retrying' && task.next_retry_at > Date.now())
-        return { action: 'defer', delaySeconds: Math.max(1, Math.ceil((task.next_retry_at - Date.now()) / 1000)) }
     const now = Date.now()
+    if (task.status === 'retrying' && task.next_retry_at > now)
+        return { action: 'defer', delaySeconds: Math.max(1, Math.ceil((task.next_retry_at - now) / 1000)) }
+    const staleProcessing = task.status === 'processing' && Number(task.updated_at || 0) <= now - metadataLeaseMs
+    if (task.status === 'processing' && !staleProcessing) return { action: 'skip' }
     const claimed = await env.DB.prepare(`UPDATE background_tasks SET status = 'processing', progress = 10,
-        next_retry_at = NULL, updated_at = ? WHERE id = ? AND status IN ('queued', 'retrying')
-        AND (next_retry_at IS NULL OR next_retry_at <= ?)`).bind(now, taskId, now).run()
+        next_retry_at = NULL, updated_at = ? WHERE id = ? AND
+        ((status IN ('queued', 'retrying') AND (next_retry_at IS NULL OR next_retry_at <= ?)) OR
+        (status = 'processing' AND updated_at <= ?))`).bind(now, taskId, now, now - metadataLeaseMs).run()
     if (Number(claimed?.meta?.changes || 0) !== 1) return { action: 'skip' }
     return { action: 'process', task }
 }
@@ -584,8 +584,8 @@ const processMetadataTask = async (env, taskId) => {
 
     try {
         const metadata = await fetchPageMetadata(claimed.task.source_url)
-        const bookmark = await env.DB.prepare('SELECT id, title, description FROM bookmarks WHERE id = ? AND user_id = ? AND removed_at IS NULL')
-            .bind(claimed.task.bookmark_id, claimed.task.user_id).first()
+        const bookmark = await env.DB.prepare('SELECT id, url, title, description FROM bookmarks WHERE id = ? AND user_id = ? AND removed_at IS NULL AND url = ?')
+            .bind(claimed.task.bookmark_id, claimed.task.user_id, claimed.task.source_url).first()
         if (bookmark && (metadata.title && !bookmark.title || metadata.description && !bookmark.description)) {
             await env.DB.prepare(`UPDATE bookmarks SET
                 title = CASE WHEN title = '' THEN ? ELSE title END,

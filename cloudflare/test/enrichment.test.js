@@ -33,7 +33,7 @@ class TaskDatabase {
         let values = []
         const first = async () => {
             if (sql.includes('FROM background_tasks')) {
-                if (sql.includes('idempotency_key'))
+                if (sql.includes('WHERE idempotency_key'))
                     return this.tasks.find(task => task.idempotency_key === values[0] && task.user_id === values[1]) || null
                 return this.tasks.find(task => task.id === values[0] && (values.length < 2 || task.user_id === values[1])) || null
             }
@@ -49,10 +49,19 @@ class TaskDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE background_tasks SET status = \'processing\'')) {
-                const [updatedAt, id, retryAt] = values
-                const task = this.tasks.find(item => item.id === id && ['queued', 'retrying'].includes(item.status) && (!item.next_retry_at || item.next_retry_at <= retryAt))
+                const [updatedAt, id, retryAt, staleAt] = values
+                const task = this.tasks.find(item => item.id === id && (
+                    ['queued', 'retrying'].includes(item.status) && (!item.next_retry_at || item.next_retry_at <= retryAt) ||
+                    item.status === 'processing' && item.updated_at <= staleAt))
                 if (!task) return { meta: { changes: 0 } }
                 Object.assign(task, { status: 'processing', progress: 10, next_retry_at: null, updated_at: updatedAt })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE background_tasks SET status = \'queued\'')) {
+                const [updatedAt, id, userId, type] = values
+                const task = this.tasks.find(item => item.id === id && item.user_id === userId && item.type === type && item.status === 'dead_letter')
+                if (!task) return { meta: { changes: 0 } }
+                Object.assign(task, { status: 'queued', progress: 0, retry_count: 0, result_metadata: '{}', error_code: null, error_message: null, next_retry_at: null, updated_at: updatedAt, completed_at: null })
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE background_tasks SET status = \'retrying\'')) {
@@ -88,6 +97,58 @@ class TaskDatabase {
             return { meta: { changes: 1 } }
         }
         return { bind: (...next) => { values = next; return { first, run } } }
+    }
+}
+
+class ProjectionTaskDatabase extends TaskDatabase {
+    prepare(sql) {
+        const statement = super.prepare(sql)
+        if (!sql.includes('FROM background_tasks')) return statement
+        return {
+            bind: (...values) => {
+                const bound = statement.bind(...values)
+                return {
+                    first: async () => {
+                        const row = await bound.first()
+                        if (!row || sql.includes('source_url')) return row
+                        const projected = { ...row }
+                        delete projected.source_url
+                        return projected
+                    },
+                    run: bound.run
+                }
+            }
+        }
+    }
+}
+
+class RouteTaskDatabase extends TaskDatabase {
+    constructor(task, authenticated = true) {
+        super(task)
+        this.authenticated = authenticated
+    }
+
+    prepare(sql) {
+        if (!sql.includes('FROM sessions s')) return super.prepare(sql)
+        return {
+            bind: () => ({
+                first: async () => this.authenticated ? {
+                    session_id: 'session-1',
+                    user_id: 1,
+                    device_name: 'test',
+                    created_at: 1,
+                    last_seen_at: 1,
+                    expires_at: Date.now() + 86400000,
+                    id: 1,
+                    email: 'owner@example.test',
+                    name: 'Owner',
+                    email_verified_at: 1,
+                    federated_only: 0,
+                    google_enabled: false
+                } : null,
+                run: async () => ({ meta: { changes: 1 } })
+            })
+        }
     }
 }
 
@@ -139,6 +200,22 @@ test('queue follows redirects, enriches empty fields, and records success', asyn
     assert.equal(db.bookmarks[0].description, 'Fetched description')
 })
 
+test('claimed tasks retain their persisted source URL after D1 projection', async t => {
+    const db = new ProjectionTaskDatabase({ id: 'task-projection', source_url: 'https://public.example.test/projected' })
+    const env = baseEnv(db)
+    const originalFetch = globalThis.fetch
+    let requested
+    globalThis.fetch = async url => {
+        requested = String(url)
+        return new Response('<title>Projected</title>', { status: 200, headers: { 'Content-Type': 'text/html' } })
+    }
+    t.after(() => { globalThis.fetch = originalFetch })
+    const result = await processMetadataTask(env, 'task-projection')
+    assert.equal(result.action, 'ack')
+    assert.equal(requested, 'https://public.example.test/projected')
+    assert.equal(db.tasks[0].status, 'succeeded')
+})
+
 test('unsafe redirect is dead-lettered without retrying', async t => {
     const db = new TaskDatabase({ id: 'task-redirect', source_url: 'https://public.example.test/start' })
     const dlq = []
@@ -186,4 +263,60 @@ test('processMetadataTask ignores duplicate delivery after success', async () =>
     } finally {
         globalThis.fetch = originalFetch
     }
+})
+
+test('stale processing tasks are reclaimable after an interrupted delivery', async t => {
+    const db = new TaskDatabase({ id: 'task-stale', status: 'processing', updated_at: 1, source_url: 'https://public.example.test/recover' })
+    const env = baseEnv(db)
+    const originalFetch = globalThis.fetch
+    let requested
+    globalThis.fetch = async url => {
+        requested = String(url)
+        return new Response('<title>Recovered</title>', { status: 200, headers: { 'Content-Type': 'text/html' } })
+    }
+    t.after(() => { globalThis.fetch = originalFetch })
+    const result = await processMetadataTask(env, 'task-stale')
+    assert.equal(result.action, 'ack')
+    assert.equal(requested, 'https://public.example.test/recover')
+    assert.equal(db.tasks[0].status, 'succeeded')
+})
+
+test('task routes enforce authentication, ownership, and retry states', async () => {
+    const call = async (db, path, method = 'GET') => worker.fetch(new Request(`https://api.example.test${path}`, {
+        method,
+        headers: { Cookie: 'rd_session=test-session', Origin: 'https://app.example.test' }
+    }), { ...baseEnv(db), CORS_ORIGINS: 'https://app.example.test' })
+
+    const unauthenticated = await call(new RouteTaskDatabase({ id: 'task-auth' }, false), '/v1/tasks/task-auth')
+    assert.equal(unauthenticated.status, 401)
+
+    const succeededDb = new RouteTaskDatabase({ id: 'task-route', status: 'succeeded', result_metadata: '{"title":"done"}' })
+    const status = await call(succeededDb, '/v1/tasks/task-route')
+    assert.equal(status.status, 200)
+    const statusBody = await status.json()
+    assert.equal(statusBody.task.status, 'succeeded')
+    assert.equal(statusBody.task.metadata.title, 'done')
+    assert.equal('source_url' in statusBody.task, false)
+
+    const progress = await call(succeededDb, '/v1/tasks/task-route/status')
+    assert.equal(progress.status, 200)
+    const failure = await call(succeededDb, '/v1/tasks/task-route/failure')
+    assert.equal(failure.status, 200)
+    assert.equal((await failure.json()).failure, null)
+
+    const wrongOwner = await call(new RouteTaskDatabase({ id: 'task-other-user', user_id: 2 }), '/v1/tasks/task-other-user')
+    assert.equal(wrongOwner.status, 404)
+
+    const unsupported = await call(new RouteTaskDatabase({ id: 'task-unsupported', type: 'capture', status: 'dead_letter' }), '/v1/tasks/task-unsupported/retry', 'POST')
+    assert.equal(unsupported.status, 400)
+
+    const notFailed = await call(succeededDb, '/v1/tasks/task-route/retry', 'POST')
+    assert.equal(notFailed.status, 409)
+
+    const deadDb = new RouteTaskDatabase({ id: 'task-dead', status: 'dead_letter', error_code: 'metadata_fetch_failed' })
+    const retried = await call(deadDb, '/v1/tasks/task-dead/retry', 'POST')
+    assert.equal(retried.status, 202)
+    assert.equal((await retried.json()).task.status, 'queued')
+    const retriedAgain = await call(deadDb, '/v1/tasks/task-dead/retry', 'POST')
+    assert.equal(retriedAgain.status, 409)
 })
