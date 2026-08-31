@@ -68,6 +68,10 @@ class MigrationDatabase {
         const all = async () => {
             if (sql.includes('FROM bookmarks WHERE user_id'))
                 return { results: this.bookmarks.filter(item => item.user_id === Number(values[0]) && !item.removed_at).map(item => ({ id: item.id, url: item.url, title: item.title, collection_id: item.collection_id })) }
+            if (sql.includes('type = \'attachment_scan\'') && sql.includes('migration_key LIKE')) {
+                const prefix = String(values[2] || '').replace(/%$/, '')
+                return { results: this.tasks.filter(item => item.type === 'attachment_scan' && this.contents?.some(content => content.id === item.content_id && String(content.migration_key).startsWith(prefix))) }
+            }
             if (sql.includes('FROM migration_archives'))
                 return { results: this.archives.filter(item => item.user_id === Number(values[0])).map(item => ({ ...item })) }
             if (sql.includes('FROM migration_mappings'))
@@ -78,6 +82,11 @@ class MigrationDatabase {
             if (sql.includes('INSERT INTO rate_limits') || sql.includes('INSERT INTO usage_counters') || sql.includes('INSERT INTO audit_records'))
                 return { meta: { changes: 1 } }
             if (sql.includes('UPDATE sessions SET last_seen_at')) return { meta: { changes: 1 } }
+            if (sql.includes('UPDATE background_tasks SET status = \'queued\'')) {
+                const task = this.tasks.find(item => item.id === values[1] && item.user_id === Number(values[2]) && item.type === values[3] && item.status === 'dead_letter')
+                if (task) Object.assign(task, { status: 'queued', progress: 0, retry_count: 0, next_retry_at: null, updated_at: values[0], completed_at: null, error_code: null, error_message: null })
+                return { meta: { changes: task ? 1 : 0 } }
+            }
             if (sql.includes('UPDATE bookmarks SET cover')) {
                 const item = this.bookmarks.find(item => item.id === Number(values[2]) && item.user_id === Number(values[3]))
                 if (item) item.cover = values[0]
@@ -415,4 +424,30 @@ test('scan-enabled migration queues one safety task per protected asset', async 
     db.tasks.find(item => item.id === taskId).status = 'queued'
     await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { assert.fail('unexpected retry') } }] }, env)
     assert.equal(db.tasks.filter(item => item.type === 'attachment_scan').length, 3)
+})
+
+test('migration status exposes failed scans and only an explicit retry requeues them', async () => {
+    const db = new MigrationDatabase()
+    const env = envFor(db, { scanEnabled: true })
+    const preflight = await worker.fetch(request('/v1/import/preflight', {
+        method: 'POST',
+        ...body({ bookmarks: [{ id: 'bookmark-1', url: 'https://example.com/scan-status', title: 'Scan status' }], attachments: [{ id: 'attachment-1', bookmarkId: 'bookmark-1', data: 'bytes' }] })
+    }), env)
+    const archiveId = (await preflight.json()).archiveId
+    const commit = await worker.fetch(request(`/v1/import/${archiveId}/commit`, { method: 'POST' }), env)
+    const taskId = (await commit.json()).taskId
+    await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { assert.fail('unexpected retry') } }] }, env)
+    const scanTask = db.tasks.find(item => item.type === 'attachment_scan')
+    scanTask.status = 'dead_letter'
+    scanTask.error_code = 'content_quarantined'
+    scanTask.error_message = 'Rejected by scanner'
+    const failed = await worker.fetch(request(`/v1/import/${archiveId}/status`), env)
+    const failedBody = await failed.json()
+    assert.equal(failedBody.scanStatus, 'failed')
+    assert.equal(failedBody.scanTasks[0].status, 'dead_letter')
+
+    const retry = await worker.fetch(request(`/v1/import/${archiveId}/retry`, { method: 'POST' }), env)
+    assert.equal(retry.status, 202)
+    assert.equal(scanTask.status, 'queued')
+    assert.equal(db.tasks.filter(item => item.type === 'attachment_scan').length, 1)
 })

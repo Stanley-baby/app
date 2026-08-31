@@ -1257,7 +1257,7 @@ const retryDeadLetterTask = async (env, request, task, userId) => {
 }
 
 const ensureContentScanTask = async (env, { userId, bookmarkId, contentId, sourceUrl, kind }) => {
-    let task = await createContentTask(env, null, {
+    return createContentTask(env, null, {
         userId,
         bookmarkId,
         type: attachmentTaskType,
@@ -1265,9 +1265,6 @@ const ensureContentScanTask = async (env, { userId, bookmarkId, contentId, sourc
         sourceUrl,
         payload: { kind }
     })
-    if (task?.status === 'dead_letter')
-        task = (await retryDeadLetterTask(env, null, task, userId)).task
-    return task && task.status !== 'dead_letter' ? task : null
 }
 
 const migrationMaxBytes = env => Math.min(
@@ -1342,11 +1339,24 @@ const migrationReviewItems = (archive, decisions) => (archive?.duplicates || [])
     decision: migrationDecision(decisions['bookmark:' + item.sourceId])
 }))
 
+const migrationScanTasks = async (env, archiveId, userId) => {
+    const rows = await env.DB.prepare(`SELECT id, user_id, bookmark_id, type, status, progress, retry_count,
+        idempotency_key, source_url, content_id, payload, result_metadata, error_code, error_message,
+        next_retry_at, created_at, updated_at, completed_at
+        FROM background_tasks WHERE user_id = ? AND type = 'attachment_scan' AND content_id IN (
+            SELECT id FROM content_objects WHERE user_id = ? AND migration_key LIKE ?
+        ) ORDER BY created_at`).bind(userId, userId, String(archiveId) + ':content:%').all()
+    return rows.results || []
+}
+
 const migrationOutput = async (env, row, task = null) => {
     const archive = parseTaskMetadata(row.archive_json)
     const preflight = parseTaskMetadata(row.preflight_json)
     const decisions = parseMigrationDecisions(row.review_json)
     const duplicates = migrationReviewItems(preflight, decisions)
+    const scanTasks = (await migrationScanTasks(env, row.id, row.user_id)).map(publicTask)
+    const failedScans = scanTasks.filter(item => item.status === 'dead_letter')
+    const pendingScans = scanTasks.filter(item => ['queued', 'processing', 'retrying'].includes(item.status))
     return {
         archiveId: String(row.id),
         source: row.source,
@@ -1363,6 +1373,9 @@ const migrationOutput = async (env, row, task = null) => {
         unresolvedDuplicates: duplicates.filter(item => !item.decision).length,
         taskId: row.task_id ? String(row.task_id) : null,
         task: task ? publicTask(task) : null,
+        scanStatus: failedScans.length ? 'failed' : pendingScans.length ? 'processing' : 'succeeded',
+        scanTasks,
+        scanError: failedScans[0]?.failure || null,
         error: row.error_code ? { code: row.error_code, message: row.error_message } : null,
         createdAt: taskDate(row.created_at),
         updatedAt: taskDate(row.updated_at)
@@ -1582,7 +1595,8 @@ const processMigrationTask = async (env, taskId) => {
                     sourceUrl: 'content://' + content.id,
                     kind
                 })
-                if (!scanTask) throw metadataFailure('content_task_unavailable', 'The content safety check could not be queued', true)
+                if (!scanTask || scanTask.status === 'dead_letter')
+                    throw metadataFailure('content_task_unavailable', 'The content safety check could not be queued', true)
             }
             await addMigrationMapping(env, {
                 archiveId,
@@ -2776,17 +2790,26 @@ export default {
 
                 if (action === 'retry' && request.method === 'POST') {
                     const task = archiveRow.task_id ? await selectTask(env, archiveRow.task_id, session.user_id) : null
-                    if (!task) return error('task_not_found', 404, request, env, 'Migration task was not found')
-                    if (task.type !== migrationTaskType)
+                    if (task && task.type !== migrationTaskType)
                         return error('task_not_retryable', 400, request, env, 'This migration cannot be retried')
-                    const retried = await retryDeadLetterTask(env, request, task, session.user_id)
-                    if (retried.status === 409)
-                        return error('task_not_retryable', 409, request, env, 'Only failed migration tasks can be retried')
-                    if (retried.status === 404)
-                        return error('task_not_found', 404, request, env, 'Migration task was not found')
-                    await env.DB.prepare('UPDATE migration_archives SET status = \'queued\', error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(Date.now(), archiveId, session.user_id).run()
-                    return json({ result: true, archiveId, status: 'queued', task: publicTask(retried.task), taskId: String(retried.task.id) }, 202, request, env)
+                    let retriedTask = null
+                    if (task?.status === 'dead_letter') {
+                        const retried = await retryDeadLetterTask(env, request, task, session.user_id)
+                        if (retried.status === 404)
+                            return error('task_not_found', 404, request, env, 'Migration task was not found')
+                        if (retried.status === 202 && retried.task?.status !== 'dead_letter') retriedTask = retried.task
+                    }
+                    const scanTasks = await migrationScanTasks(env, archiveId, session.user_id)
+                    for (const scanTask of scanTasks.filter(item => item.status === 'dead_letter')) {
+                        const retried = await retryDeadLetterTask(env, request, scanTask, session.user_id)
+                        if (!retriedTask && retried.status === 202 && retried.task?.status !== 'dead_letter') retriedTask = retried.task
+                    }
+                    if (!retriedTask)
+                        return error('task_not_retryable', 409, request, env, 'No failed migration task is available to retry')
+                    const status = retriedTask.type === migrationTaskType ? 'queued' : archiveRow.status
+                    await env.DB.prepare('UPDATE migration_archives SET status = ?, error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(status, Date.now(), archiveId, session.user_id).run()
+                    return json({ result: true, archiveId, status, task: publicTask(retriedTask), taskId: String(retriedTask.id) }, 202, request, env)
                 }
             }
 

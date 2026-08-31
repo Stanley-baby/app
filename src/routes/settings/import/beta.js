@@ -22,7 +22,7 @@ export default function BetaMigration() {
     const input = useRef()
     const timer = useRef()
     const pollRef = useRef()
-    const [state, setState] = useState({ phase: 'idle', archiveId: '', preflight: null, decisions: {}, task: null, error: '' })
+    const [state, setState] = useState({ phase: 'idle', archiveId: '', preflight: null, decisions: {}, task: null, scanStatus: null, error: '' })
 
     useEffect(() => () => window.clearTimeout(timer.current), [])
 
@@ -58,15 +58,19 @@ export default function BetaMigration() {
         try {
             const result = await request('/v1/import/' + encodeURIComponent(archiveId) + '/status')
             const task = result.task
-            if (task?.status === 'succeeded') {
-                setState(current => ({ ...current, phase: 'success', task, error: '' }))
+            if (task?.status === 'succeeded' && result.scanStatus === 'failed') {
+                setState(current => ({ ...current, phase: 'error', task, scanStatus: result.scanStatus, error: result.scanError?.message || 'Content safety check failed' }))
+                return
+            }
+            if (task?.status === 'succeeded' && result.scanStatus !== 'processing') {
+                setState(current => ({ ...current, phase: 'success', task, scanStatus: result.scanStatus, error: '' }))
                 return
             }
             if (['dead_letter', 'failed'].includes(task?.status)) {
                 setState(current => ({ ...current, phase: 'error', task, error: task.failure?.message || 'Migration task failed' }))
                 return
             }
-            setState(current => ({ ...current, phase: 'processing', task, error: '' }))
+            setState(current => ({ ...current, phase: 'processing', task, scanStatus: result.scanStatus, error: '' }))
             timer.current = window.setTimeout(() => poll(taskId, archiveId), 1000)
         } catch (error) { fail(error) }
     }
@@ -78,15 +82,16 @@ export default function BetaMigration() {
         const restore = async () => {
             try {
                 const result = await request('/v1/import')
-                const current = (result.items || []).find(item => ['review', 'queued', 'processing', 'retrying', 'dead_letter'].includes(item.status))
+                const current = (result.items || []).find(item => ['review', 'queued', 'processing', 'retrying', 'dead_letter'].includes(item.status) || item.status === 'succeeded' && ['processing', 'failed'].includes(item.scanStatus))
                 if (!current || !active) return
                 const detail = await request('/v1/import/' + encodeURIComponent(current.archiveId) + '/status')
                 if (!active) return
                 const duplicates = detail.duplicates || current.duplicates || []
                 const decisions = Object.fromEntries(duplicates.filter(item => item.decision).map(item => [item.sourceId, item.decision]))
                 const task = detail.task || current.task
-                const phase = current.status === 'review' ? 'review' : current.status === 'dead_letter' || task?.status === 'dead_letter' ? 'error' : 'processing'
-                setState({ phase, archiveId: current.archiveId, preflight: { counts: current.counts, duplicates, unresolvedDuplicates: duplicates.filter(item => !item.decision).length }, decisions, task, error: '' })
+                const scanStatus = detail.scanStatus || current.scanStatus
+                const phase = current.status === 'review' ? 'review' : current.status === 'dead_letter' || task?.status === 'dead_letter' || scanStatus === 'failed' ? 'error' : task?.status === 'succeeded' && scanStatus !== 'processing' ? 'success' : 'processing'
+                setState({ phase, archiveId: current.archiveId, preflight: { counts: current.counts, duplicates, unresolvedDuplicates: duplicates.filter(item => !item.decision).length }, decisions, task, scanStatus, error: detail.scanError?.message || '' })
                 if (phase === 'processing' && task?.id)
                     window.setTimeout(() => pollRef.current?.(task.id, current.archiveId), 0)
             } catch {}
@@ -105,7 +110,7 @@ export default function BetaMigration() {
                 setState(current => ({ ...current, preflight: { ...current.preflight, duplicates: reviewed.duplicates, unresolvedDuplicates: reviewed.unresolvedDuplicates }, error: '' }))
             }
             const result = await request('/v1/import/' + encodeURIComponent(state.archiveId) + '/commit', { method: 'POST', body: '{}' })
-            setState(current => ({ ...current, phase: 'processing', task: result.task, error: '' }))
+            setState(current => ({ ...current, phase: 'processing', task: result.task, scanStatus: 'processing', error: '' }))
             poll(result.taskId, state.archiveId)
         } catch (error) { fail(error) }
     }
@@ -120,7 +125,7 @@ export default function BetaMigration() {
 
     const reset = () => {
         window.clearTimeout(timer.current)
-        setState({ phase: 'idle', archiveId: '', preflight: null, decisions: {}, task: null, error: '' })
+        setState({ phase: 'idle', archiveId: '', preflight: null, decisions: {}, task: null, scanStatus: null, error: '' })
         if (input.current) input.current.value = ''
     }
 
@@ -166,7 +171,7 @@ export default function BetaMigration() {
                         </Progress>
                     )}
                     {state.phase === 'success' && <Alert variant='success'>Migration Archive imported successfully.</Alert>}
-                    {state.phase === 'error' && state.task?.status === 'dead_letter' && <Button variant='primary' onClick={retry}>Retry import</Button>}
+                    {state.phase === 'error' && (state.task?.status === 'dead_letter' || state.scanStatus === 'failed') && <Button variant='primary' onClick={retry}>Retry import</Button>}
                 </>
             )}
             {state.error && <Alert variant='warning'>{state.error}</Alert>}
