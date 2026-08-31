@@ -2190,8 +2190,11 @@ export default {
                 if (!memberId) {
                     if (request.method === 'DELETE') {
                         if (role !== 'owner') return error('permission_denied', 403, request, env, 'Only the Collection Owner can remove sharing')
-                        await env.DB.prepare('DELETE FROM collection_collaborators WHERE collection_id = ? AND user_id != ?').bind(collectionId, collection.user_id).run()
-                        await env.DB.prepare('DELETE FROM collection_invitations WHERE collection_id = ?').bind(collectionId).run()
+                        const ids = await collectionDescendants(env, collectionId)
+                        if (!ids.includes(collectionId)) ids.unshift(collectionId)
+                        const placeholders = ids.map(() => '?').join(',')
+                        await env.DB.prepare(`DELETE FROM collection_collaborators WHERE collection_id IN (${placeholders}) AND user_id != ?`).bind(...ids, collection.user_id).run()
+                        await env.DB.prepare(`DELETE FROM collection_invitations WHERE collection_id IN (${placeholders})`).bind(...ids).run()
                         await recordAudit(env, request, { userId: session.user_id, action: 'collection.unshare', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
                         return json({ result: true }, 200, request, env)
                     }
