@@ -682,3 +682,193 @@ paths:
           description: Task not found for this User.
         '409':
           description: Task is not in a retryable failure state.
+  /v1/raindrop/file:
+    put:
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                title:
+                  type: string
+                  maxLength: 500
+                collectionId:
+                  type: integer
+                  minimum: -1
+                tags:
+                  type: string
+      responses:
+        '201':
+          description: Private attachment stored in Quarantined Content.
+        '400':
+          description: Upload metadata or file is invalid.
+        '401':
+          description: Login required.
+        '403':
+          description: Verified email required.
+        '413':
+          description: Attachment exceeds the 50 MiB Beta limit.
+        '503':
+          description: Private content storage is unavailable.
+  /v1/content/upload:
+    post:
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, bookmarkId]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                bookmarkId:
+                  type: integer
+                  minimum: 1
+      responses:
+        '201':
+          description: Private attachment stored in Quarantined Content.
+        '400':
+          description: Upload metadata or file is invalid.
+        '401':
+          description: Login required.
+        '403':
+          description: Verified email required.
+        '404':
+          description: Bookmark not found for this User.
+        '413':
+          description: Attachment exceeds the 50 MiB Beta limit.
+        '503':
+          description: Private content storage or the safety queue is unavailable.
+  /v1/raindrop/{id}/attachments:
+    post:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Private attachment stored in Quarantined Content.
+        '400':
+          description: Upload metadata or file is invalid.
+        '401':
+          description: Login required.
+        '403':
+          description: Verified email required.
+        '404':
+          description: Bookmark not found for this User.
+        '413':
+          description: Attachment exceeds the 50 MiB Beta limit.
+        '503':
+          description: Private content storage or the safety queue is unavailable.
+  /v1/raindrop/{id}/content:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Authorized private content metadata for a Bookmark.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+  /v1/raindrop/{id}/capture:
+    post:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind:
+                  type: string
+                  enum: [snapshot, screenshot]
+      responses:
+        '202':
+          description: Explicit Dynamic Capture queued for safety checking.
+        '400':
+          description: Bookmark URL is not a public HTTP(S) address.
+        '401':
+          description: Login required.
+        '403':
+          description: Verified email required.
+        '404':
+          description: Bookmark not found for this User.
+        '503':
+          description: Capture task could not be queued.
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Capture and snapshot status for the Bookmark.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+  /v1/content/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Authorized Protected Content metadata.
+        '401':
+          description: Login required.
+        '404':
+          description: Content not found for this User.
+  /v1/content/{id}/download:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Authorized Cleared Content stream from private R2.
+        '401':
+          description: Login required.
+        '404':
+          description: Content not found for this User.
+        '409':
+          description: Content is still Quarantined.

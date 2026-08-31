@@ -30,8 +30,11 @@
             "RESEND_API_KEY",
             "MAIL_FROM",
             "GOOGLE_CLIENT_ID",
-            "GOOGLE_CLIENT_SECRET"
-        ]
+            "GOOGLE_CLIENT_SECRET",
+            "SCANNER_URL",
+            "SCANNER_API_KEY"
+        ],
+        "attachmentMaxBytes": 52428800
     },
     "preview": {
         "workerName": "raindrop-api-preview",
@@ -62,8 +65,11 @@
             "RESEND_API_KEY",
             "MAIL_FROM",
             "GOOGLE_CLIENT_ID",
-            "GOOGLE_CLIENT_SECRET"
-        ]
+            "GOOGLE_CLIENT_SECRET",
+            "SCANNER_URL",
+            "SCANNER_API_KEY"
+        ],
+        "attachmentMaxBytes": 52428800
     },
     "beta": {
         "workerName": "raindrop-api-beta",
@@ -94,8 +100,11 @@
             "RESEND_API_KEY",
             "MAIL_FROM",
             "GOOGLE_CLIENT_ID",
-            "GOOGLE_CLIENT_SECRET"
-        ]
+            "GOOGLE_CLIENT_SECRET",
+            "SCANNER_URL",
+            "SCANNER_API_KEY"
+        ],
+        "attachmentMaxBytes": 52428800
     },
     "production": {
         "workerName": "raindrop-api-production",
@@ -126,7 +135,10 @@
             "RESEND_API_KEY",
             "MAIL_FROM",
             "GOOGLE_CLIENT_ID",
-            "GOOGLE_CLIENT_SECRET"
-        ]
+            "GOOGLE_CLIENT_SECRET",
+            "SCANNER_URL",
+            "SCANNER_API_KEY"
+        ],
+        "attachmentMaxBytes": 52428800
     }
 }

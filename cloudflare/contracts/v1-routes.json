@@ -252,6 +252,60 @@
             "path": "/v1/user/deletion",
             "authentication": "required",
             "responses": [200, 401]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/raindrop/file",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403, 413, 503]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/content/upload",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403, 404, 413, 503]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/raindrop/:id/attachments",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403, 404, 413, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/raindrop/:id/content",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/raindrop/:id/capture",
+            "authentication": "required",
+            "responses": [202, 400, 401, 403, 404, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/raindrop/:id/capture",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/raindrop/:id/capture/status",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/content/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/content/:id/download",
+            "authentication": "required",
+            "responses": [200, 401, 404, 409, 503]
         }
     ]
 }

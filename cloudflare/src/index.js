@@ -1,3 +1,5 @@
+/* global Uint8Array */
+
 const encoder = new TextEncoder()
 const sessionDays = 30
 const verificationHours = 24
@@ -7,9 +9,15 @@ const passwordIterations = 100000
 const usageWindowMs = 24 * 60 * 60 * 1000
 const rateWindowMs = 60 * 1000
 const metadataTaskType = 'metadata_enrichment'
+const attachmentTaskType = 'attachment_scan'
+const captureTaskType = 'capture'
+const contentTaskTypes = new Set([attachmentTaskType, captureTaskType])
 const metadataMaxRetries = 3
 const metadataMaxRedirects = 5
 const metadataBodyLimit = 256 * 1024
+const contentBodyLimit = 50 * 1024 * 1024
+const multipartOverhead = 16 * 1024
+const captureBodyLimit = 10 * 1024 * 1024
 const metadataFetchTimeoutMs = 8000
 const metadataLeaseMs = 60 * 1000
 const metadataRetryDelays = [5, 30, 300]
@@ -52,6 +60,11 @@ const integerEnv = (env, names, fallback) => {
     }
     return fallback
 }
+
+const attachmentMaxBytes = env => Math.min(
+    contentBodyLimit,
+    integerEnv(env, ['ATTACHMENT_MAX_BYTES', 'CONTENT_MAX_BYTES'], contentBodyLimit)
+)
 
 const retryableError = (code, request, env, errorMessage, retryAfterMs, details = {}) => {
     const retryAfter = Math.max(1, Math.ceil(retryAfterMs / 1000))
@@ -410,6 +423,92 @@ const readLimitedText = async response => {
     return new TextDecoder().decode(bytes)
 }
 
+const readLimitedStream = async (stream, limit) => {
+    if (!stream?.getReader) return new Uint8Array(0)
+    const reader = stream.getReader()
+    const chunks = []
+    let size = 0
+    try {
+        let chunk
+        do {
+            chunk = await reader.read()
+            if (chunk.done) break
+            size += chunk.value.byteLength
+            if (size > limit) {
+                await reader.cancel()
+                throw metadataFailure('content_too_large', 'The content exceeds the size limit', true)
+            }
+            chunks.push(chunk.value)
+        } while (!chunk.done)
+    } finally {
+        reader.releaseLock?.()
+    }
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.byteLength
+    }
+    return bytes
+}
+
+const readUpload = async (request, maxBytes) => {
+    const contentType = String(request.headers.get('Content-Type') || '').toLowerCase()
+    if (contentType.includes('multipart/form-data')) {
+        const declaredSize = Number(request.headers.get('Content-Length'))
+        if (Number.isSafeInteger(declaredSize) && declaredSize > maxBytes + multipartOverhead)
+            return { error: 'content_too_large' }
+        let form
+        try {
+            const body = await readLimitedStream(request.body, maxBytes + multipartOverhead)
+            form = await new Response(body, { headers: { 'Content-Type': request.headers.get('Content-Type') || '' } }).formData()
+        } catch (failure) {
+            if (failure?.code === 'content_too_large') return { error: 'content_too_large' }
+            return { error: 'invalid_upload' }
+        }
+        let file = null
+        for (const value of form.values()) {
+            if (value && typeof value.arrayBuffer === 'function' && Number.isSafeInteger(Number(value.size))) {
+                file = value
+                break
+            }
+        }
+        if (!file) return { error: 'missing_file' }
+        const size = Number(file.size)
+        if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes)
+            return { error: 'content_too_large' }
+        const fields = {}
+        for (const [key, value] of form.entries())
+            if (value !== file) fields[key] = String(value)
+        return {
+            body: file,
+            size,
+            filename: file.name || fields.filename || 'upload',
+            contentType: file.type || fields.contentType || 'application/octet-stream',
+            fields
+        }
+    }
+
+    const contentLengthHeader = request.headers.get('Content-Length')
+    const contentLength = contentLengthHeader === null ? NaN : Number(contentLengthHeader)
+    if (Number.isSafeInteger(contentLength) && contentLength > maxBytes)
+        return { error: 'content_too_large' }
+    if (request.body) {
+        let body
+        try {
+            body = await readLimitedStream(request.body, maxBytes)
+        } catch (failure) {
+            return { error: failure?.code === 'content_too_large' ? 'content_too_large' : 'invalid_upload' }
+        }
+        return { body, size: body.byteLength, filename: request.headers.get('X-Filename') || 'upload', contentType: contentType || 'application/octet-stream', fields: {} }
+    }
+    return { error: 'missing_file' }
+}
+
+const safeFilename = value => String(value || 'upload').split(/[\\/]/).pop().split('').filter(char => char.charCodeAt(0) >= 32).join('').replace(/["']/g, '_').trim().slice(0, 255) || 'upload'
+
+const safeContentType = value => String(value || 'application/octet-stream').split(';')[0].trim().slice(0, 200) || 'application/octet-stream'
+
 const decodeHtml = value => String(value || '')
     .replace(/&#(\d+);/g, (_, code) => Number(code) <= 0x10ffff ? String.fromCodePoint(Number(code)) : '')
     .replace(/&#x([\da-f]+);/gi, (_, code) => parseInt(code, 16) <= 0x10ffff ? String.fromCodePoint(parseInt(code, 16)) : '')
@@ -493,6 +592,7 @@ const publicTask = task => ({
     taskId: String(task.id),
     type: task.type,
     bookmarkId: Number(task.bookmark_id),
+    ...(task.content_id ? { contentId: String(task.content_id) } : {}),
     status: task.status,
     progress: Number(task.progress || 0),
     retryCount: Number(task.retry_count || 0),
@@ -505,11 +605,69 @@ const publicTask = task => ({
     completedAt: taskDate(task.completed_at)
 })
 
+const publicContent = content => ({
+    id: String(content.id),
+    contentId: String(content.id),
+    bookmarkId: Number(content.bookmark_id),
+    kind: content.kind,
+    status: content.status,
+    filename: content.filename || 'upload',
+    contentType: content.content_type || 'application/octet-stream',
+    size: Number(content.size_bytes || 0),
+    createdAt: taskDate(content.created_at),
+    updatedAt: taskDate(content.updated_at),
+    clearedAt: taskDate(content.cleared_at)
+})
+
+const selectContent = async (env, contentId, userId = null) => {
+    const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
+    const values = userId === null ? [contentId] : [contentId, userId]
+    return env.DB.prepare(`SELECT id, user_id, bookmark_id, kind, status, object_key,
+        filename, content_type, size_bytes, created_at, updated_at, cleared_at
+        FROM content_objects WHERE ${where}`).bind(...values).first()
+}
+
+const listContent = async (env, bookmarkId, userId) => {
+    const rows = await env.DB.prepare(`SELECT id, user_id, bookmark_id, kind, status, object_key,
+        filename, content_type, size_bytes, created_at, updated_at, cleared_at
+        FROM content_objects WHERE bookmark_id = ? ORDER BY created_at DESC`).bind(bookmarkId).all()
+    const visible = []
+    for (const item of rows.results || [])
+        if (await contentAuthorized(env, item, userId)) visible.push(publicContent(item))
+    return visible
+}
+
+const bookmarkAccessible = async (env, bookmarkId, userId) => {
+    const owned = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
+        .bind(bookmarkId, userId).first()
+    if (owned) return owned
+    try {
+        return await env.DB.prepare(`SELECT b.* FROM bookmarks b
+            JOIN collection_collaborators cc ON cc.collection_id = b.collection_id
+            WHERE b.id = ? AND cc.user_id = ? AND cc.role IN ('owner', 'editor', 'viewer')`).bind(bookmarkId, userId).first()
+    } catch {
+        return null
+    }
+}
+
+const contentAuthorized = async (env, content, userId) => {
+    if (!content || Number(content.user_id) === Number(userId)) return Boolean(content)
+    try {
+        const authorized = await env.DB.prepare(`SELECT 1 FROM collection_collaborators cc
+            JOIN bookmarks b ON b.collection_id = cc.collection_id
+            WHERE cc.user_id = ? AND b.id = ? AND b.user_id = ?
+            AND cc.role IN ('owner', 'editor', 'viewer') LIMIT 1`).bind(userId, content.bookmark_id, content.user_id).first()
+        return Boolean(authorized)
+    } catch {
+        return false
+    }
+}
+
 const selectTask = async (env, taskId, userId = null) => {
     const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
     const values = userId === null ? [taskId] : [taskId, userId]
     return await env.DB.prepare(`SELECT id, user_id, bookmark_id, type, status, progress, retry_count,
-        idempotency_key, source_url, result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at
+        idempotency_key, source_url, content_id, payload, result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at
         FROM background_tasks WHERE ${where}`).bind(...values).first()
 }
 
@@ -542,7 +700,7 @@ const createMetadataTask = async (env, request, userId, bookmarkId, sourceUrl) =
             id, userId, bookmarkId, metadataTaskType, idempotencyKey, sourceUrl, now, now).run()
         let task = await selectTask(env, id, userId)
         if (!task)
-            task = await env.DB.prepare('SELECT id, user_id, bookmark_id, type, status, progress, retry_count, idempotency_key, source_url, result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at FROM background_tasks WHERE idempotency_key = ? AND user_id = ?').bind(idempotencyKey, userId).first()
+            task = await env.DB.prepare('SELECT id, user_id, bookmark_id, type, status, progress, retry_count, idempotency_key, source_url, content_id, payload, result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at FROM background_tasks WHERE idempotency_key = ? AND user_id = ?').bind(idempotencyKey, userId).first()
         if (!task) return null
 
         if (Number(inserted?.meta?.changes || 0) === 1) {
@@ -556,6 +714,180 @@ const createMetadataTask = async (env, request, userId, bookmarkId, sourceUrl) =
     }
 }
 
+const createContentTask = async (env, request, { userId, bookmarkId, type, contentId, sourceUrl, payload = {} }) => {
+    try {
+        const idempotencyKey = type + ':' + contentId
+        const now = Date.now()
+        const id = randomToken(18)
+        const inserted = await env.DB.prepare(`INSERT INTO background_tasks
+            (id, user_id, bookmark_id, type, status, progress, retry_count, idempotency_key,
+             source_url, content_id, payload, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'queued', 0, 0, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(idempotency_key) DO NOTHING`).bind(
+            id, userId, bookmarkId, type, idempotencyKey, sourceUrl, contentId,
+            JSON.stringify(payload), now, now).run()
+        let task = await selectTask(env, id, userId)
+        if (!task)
+            task = await env.DB.prepare(`SELECT id, user_id, bookmark_id, type, status, progress, retry_count,
+                idempotency_key, source_url, content_id, payload, result_metadata, error_code, error_message,
+                next_retry_at, created_at, updated_at, completed_at
+                FROM background_tasks WHERE idempotency_key = ? AND user_id = ?`).bind(idempotencyKey, userId).first()
+        if (!task) return null
+
+        if (Number(inserted?.meta?.changes || 0) === 1) {
+            await enqueueTask(env, task)
+            task = await selectTask(env, task.id, userId) || task
+            if (request) await recordAudit(env, request, { userId, action: 'task.created', resourceType: 'background_task', resourceId: task.id, outcome: 'success' })
+        }
+        return task
+    } catch {
+        return null
+    }
+}
+
+const putContentObject = async (env, content, body, metadata = {}) => {
+    if (!env.CONTENT_BUCKET?.put) throw metadataFailure('content_storage_unavailable', 'Content storage is not configured', true)
+    await env.CONTENT_BUCKET.put(content.object_key, body, {
+        httpMetadata: {
+            contentType: metadata.contentType || content.content_type,
+            contentDisposition: 'attachment; filename="' + safeFilename(metadata.filename || content.filename) + '"'
+        },
+        customMetadata: {
+            contentId: String(content.id),
+            bookmarkId: String(content.bookmark_id),
+            status: 'quarantined'
+        }
+    })
+}
+
+const scanStoredContent = async (env, content) => {
+    const scannerUrl = String(env.SCANNER_URL || '').trim()
+    const scannerKey = String(env.SCANNER_API_KEY || '').trim()
+    if (!scannerUrl || !scannerKey)
+        throw metadataFailure('scanner_not_configured', 'Content safety scanning is not configured', true)
+    try {
+        const endpoint = new URL(scannerUrl)
+        const localScanner = env.ENVIRONMENT === 'local' && ['localhost', '127.0.0.1', '[::1]'].includes(endpoint.hostname)
+        if (endpoint.protocol !== 'https:' && !localScanner)
+            throw new Error('scanner must use HTTPS')
+    } catch {
+        throw metadataFailure('scanner_not_configured', 'Content safety scanning is not configured', true)
+    }
+    if (!env.CONTENT_BUCKET?.get)
+        throw metadataFailure('content_storage_unavailable', 'Content storage is not configured', true)
+
+    const object = await env.CONTENT_BUCKET.get(content.object_key)
+    if (!object) throw metadataFailure('content_missing', 'Protected content is no longer available', true)
+    let response
+    try {
+        response = await fetch(scannerUrl, {
+            method: 'POST',
+            headers: {
+                Authorization: 'Bearer ' + scannerKey,
+                'Content-Type': content.content_type || 'application/octet-stream',
+                'X-Content-ID': String(content.id)
+            },
+            body: object.body
+        })
+    } catch {
+        throw metadataFailure('scanner_unavailable', 'Content safety scanning is temporarily unavailable')
+    }
+    if (!response.ok) throw metadataFailure('scanner_unavailable', 'Content safety scanning is temporarily unavailable')
+
+    let result
+    try {
+        result = await response.json()
+    } catch {
+        throw metadataFailure('scanner_invalid_response', 'Content safety scanning returned an invalid result', true)
+    }
+    const status = String(result?.status || result?.result || '').toLowerCase()
+    const clean = result?.clean === true || ['clean', 'approved', 'cleared', 'ok', 'safe'].includes(status)
+    const unsafe = result?.clean === false || ['malicious', 'blocked', 'quarantined', 'unsafe', 'infected'].includes(status)
+    if (!clean && !unsafe)
+        throw metadataFailure('scanner_invalid_response', 'Content safety scanning returned an invalid result', true)
+    if (unsafe)
+        throw metadataFailure('content_quarantined', 'Protected content did not pass the safety check', true)
+    const now = Date.now()
+    await env.DB.prepare(`UPDATE content_objects SET status = 'cleared', updated_at = ?, cleared_at = ?
+        WHERE id = ? AND status = 'quarantined'`).bind(now, now, content.id).run()
+    return { status: 'cleared' }
+}
+
+const captureResponse = async (source, env, kind = 'snapshot') => {
+    let current = validateFetchableUrl(source)
+    if (!current.ok) throw metadataFailure(current.code, current.message, true)
+
+    for (let redirect = 0; redirect <= metadataMaxRedirects; redirect++) {
+        await resolvePublicAddress(current.url, env)
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), metadataFetchTimeoutMs)
+        let response
+        try {
+            const renderer = env.BROWSER_RENDERING || env.BROWSER
+            if (!renderer?.quickAction && !renderer?.fetch)
+                throw metadataFailure('capture_renderer_unavailable', 'Dynamic Capture is not configured', true)
+            if (renderer?.quickAction) {
+                const host = current.url.host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+                // ponytail: exact-host allowlist blocks cross-host redirects; request interception if broader navigation is required.
+                response = await renderer.quickAction(kind === 'screenshot' ? 'screenshot' : 'content', {
+                    url: current.url.toString(),
+                    allowRequestPattern: ['/^' + current.url.protocol + '\\/\\/' + host + '(?:\\/|$)/'],
+                    gotoOptions: { waitUntil: 'networkidle2', timeout: 30000 }
+                })
+                if (!response?.ok)
+                    throw metadataFailure('capture_fetch_failed', 'The linked page could not be captured')
+                if (kind !== 'screenshot') {
+                    let rendered
+                    try { rendered = await response.json() } catch { rendered = null }
+                    if (!rendered?.success || typeof rendered.result !== 'string')
+                        throw metadataFailure('capture_render_failed', 'Dynamic Capture returned an invalid result', true)
+                    const body = encoder.encode(rendered.result)
+                    if (body.byteLength > captureBodyLimit)
+                        throw metadataFailure('capture_too_large', 'The captured page is too large to store', true)
+                    return { body, contentType: 'text/html', size: body.byteLength, url: current.url.toString() }
+                }
+            } else response = await renderer.fetch(current.url.toString(), { headers: { Accept: 'text/html,image/*' }, signal: controller.signal, redirect: 'manual' })
+        } catch (failure) {
+            if (failure?.code) throw failure
+            throw metadataFailure('capture_fetch_failed', 'The linked page could not be captured')
+        } finally {
+            clearTimeout(timer)
+        }
+
+        if (response.status >= 300 && response.status < 400) {
+            const location = response.headers.get('Location')
+            if (!location || redirect === metadataMaxRedirects)
+                throw metadataFailure('capture_redirect_failed', 'The linked page returned too many redirects', true)
+            let target
+            try {
+                target = new URL(location, current.url).toString()
+            } catch {
+                throw metadataFailure('capture_redirect_failed', 'The linked page returned an invalid redirect', true)
+            }
+            const next = validateFetchableUrl(target)
+            if (!next.ok) throw metadataFailure('redirect_not_public', 'The remote page redirected to a private address', true)
+            current = next
+            continue
+        }
+        if (!response.ok) throw metadataFailure('capture_upstream_error', 'The linked page returned an error')
+        let body
+        try {
+            body = await readLimitedStream(response.body, captureBodyLimit)
+        } catch (failure) {
+            if (failure?.code === 'content_too_large')
+                throw metadataFailure('capture_too_large', 'The captured page is too large to store', true)
+            throw failure
+        }
+        return {
+            body,
+            contentType: safeContentType(response.headers.get('Content-Type')),
+            size: body.byteLength,
+            url: current.url.toString()
+        }
+    }
+    throw metadataFailure('capture_redirect_failed', 'The linked page returned too many redirects', true)
+}
+
 const taskFailureDetails = failure => {
     const messages = {
         metadata_fetch_failed: 'The remote page could not be fetched',
@@ -564,7 +896,20 @@ const taskFailureDetails = failure => {
         redirect_not_public: 'The remote page redirected to a private address',
         metadata_too_large: 'The remote page is too large to process',
         metadata_dns_failed: 'The remote address could not be resolved',
-        url_not_public: 'The remote address is not public'
+        url_not_public: 'The remote address is not public',
+        scanner_not_configured: 'Content safety scanning is not configured',
+        scanner_unavailable: 'Content safety scanning is temporarily unavailable',
+        scanner_invalid_response: 'Content safety scanning returned an invalid result',
+        scanner_config_invalid: 'Content safety scanning is not configured',
+        content_missing: 'Protected content is no longer available',
+        content_quarantined: 'Protected content did not pass the safety check',
+        capture_fetch_failed: 'The linked page could not be captured',
+        capture_renderer_unavailable: 'Dynamic Capture is not configured',
+        capture_upstream_error: 'The linked page returned an error',
+        capture_redirect_failed: 'The linked page returned too many redirects',
+        capture_too_large: 'The captured page is too large to store',
+        content_storage_unavailable: 'Content storage is not configured',
+        content_too_large: 'The content exceeds the size limit'
     }
     const code = messages[failure?.code] ? failure.code : 'metadata_failed'
     return { code, message: messages[code] || 'Metadata enrichment failed' }
@@ -598,7 +943,7 @@ const markTaskFailure = async (env, task, failure) => {
         finalRetryCount, details.code, details.message, now, now, task.id).run()
     await recordAlert(env, taskRequest(env, task.id), {
         userId: task.user_id,
-        kind: 'metadata_enrichment_failed',
+        kind: task.type + '_failed',
         metadata: { taskId: task.id, code: details.code, retryCount: finalRetryCount }
     })
     return { action: 'dead_letter', failure: details }
@@ -606,7 +951,7 @@ const markTaskFailure = async (env, task, failure) => {
 
 const claimTask = async (env, taskId) => {
     const task = await selectTask(env, taskId)
-    if (!task || task.type !== metadataTaskType) return { action: 'skip' }
+    if (!task || task.type !== metadataTaskType && !contentTaskTypes.has(task.type)) return { action: 'skip' }
     if (['succeeded', 'dead_letter'].includes(task.status)) return { action: 'skip' }
     const now = Date.now()
     if (task.status === 'retrying' && task.next_retry_at > now)
@@ -647,13 +992,113 @@ const processMetadataTask = async (env, taskId) => {
     }
 }
 
+const parseTaskKind = task => {
+    try {
+        const payload = JSON.parse(task.payload || '{}')
+        return ['snapshot', 'screenshot'].includes(payload.kind) ? payload.kind : 'snapshot'
+    } catch {
+        return 'snapshot'
+    }
+}
+
+const processAttachmentScanTask = async (env, taskId) => {
+    const claimed = await claimTask(env, taskId)
+    if (claimed.action !== 'process') return claimed
+
+    try {
+        const content = await selectContent(env, claimed.task.content_id)
+        if (!content) throw metadataFailure('content_missing', 'Protected content is no longer available', true)
+        const result = await scanStoredContent(env, content)
+        const now = Date.now()
+        await env.DB.prepare(`UPDATE background_tasks SET status = 'succeeded', progress = 100,
+            result_metadata = ?, error_code = NULL, error_message = NULL, next_retry_at = NULL,
+            updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`).bind(
+            JSON.stringify({ contentId: content.id, ...result }), now, now, taskId).run()
+        return { action: 'ack' }
+    } catch (failure) {
+        return markTaskFailure(env, claimed.task, failure)
+    }
+}
+
+const processCaptureTask = async (env, taskId) => {
+    const claimed = await claimTask(env, taskId)
+    if (claimed.action !== 'process') return claimed
+
+    try {
+        const content = await selectContent(env, claimed.task.content_id)
+        if (!content) throw metadataFailure('content_missing', 'Protected content is no longer available', true)
+        const captured = await captureResponse(claimed.task.source_url, env, parseTaskKind(claimed.task))
+        await putContentObject(env, content, captured.body, {
+            contentType: captured.contentType,
+            filename: content.filename
+        })
+        const now = Date.now()
+        await env.DB.prepare(`UPDATE content_objects SET content_type = ?, size_bytes = ?, updated_at = ?
+            WHERE id = ? AND status = 'quarantined'`).bind(captured.contentType, captured.size, now, content.id).run()
+        const updated = await selectContent(env, content.id)
+        const scan = await scanStoredContent(env, updated || { ...content, content_type: captured.contentType })
+        await env.DB.prepare(`UPDATE background_tasks SET status = 'succeeded', progress = 100,
+            result_metadata = ?, error_code = NULL, error_message = NULL, next_retry_at = NULL,
+            updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`).bind(
+            JSON.stringify({ contentId: content.id, url: captured.url, size: captured.size, ...scan }), now, now, taskId).run()
+        return { action: 'ack' }
+    } catch (failure) {
+        return markTaskFailure(env, claimed.task, failure)
+    }
+}
+
+const processTask = async (env, taskId, type) => {
+    if (type === metadataTaskType) return processMetadataTask(env, taskId)
+    if (type === attachmentTaskType) return processAttachmentScanTask(env, taskId)
+    if (type === captureTaskType) return processCaptureTask(env, taskId)
+    return { action: 'skip' }
+}
+
+const createContentRecord = async (env, { userId, bookmarkId, kind, filename, contentType, size }) => {
+    const id = randomToken(18)
+    const objectKey = 'content/' + userId + '/' + id
+    const now = Date.now()
+    await env.DB.prepare(`INSERT INTO content_objects
+        (id, user_id, bookmark_id, kind, status, object_key, filename, content_type, size_bytes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'quarantined', ?, ?, ?, ?, ?, ?)`)
+        .bind(id, userId, bookmarkId, kind, objectKey, safeFilename(filename), safeContentType(contentType), size, now, now).run()
+    return selectContent(env, id)
+}
+
+const removeContentRecord = async (env, content) => {
+    if (!content) return
+    if (env.CONTENT_BUCKET?.delete && content.object_key)
+        await env.CONTENT_BUCKET.delete(content.object_key)
+    await env.DB.prepare('DELETE FROM content_objects WHERE id = ?').bind(content.id).run()
+}
+
+const discardContentTask = async (env, task) => {
+    if (!task?.id || !env.DB?.prepare) return
+    try { await env.DB.prepare('DELETE FROM background_tasks WHERE id = ?').bind(task.id).run() } catch {}
+}
+
+const deleteContentObjects = async (env, userId, bookmarkIds) => {
+    if (!bookmarkIds.length || !env.DB?.prepare) return
+    try {
+        const placeholders = bookmarkIds.map(() => '?').join(',')
+        const rows = await env.DB.prepare(`SELECT object_key FROM content_objects WHERE user_id = ? AND bookmark_id IN (${placeholders})`)
+            .bind(userId, ...bookmarkIds).all()
+        if (env.CONTENT_BUCKET?.delete)
+            for (const row of rows.results || []) await env.CONTENT_BUCKET.delete(row.object_key)
+        await env.DB.prepare(`DELETE FROM content_objects WHERE user_id = ? AND bookmark_id IN (${placeholders})`)
+            .bind(userId, ...bookmarkIds).run()
+    } catch {
+        // Content cleanup must not make the Recycle Bin or account lifecycle unavailable.
+    }
+}
+
 const retryDeadLetterTask = async (env, request, task, userId) => {
     const now = Date.now()
     const updated = await env.DB.prepare(`UPDATE background_tasks SET status = 'queued', progress = 0,
         retry_count = 0, result_metadata = '{}', error_code = NULL, error_message = NULL,
         next_retry_at = NULL, updated_at = ?, completed_at = NULL
         WHERE id = ? AND user_id = ? AND type = ? AND status = 'dead_letter'`).bind(
-        now, task.id, userId, metadataTaskType).run()
+        now, task.id, userId, task.type).run()
     if (Number(updated?.meta?.changes || 0) !== 1)
         return { task, status: 409 }
     let next = await selectTask(env, task.id, userId)
@@ -829,7 +1274,11 @@ const auditRoute = request => {
         [/^\/v1\/tags\/-?\d+$/, '/v1/tags/:collectionId'],
         [/^\/v1\/filters\/-?\d+$/, '/v1/filters/:collectionId'],
         [/^\/v1\/sessions\/[^/]+$/, '/v1/sessions/:id'],
-        [/^\/v1\/tasks\/[^/]+(?:\/(?:status|failure|retry))?$/, '/v1/tasks/:id']
+        [/^\/v1\/tasks\/[^/]+(?:\/(?:status|failure|retry))?$/, '/v1/tasks/:id'],
+        [/^\/v1\/content\/[^/]+\/download$/, '/v1/content/:id/download'],
+        [/^\/v1\/content\/[^/]+$/, '/v1/content/:id'],
+        [/^\/v1\/raindrop\/\d+\/(?:content|capture)(?:\/status)?$/, '/v1/raindrop/:id/content'],
+        [/^\/v1\/raindrop\/\d+\/attachments?$/, '/v1/raindrop/:id/attachments']
     ]
     const match = patterns.find(([pattern]) => pattern.test(pathname))
     if (match) return pathname.replace(match[0], match[1])
@@ -842,7 +1291,8 @@ const auditRoute = request => {
         '/v1/raindrops', '/v1/raindrops/changes', '/v1/raindrop', '/v1/user', '/v1/user/quota',
         '/v1/user/connect/google', '/v1/user/connect/google/revoke', '/v1/user/deletion',
         '/v1/tasks',
-        '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats'
+        '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
+        '/v1/raindrop/file', '/v1/content/upload'
     ])
     return known.has(pathname) ? pathname : '/v1/unknown'
 }
@@ -1027,7 +1477,10 @@ const requiresVerification = pathname =>
     pathname.startsWith('/v1/developer/') ||
     pathname.includes('/sharing') ||
     pathname.startsWith('/v1/backups') ||
-    pathname.startsWith('/v1/import/')
+    pathname.startsWith('/v1/import/') ||
+    pathname.includes('/capture') ||
+    pathname.includes('/content') ||
+    pathname.endsWith('/raindrop/file')
 
 const redirect = (request, env, location, token) => {
     const appOrigin = new URL(env.APP_ORIGIN)
@@ -1116,6 +1569,12 @@ const hasSharedCollections = (env, userId) => env.DB.prepare(`SELECT 1 FROM coll
     WHERE c.user_id = ? AND cc.user_id != ? LIMIT 1`).bind(userId, userId).first()
 
 const deleteUserData = async (env, userId) => {
+    let bookmarkIds = []
+    try {
+        const rows = await env.DB.prepare('SELECT id FROM bookmarks WHERE user_id = ?').bind(userId).all()
+        bookmarkIds = (rows.results || []).map(item => Number(item.id)).filter(Number.isSafeInteger)
+    } catch {}
+    await deleteContentObjects(env, userId, bookmarkIds)
     const statements = [
         env.DB.prepare('DELETE FROM email_tokens WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId),
@@ -1123,6 +1582,7 @@ const deleteUserData = async (env, userId) => {
         env.DB.prepare('DELETE FROM oauth_states WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM collection_collaborators WHERE collection_id IN (SELECT id FROM collections WHERE user_id = ?) OR user_id = ?').bind(userId, userId),
         env.DB.prepare('DELETE FROM background_tasks WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM content_objects WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM bookmark_changes WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM bookmarks WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM collections WHERE user_id = ?').bind(userId),
@@ -1435,7 +1895,7 @@ export default {
                         : json({ result: true, task: item }, 200, request, env)
                 }
                 if (request.method === 'POST' && action === 'retry') {
-                    if (task.type !== metadataTaskType)
+                    if (task.type !== metadataTaskType && (!contentTaskTypes.has(task.type) || !task.content_id))
                         return error('task_not_retryable', 400, request, env, 'This background task cannot be retried')
                     const retried = await retryDeadLetterTask(env, request, task, session.user_id)
                     if (retried.status === 409)
@@ -1444,6 +1904,168 @@ export default {
                         return error('task_not_found', 404, request, env, 'Background task was not found')
                     return json({ result: true, task: publicTask(retried.task) }, 202, request, env)
                 }
+            }
+
+            const attachmentMatch = url.pathname.match(/^\/v1\/raindrop\/(\d+)\/attachments?$/)
+            const uploadBookmarkFile = url.pathname === '/v1/raindrop/file' && request.method === 'PUT'
+            const uploadContentFile = (url.pathname === '/v1/content/upload' || attachmentMatch) && ['POST', 'PUT'].includes(request.method)
+            if (uploadBookmarkFile || uploadContentFile) {
+                const upload = await readUpload(request, attachmentMaxBytes(env))
+                if (upload.error === 'content_too_large')
+                    return error('content_too_large', 413, request, env, 'The uploaded file exceeds the 50 MB limit')
+                if (upload.error)
+                    return error('validation_failed', 400, request, env, 'Provide one file to upload')
+
+                const fields = upload.fields || {}
+                const suppliedBookmarkId = attachmentMatch
+                    ? Number(attachmentMatch[1])
+                    : Number(fields.bookmarkId || fields.raindropId || fields.bookmark_id || 0)
+                let bookmark = null
+                let createdBookmark = false
+                if (uploadContentFile) {
+                    if (!Number.isSafeInteger(suppliedBookmarkId) || suppliedBookmarkId <= 0)
+                        return error('validation_failed', 400, request, env, 'Provide a Bookmark ID for this attachment')
+                    bookmark = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
+                        .bind(suppliedBookmarkId, session.user_id).first()
+                    if (!bookmark) return error('bookmark_not_found', 404, request, env)
+                } else {
+                    const collectionId = fields.collectionId === undefined ? -1 : parseBookmarkCollectionId(fields.collectionId)
+                    if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
+                        return error('collection_not_found', 404, request, env)
+                    const title = String(fields.title || upload.filename || '').trim()
+                    const description = String(fields.description || fields.excerpt || '').trim()
+                    const note = String(fields.note || '').trim()
+                    const tags = bookmarkTags(fields.tags)
+                    if (!title || title.length > 500 || description.length > 10000 || note.length > 10000 || fields.tags && !validTagList(arrayValue(fields.tags)))
+                        return error('validation_failed', 400, request, env, 'File metadata is invalid')
+                    const now = Date.now()
+                    const link = String(fields.link || '').trim() || 'attachment://' + randomToken(12)
+                    const inserted = await env.DB.prepare(`INSERT INTO bookmarks
+                        (user_id, url, title, description, note, highlights, created_at, updated_at, collection_id, tags)
+                        VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)`)
+                        .bind(session.user_id, link, title, description, note, now, now, collectionId, JSON.stringify(tags)).run()
+                    bookmark = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
+                        .bind(inserted.meta.last_row_id, session.user_id).first()
+                    createdBookmark = true
+                }
+
+                let content
+                try {
+                    content = await createContentRecord(env, {
+                        userId: session.user_id,
+                        bookmarkId: Number(bookmark.id),
+                        kind: 'attachment',
+                        filename: upload.filename,
+                        contentType: upload.contentType,
+                        size: upload.size
+                    })
+                    await putContentObject(env, content, upload.body, upload)
+                } catch {
+                    try { await removeContentRecord(env, content) } catch {}
+                    if (createdBookmark) await env.DB.prepare('DELETE FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmark.id, session.user_id).run()
+                    return error('content_upload_failed', 503, request, env, 'The file could not be stored')
+                }
+
+                const task = await createContentTask(env, request, {
+                    userId: session.user_id,
+                    bookmarkId: Number(bookmark.id),
+                    type: attachmentTaskType,
+                    contentId: content.id,
+                    sourceUrl: bookmark.url,
+                    payload: { kind: 'attachment' }
+                })
+                if (!task || task.status === 'dead_letter') {
+                    await discardContentTask(env, task)
+                    try { await removeContentRecord(env, content) } catch {}
+                    if (createdBookmark) await env.DB.prepare('DELETE FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmark.id, session.user_id).run()
+                    return error('content_task_unavailable', 503, request, env, 'The file safety check could not be queued')
+                }
+                await recordAudit(env, request, { userId: session.user_id, action: 'content.upload', resourceType: 'content', resourceId: content.id, outcome: 'success' })
+                return json({
+                    result: true,
+                    item: bookmarkItem(bookmark),
+                    content: publicContent(content),
+                    ...(task ? { task: publicTask(task), taskId: String(task.id) } : {})
+                }, 201, request, env)
+            }
+
+            const captureMatch = url.pathname.match(/^\/v1\/raindrop\/(\d+)\/capture(?:\/status)?$/)
+            if (captureMatch) {
+                const bookmarkId = Number(captureMatch[1])
+                const bookmark = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
+                    .bind(bookmarkId, session.user_id).first()
+                if (!bookmark) return error('bookmark_not_found', 404, request, env)
+                if (request.method === 'GET')
+                    return json({ result: true, items: (await listContent(env, bookmarkId, session.user_id)).filter(item => ['snapshot', 'screenshot'].includes(item.kind)) }, 200, request, env)
+                if (request.method === 'POST' && url.pathname.endsWith('/capture')) {
+                    const urlCheck = validateFetchableUrl(bookmark.url)
+                    if (!urlCheck.ok)
+                        return error('url_not_public', 400, request, env, 'Only public HTTP(S) bookmarks can be captured')
+                    const { data } = await readBody(request)
+                    const kind = ['snapshot', 'screenshot'].includes(String(data.kind || data.type)) ? String(data.kind || data.type) : 'snapshot'
+                    let content
+                    try {
+                        content = await createContentRecord(env, {
+                            userId: session.user_id,
+                            bookmarkId,
+                            kind,
+                            filename: kind === 'screenshot' ? 'capture.png' : 'snapshot.html',
+                            contentType: kind === 'screenshot' ? 'image/png' : 'text/html',
+                            size: 0
+                        })
+                    } catch {
+                        return error('content_storage_unavailable', 503, request, env, 'Protected content storage is unavailable')
+                    }
+                    if (!content)
+                        return error('content_storage_unavailable', 503, request, env, 'Protected content storage is unavailable')
+                    const task = await createContentTask(env, request, {
+                        userId: session.user_id,
+                        bookmarkId,
+                        type: captureTaskType,
+                        contentId: content.id,
+                        sourceUrl: bookmark.url,
+                        payload: { kind, dynamic: true }
+                    })
+                    if (!task || task.status === 'dead_letter') {
+                        await discardContentTask(env, task)
+                        try { await removeContentRecord(env, content) } catch {}
+                        return error('content_task_unavailable', 503, request, env, 'The capture could not be queued')
+                    }
+                    await recordAudit(env, request, { userId: session.user_id, action: 'capture.request', resourceType: 'content', resourceId: content.id, outcome: 'success' })
+                    return json({ result: true, content: publicContent(content), task: publicTask(task), taskId: String(task.id) }, 202, request, env)
+                }
+            }
+
+            const bookmarkContentMatch = url.pathname.match(/^\/v1\/raindrop\/(\d+)\/content$/)
+            if (bookmarkContentMatch && request.method === 'GET') {
+                const bookmark = await bookmarkAccessible(env, Number(bookmarkContentMatch[1]), session.user_id)
+                if (!bookmark) return error('bookmark_not_found', 404, request, env)
+                return json({ result: true, items: await listContent(env, Number(bookmarkContentMatch[1]), session.user_id) }, 200, request, env)
+            }
+
+            const contentDownloadMatch = url.pathname.match(/^\/v1\/content\/([^/]+)\/download$/)
+            const contentMatch = url.pathname.match(/^\/v1\/content\/([^/]+)$/)
+            if (contentDownloadMatch || contentMatch) {
+                const contentId = decodeURIComponent((contentDownloadMatch || contentMatch)[1])
+                const content = await selectContent(env, contentId)
+                if (!content || !await contentAuthorized(env, content, session.user_id))
+                    return error('content_not_found', 404, request, env)
+                if (!contentDownloadMatch)
+                    return json({ result: true, item: publicContent(content) }, 200, request, env)
+                if (content.status !== 'cleared')
+                    return error('content_quarantined', 409, request, env, 'Protected content is not available until it passes the safety check')
+                if (!env.CONTENT_BUCKET?.get)
+                    return error('content_storage_unavailable', 503, request, env, 'Content storage is not configured')
+                const object = await env.CONTENT_BUCKET.get(content.object_key)
+                if (!object) return error('content_not_found', 404, request, env)
+                const headers = addCorsHeaders(new Headers({
+                    'Content-Type': content.content_type || object.httpMetadata?.contentType || 'application/octet-stream',
+                    'Content-Length': String(content.size_bytes || object.size || 0),
+                    'Content-Disposition': 'attachment; filename="' + safeFilename(content.filename) + '"',
+                    'Cache-Control': 'private, no-store',
+                    'X-Request-ID': requestId(request)
+                }), request, env)
+                return new Response(request.method === 'HEAD' ? null : object.body, { status: 200, headers })
             }
 
             if (url.pathname === '/v1/user/stats' && request.method === 'GET') {
@@ -1554,6 +2176,7 @@ export default {
                         const removed = await env.DB.prepare('SELECT id FROM bookmarks WHERE user_id = ? AND removed_at IS NOT NULL').bind(session.user_id).all()
                         const bookmarkIds = (removed.results || []).map(item => Number(item.id))
                         if (bookmarkIds.length) {
+                            await deleteContentObjects(env, session.user_id, bookmarkIds)
                             const placeholders = bookmarkIds.map(() => '?').join(',')
                             await env.DB.prepare(`DELETE FROM background_tasks WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                             await env.DB.prepare(`DELETE FROM bookmark_changes WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
@@ -1642,6 +2265,7 @@ export default {
                     const removed = await env.DB.prepare(query).bind(...values).all()
                     const bookmarkIds = (removed.results || []).map(item => Number(item.id))
                     if (bookmarkIds.length) {
+                        await deleteContentObjects(env, session.user_id, bookmarkIds)
                         const placeholders = bookmarkIds.map(() => '?').join(',')
                         await env.DB.prepare(`DELETE FROM background_tasks WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                         await env.DB.prepare(`DELETE FROM bookmark_changes WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
@@ -1932,12 +2556,13 @@ export default {
                 continue
             }
             try {
-                const result = await processMetadataTask(env, body.taskId)
+                const queuedTask = body.type ? null : await selectTask(env, body.taskId)
+                const result = await processTask(env, body.taskId, body.type || queuedTask?.type)
                 if (result.action === 'retry') message.retry?.({ delaySeconds: result.delaySeconds })
                 else if (result.action === 'defer') message.retry?.({ delaySeconds: result.delaySeconds })
                 else if (result.action === 'dead_letter') {
                     try {
-                        await env.TASK_DLQ?.send({ taskId: body.taskId, type: body.type || metadataTaskType, failure: result.failure })
+                        await env.TASK_DLQ?.send({ taskId: body.taskId, type: body.type || queuedTask?.type || metadataTaskType, failure: result.failure })
                     } catch {}
                     message.ack?.()
                 } else message.ack?.()
@@ -1952,4 +2577,12 @@ export default {
     }
 }
 
-export { createMetadataTask, fetchPageMetadata, processMetadataTask, validateFetchableUrl }
+export {
+    createContentTask,
+    createMetadataTask,
+    fetchPageMetadata,
+    processAttachmentScanTask,
+    processCaptureTask,
+    processMetadataTask,
+    validateFetchableUrl
+}

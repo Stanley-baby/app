@@ -39,3 +39,13 @@ with backoff, then marks the task `dead_letter` and exposes `POST
 /v1/tasks/:id/retry` for an explicit retry.
 When `FETCH_DNS_RESOLVER` is configured, each hostname is resolved over HTTPS
 and private or non-public A/AAAA answers are rejected before the fetch.
+
+Protected content is stored only in the private `CONTENT_BUCKET`. Uploads are
+limited to `ATTACHMENT_MAX_BYTES` (50 MiB in every profile), start quarantined,
+and enqueue an `attachment_scan` task. Set `SCANNER_URL` and
+`SCANNER_API_KEY` as Worker secrets for a scanner that returns `clean: true` or
+an approved/cleared status before downloads become available. `POST
+/v1/raindrop/:id/capture` is the only path that creates a Dynamic Capture task;
+the Beta Worker uses the `BROWSER` Browser Run binding, stores the result
+privately, and applies the same safety check.
+Downloads use `/v1/content/:id/download` and never expose an R2 object URL.
