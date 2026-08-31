@@ -82,3 +82,5 @@ Collections and Bookmarks, opaque for Protected Content). Per-source keys make
 retries idempotent, while a failed task can be retried explicitly with
 `/v1/import/:id/retry`. A skipped duplicate maps to the existing Resource ID so
 the source identifier remains traceable without creating a second Bookmark.
+When scanning is enabled, import status also reports child safety tasks and
+their pending or failed state; an explicit retry requeues failed safety tasks.

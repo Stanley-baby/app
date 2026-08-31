@@ -2790,6 +2790,8 @@ export default {
 
                 if (action === 'retry' && request.method === 'POST') {
                     const task = archiveRow.task_id ? await selectTask(env, archiveRow.task_id, session.user_id) : null
+                    if (archiveRow.task_id && !task)
+                        return error('task_not_found', 404, request, env, 'Migration task was not found')
                     if (task && task.type !== migrationTaskType)
                         return error('task_not_retryable', 400, request, env, 'This migration cannot be retried')
                     let retriedTask = null

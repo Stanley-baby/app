@@ -35,7 +35,7 @@ export default function BetaMigration() {
         try {
             const result = await request('/v1/import/preflight', { method: 'POST', body: await file.text() })
             const preflight = result.preflight || result
-            setState({ phase: 'review', archiveId: result.archiveId, preflight, decisions: {}, task: null, error: '' })
+            setState({ phase: 'review', archiveId: result.archiveId, preflight, decisions: {}, task: null, scanStatus: null, error: '' })
         } catch (error) { fail(error) }
     }
 
