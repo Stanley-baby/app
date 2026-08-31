@@ -183,8 +183,9 @@ class MemoryDatabase {
             if (sql.includes('UPDATE collections SET removed_at')) {
                 const restore = sql.includes('removed_at = NULL')
                 const userId = restore ? values[1] : values[2]
-                const ids = new Set(values.slice(restore ? 2 : 3).map(Number))
-                const matches = this.collections.filter(item => item.user_id === userId && ids.has(item.id) && (restore ? Boolean(item.removed_at) : !item.removed_at))
+                const ids = new Set(values.slice(restore ? 2 : 3, restore ? -1 : undefined).map(Number))
+                const threshold = restore ? Number(values.at(-1)) : 0
+                const matches = this.collections.filter(item => item.user_id === userId && ids.has(item.id) && (restore ? item.removed_at >= threshold : !item.removed_at))
                 for (const item of matches) Object.assign(item, restore ? { removed_at: null, updated_at: values[0] } : { removed_at: values[0], updated_at: values[1] })
                 return { meta: { changes: matches.length } }
             }
@@ -969,12 +970,29 @@ test('recycle bin, metadata search, and last-write-wins stay user-scoped', async
         const restoredBookmarks = await worker.fetch(request('/v1/raindrops/' + childId, null, { Cookie: ownerCookie }), testEnv)
         assert.equal((await restoredBookmarks.json()).items.length, 1)
 
+        const staggeredRoot = await worker.fetch(request('/v1/collection', { title: 'Issue 7 staggered root' }, { Cookie: ownerCookie }), testEnv)
+        const staggeredRootId = (await staggeredRoot.json()).item._id
+        const staggeredChild = await worker.fetch(request('/v1/collection', { title: 'Issue 7 staggered child', parentId: staggeredRootId }, { Cookie: ownerCookie }), testEnv)
+        const staggeredChildId = (await staggeredChild.json()).item._id
+        assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + staggeredChildId, 'DELETE', undefined, ownerCookie), testEnv)).status, 200)
+        await new Promise(resolve => setTimeout(resolve, 2))
+        assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + staggeredRootId, 'DELETE', undefined, ownerCookie), testEnv)).status, 200)
+        assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + staggeredRootId, 'PUT', { removed: false }, ownerCookie), testEnv)).status, 200)
+        const staggeredRemoved = await worker.fetch(request('/v1/collections/all?removed=true', null, { Cookie: ownerCookie }), testEnv)
+        assert.equal((await staggeredRemoved.json()).items.some(item => item._id === staggeredChildId), true)
+
         const second = await worker.fetch(request('/v1/raindrop', {
             link: 'https://example.test/issue7-second', title: 'Issue 7 second', collectionId: childId
         }, { Cookie: ownerCookie }), testEnv)
         const secondId = (await second.json()).item._id
+        const unconfirmedBulk = await worker.fetch(jsonRequest('/v1/raindrops/' + childId, 'DELETE', {}, ownerCookie), testEnv)
+        assert.equal(unconfirmedBulk.status, 400)
+        const falseDangerAll = await worker.fetch(jsonRequest('/v1/raindrops/' + childId + '?dangerAll=false', 'DELETE', {}, ownerCookie), testEnv)
+        assert.equal(falseDangerAll.status, 400)
         const bulkRemoved = await worker.fetch(jsonRequest('/v1/raindrops/' + childId + '?dangerAll=true', 'DELETE', { ids: [secondId] }, ownerCookie), testEnv)
         assert.equal(bulkRemoved.status, 200)
+        const unconfirmedTrashClear = await worker.fetch(jsonRequest('/v1/raindrops/-99', 'DELETE', {}, ownerCookie), testEnv)
+        assert.equal(unconfirmedTrashClear.status, 400)
         const cleared = await worker.fetch(jsonRequest('/v1/collection/-99', 'DELETE', undefined, ownerCookie), testEnv)
         assert.equal(cleared.status, 200)
         assert.equal((await worker.fetch(request('/v1/raindrops/-99', null, { Cookie: ownerCookie }), testEnv).then(response => response.json())).items.length, 0)
@@ -989,7 +1007,7 @@ test('recycle bin, metadata search, and last-write-wins stay user-scoped', async
         const emptyCollection = await worker.fetch(request('/v1/collection', { title: 'Issue 7 empty collection' }, { Cookie: ownerCookie }), testEnv)
         const emptyCollectionId = (await emptyCollection.json()).item._id
         const cleaned = await worker.fetch(jsonRequest('/v1/collections/clean', 'PUT', {}, ownerCookie), testEnv)
-        assert.equal((await cleaned.json()).count, 2)
+        assert.equal((await cleaned.json()).count, 3)
         assert.equal((await worker.fetch(request('/v1/collection/' + emptyCollectionId, null, { Cookie: ownerCookie }), testEnv)).status, 404)
         assert.equal((await worker.fetch(request('/v1/collection/' + bulkCollectionId, null, { Cookie: ownerCookie }), testEnv)).status, 404)
 
@@ -997,6 +1015,16 @@ test('recycle bin, metadata search, and last-write-wins stay user-scoped', async
         assert.equal(foreignDelete.status, 404)
         const foreignCollectionDelete = await worker.fetch(jsonRequest('/v1/collection/' + rootId, 'DELETE', undefined, outsiderCookie), testEnv)
         assert.equal(foreignCollectionDelete.status, 404)
+        const firstWrite = await worker.fetch(jsonRequest('/v1/raindrop/' + bookmark._id, 'PUT', { title: 'Issue 7 first write' }, ownerCookie), testEnv)
+        const firstWriteBody = await firstWrite.json()
+        const secondWrite = await worker.fetch(jsonRequest('/v1/raindrop/' + bookmark._id, 'PUT', { title: 'Issue 7 later write' }, ownerCookie), testEnv)
+        const secondWriteBody = await secondWrite.json()
+        assert.equal(firstWrite.status, 200)
+        assert.equal(secondWrite.status, 200)
+        assert.ok(secondWriteBody.item.changeVersion > firstWriteBody.item.changeVersion)
+        assert.equal(secondWriteBody.item.title, 'Issue 7 later write')
+        const orderedFinal = await worker.fetch(request('/v1/raindrop/' + bookmark._id, null, { Cookie: ownerCookie }), testEnv)
+        assert.equal((await orderedFinal.json()).item.title, 'Issue 7 later write')
         const winner = await Promise.all(['Issue 7 winner A', 'Issue 7 winner B'].map(title =>
             worker.fetch(jsonRequest('/v1/raindrop/' + bookmark._id, 'PUT', { title }, ownerCookie), testEnv).then(response => response.json())
         ))

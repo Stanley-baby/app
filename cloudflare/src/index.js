@@ -865,8 +865,8 @@ export default {
                         const ids = descendantCollectionIds(collections, [collectionId])
                         const now = Date.now()
                         const placeholders = ids.map(() => '?').join(',')
-                        await env.DB.prepare(`UPDATE collections SET removed_at = NULL, updated_at = ? WHERE user_id = ? AND id IN (${placeholders})`)
-                            .bind(now, session.user_id, ...ids).run()
+                        await env.DB.prepare(`UPDATE collections SET removed_at = NULL, updated_at = ? WHERE user_id = ? AND id IN (${placeholders}) AND removed_at >= ?`)
+                            .bind(now, session.user_id, ...ids, Number(existing.removed_at)).run()
                         await env.DB.prepare(`UPDATE bookmarks SET removed_at = NULL, updated_at = ? WHERE user_id = ? AND collection_id IN (${placeholders}) AND removed_at >= ?`)
                             .bind(now, session.user_id, ...ids, Number(existing.removed_at)).run()
                         const item = await env.DB.prepare(`SELECT c.*, COUNT(b.id) AS count FROM collections c
@@ -961,6 +961,9 @@ export default {
                 const ids = Array.isArray(data.ids) ? data.ids.map(Number) : []
                 if (ids.some(id => !Number.isSafeInteger(id) || id <= 0))
                     return error('validation_failed', 400, request, env, 'Bookmark IDs must be positive integers')
+                const dangerAll = url.searchParams.get('dangerAll') === 'true'
+                if (!ids.length && !dangerAll)
+                    return error('validation_failed', 400, request, env, 'Provide Bookmark IDs or confirm dangerAll=true')
                 if (collectionId === -99) {
                     let query = 'SELECT id FROM bookmarks WHERE user_id = ? AND removed_at IS NOT NULL'
                     const values = [session.user_id]
