@@ -429,9 +429,9 @@ const auditRoute = request => {
         '/v1/auth/google', '/v1/auth/google/callback', '/v1/auth/logout',
         '/v1/sessions', '/v1/collections/all', '/v1/collections', '/v1/collections/clean',
         '/v1/collection', '/v1/tags/recent', '/v1/tags/0', '/v1/tag',
-        '/v1/raindrops', '/v1/raindrops/changes', '/v1/user', '/v1/user/quota',
+        '/v1/raindrops', '/v1/raindrops/changes', '/v1/raindrop', '/v1/user', '/v1/user/quota',
         '/v1/user/connect/google', '/v1/user/connect/google/revoke', '/v1/user/deletion',
-        '/v1/user/remove', '/v1/user/stats'
+        '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats'
     ])
     return known.has(pathname) ? pathname : '/v1/unknown'
 }

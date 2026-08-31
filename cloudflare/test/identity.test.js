@@ -1218,6 +1218,8 @@ test('usage quota and endpoint rate limits return retryable responses with conte
         }), unknownEnv)
         assert.equal(unknownRateBlocked.status, 429)
         assert.equal(unknownDb.rateLimits.filter(item => item.route_key === 'GET /v1/unknown').length, 1)
+        assert.equal((await worker.fetch(new Request('https://api.example.test/v1/raindrop', { method: 'POST', headers: { 'Content-Type': 'application/json', ...unknownHeaders }, body: '{}' }), unknownEnv)).status, 401)
+        assert.equal((await worker.fetch(new Request('https://api.example.test/v1/user/send_email_confirm', { method: 'POST', headers: unknownHeaders }), unknownEnv)).status, 401)
 
         const records = JSON.stringify({ audits: db.audits, alerts: db.alerts, rateAudits: rateDb.audits, rateAlerts: rateDb.alerts, unknownAudits: unknownDb.audits, unknownAlerts: unknownDb.alerts })
         for (const secret of ['correct horse battery staple', 'rd_session', 'snapshot body', 'attachment contents', 'turnstile-secret', 'password-secret-should-not-persist', 'token-secret-should-not-persist', '/v1/page-body-secret'])
