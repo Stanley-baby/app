@@ -690,7 +690,7 @@ paths:
           application/json:
             schema:
               type: object
-              description: Migration Archive containing collections and bookmarks (or items).
+              description: Migration Archive containing collections, bookmarks, and inline protected content (attachments, covers, or snapshots).
           multipart/form-data:
             schema:
               type: object
@@ -772,6 +772,8 @@ paths:
           type: string
     post:
       responses:
+        '200':
+          description: Existing completed Migration Archive returned idempotently.
         '202':
           description: Migration Archive accepted as a resumable Background Task.
         '409':

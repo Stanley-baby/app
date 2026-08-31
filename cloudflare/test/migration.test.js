@@ -20,6 +20,7 @@ class MigrationDatabase {
         this.nextCollectionId = 1
         this.nextMappingId = 1
         this.nextChangeVersion = 1
+        this.failMappingOnce = false
     }
 
     session() {
@@ -36,6 +37,20 @@ class MigrationDatabase {
         const first = async () => {
             if (sql.includes('FROM sessions s')) return this.session()
             if (sql.includes('FROM usage_counters')) return null
+            if (sql.includes('migration_key') && sql.includes('FROM collections')) {
+                const row = this.collections.find(item => item.user_id === Number(values[0]) && item.migration_key === values[1])
+                return row ? { id: row.id } : null
+            }
+            if (sql.includes('migration_key') && sql.includes('FROM bookmarks')) {
+                const row = this.bookmarks.find(item => item.user_id === Number(values[0]) && item.migration_key === values[1])
+                return row ? { id: row.id } : null
+            }
+            if (sql.includes('FROM content_objects') && sql.includes('user_id = ? AND migration_key')) {
+                const row = this.contents?.find(item => item.user_id === Number(values[0]) && item.migration_key === values[1])
+                return row ? { ...row } : null
+            }
+            if (sql.includes('FROM content_objects WHERE id'))
+                return this.contents?.find(item => item.id === values[0]) || null
             if (sql.includes('FROM bookmarks WHERE user_id')) {
                 return this.bookmarks.find(item => item.user_id === Number(values[0]) && item.id === Number(values[1])) || null
             }
@@ -64,8 +79,8 @@ class MigrationDatabase {
                 return { meta: { changes: 1 } }
             if (sql.includes('UPDATE sessions SET last_seen_at')) return { meta: { changes: 1 } }
             if (sql.includes('INSERT INTO migration_archives')) {
-                const [id, userId, source, archiveJson, preflightJson, collectionCount, bookmarkCount, totalItems, createdAt, updatedAt] = values
-                this.archives.push({ id, user_id: userId, source, archive_json: archiveJson, preflight_json: preflightJson, review_json: '{}', status: 'review', collection_count: collectionCount, bookmark_count: bookmarkCount, total_items: totalItems, completed_items: 0, task_id: null, error_code: null, error_message: null, created_at: createdAt, updated_at: updatedAt })
+                const [id, userId, source, archiveJson, preflightJson, collectionCount, bookmarkCount, assetCount, totalItems, createdAt, updatedAt] = values
+                this.archives.push({ id, user_id: userId, source, archive_json: archiveJson, preflight_json: preflightJson, review_json: '{}', status: 'review', collection_count: collectionCount, bookmark_count: bookmarkCount, asset_count: assetCount, total_items: totalItems, completed_items: 0, task_id: null, error_code: null, error_message: null, created_at: createdAt, updated_at: updatedAt })
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE migration_archives SET review_json')) {
@@ -99,12 +114,22 @@ class MigrationDatabase {
                 return { meta: { changes: row ? 1 : 0 } }
             }
             if (sql.includes('migration_mappings')) {
+                if (this.failMappingOnce) {
+                    this.failMappingOnce = false
+                    throw new Error('forced mapping failure')
+                }
                 const [archiveId, userId, sourceType, sourceId, resourceType, resourceId, decision, createdAt] = values
                 if (!this.mappings.some(item => item.archive_id === archiveId && item.source_type === sourceType && item.source_id === String(sourceId))) {
                     this.mappings.push({ id: this.nextMappingId++, archive_id: archiveId, user_id: userId, source_type: sourceType, source_id: String(sourceId), resource_type: resourceType, resource_id: resourceId, decision, created_at: createdAt })
                     return { meta: { changes: 1 } }
                 }
                 return { meta: { changes: 0 } }
+            }
+            if (sql.includes('INSERT INTO content_objects')) {
+                const [id, userId, bookmarkId, kind, status, objectKey, filename, contentType, size, createdAt, updatedAt, clearedAt, migrationKey] = values
+                this.contents ||= []
+                this.contents.push({ id, user_id: Number(userId), bookmark_id: Number(bookmarkId), kind, status, object_key: objectKey, filename, content_type: contentType, size_bytes: size, created_at: createdAt, updated_at: updatedAt, cleared_at: clearedAt, migration_key: migrationKey })
+                return { meta: { changes: 1 } }
             }
             if (sql.includes('INSERT INTO background_tasks')) {
                 const [id, userId, type, idempotencyKey, sourceUrl, payload, createdAt, updatedAt] = values
@@ -131,15 +156,17 @@ class MigrationDatabase {
                 return { meta: { changes: task ? 1 : 0 } }
             }
             if (sql.includes('INSERT INTO collections')) {
-                const [userId, title, parentId, createdAt, updatedAt, slug] = values
-                const item = { id: this.nextCollectionId++, user_id: Number(userId), title, parent_id: parentId, created_at: createdAt, updated_at: updatedAt, slug, is_public: 0, removed_at: null }
+                const [userId, title, parentId, createdAt, updatedAt, slug, migrationKey] = values
+                if (this.collections.some(item => item.user_id === Number(userId) && item.migration_key === migrationKey)) return { meta: { changes: 0 } }
+                const item = { id: this.nextCollectionId++, user_id: Number(userId), title, parent_id: parentId, created_at: createdAt, updated_at: updatedAt, slug, migration_key: migrationKey, is_public: 0, removed_at: null }
                 this.collections.push(item)
                 return { meta: { last_row_id: item.id, changes: 1 } }
             }
             if (sql.includes('INSERT INTO collection_collaborators')) return { meta: { changes: 1 } }
             if (sql.includes('INSERT INTO bookmarks')) {
-                const [userId, url, title, description, note, highlights, createdAt, updatedAt, collectionId, tags] = values
-                const item = { id: this.nextBookmarkId++, user_id: Number(userId), url, title, description, note, highlights, created_at: createdAt, updated_at: updatedAt, collection_id: collectionId, tags, removed_at: null, change_version: this.nextChangeVersion }
+                const [userId, url, title, description, note, highlights, createdAt, updatedAt, collectionId, tags, migrationKey] = values
+                if (this.bookmarks.some(item => item.user_id === Number(userId) && item.migration_key === migrationKey)) return { meta: { changes: 0 } }
+                const item = { id: this.nextBookmarkId++, user_id: Number(userId), url, title, description, note, highlights, created_at: createdAt, updated_at: updatedAt, collection_id: collectionId, tags, migration_key: migrationKey, removed_at: null, change_version: this.nextChangeVersion }
                 this.bookmarks.push(item)
                 this.changes.push({ version: this.nextChangeVersion++, changed_at: updatedAt })
                 return { meta: { last_row_id: item.id, changes: 1 } }
@@ -158,7 +185,11 @@ const envFor = db => ({
     CORS_ORIGINS: 'https://app.example.test',
     ENVIRONMENT: 'local',
     VERSION: 'test',
-    TASK_QUEUE: { send: async () => {} }
+    TASK_QUEUE: { send: async () => {} },
+    CONTENT_BUCKET: {
+        objects: new Map(),
+        put: async function (key, body) { this.objects.set(key, body) }
+    }
 })
 
 const request = (path, options = {}) => new Request('https://api.example.test' + path, {
@@ -199,6 +230,7 @@ test('migration preflight normalizes source IDs and preserves duplicate-review i
         highlights: [{ text: 'keep this' }],
         collectionSourceId: 'collection-1'
     })
+    assert.deepEqual(archive.assets, [])
 })
 
 test('migration preflight requires duplicate decisions and imports with resumable mappings', async () => {
@@ -257,4 +289,53 @@ test('migration preflight requires duplicate decisions and imports with resumabl
     await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { assert.fail('unexpected retry') } }] }, env)
     assert.equal(db.bookmarks.filter(item => item.user_id === 1).length, 2)
     assert.equal(db.collections.length, 1)
+})
+
+test('migration archives retain inline protected content and map its source identifier', async () => {
+    const db = new MigrationDatabase()
+    const env = envFor(db)
+    const preflight = await worker.fetch(request('/v1/import/preflight', {
+        method: 'POST',
+        ...body({
+            source: 'synthetic-content',
+            bookmarks: [{ id: 'bookmark-1', url: 'https://example.com/content', title: 'Content bookmark' }],
+            attachments: [{ id: 'attachment-1', bookmarkId: 'bookmark-1', filename: 'note.txt', contentType: 'text/plain', data: 'hello' }],
+            covers: [{ id: 'cover-1', bookmarkId: 'bookmark-1', data: 'Y292ZXItYnl0ZXM=', encoding: 'base64' }],
+            snapshots: [{ id: 'snapshot-1', bookmarkId: 'bookmark-1', html: '<html>saved</html>' }]
+        })
+    }), env)
+    assert.equal(preflight.status, 201)
+    const archiveId = (await preflight.json()).archiveId
+    const commit = await worker.fetch(request(`/v1/import/${archiveId}/commit`, { method: 'POST' }), env)
+    const taskId = (await commit.json()).taskId
+    await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { assert.fail('unexpected retry') } }] }, env)
+    const mappings = await worker.fetch(request(`/v1/import/${archiveId}/mappings`), env)
+    const items = (await mappings.json()).items
+    assert.equal(items.filter(item => item.sourceType === 'content').length, 3)
+    assert.equal(db.contents.length, 3)
+    assert.equal(db.contents.some(item => item.kind === 'snapshot'), true)
+    assert.equal(db.contents.some(item => item.kind === 'attachment'), true)
+    assert.equal(db.contents.some(item => item.kind === 'screenshot'), true)
+})
+
+test('migration retries resume from a resource key without duplicating a partial write', async () => {
+    const db = new MigrationDatabase()
+    db.failMappingOnce = true
+    const env = envFor(db)
+    const preflight = await worker.fetch(request('/v1/import/preflight', {
+        method: 'POST',
+        ...body({ bookmarks: [{ id: 'bookmark-1', url: 'https://example.com/retry', title: 'Retry me' }] })
+    }), env)
+    const archiveId = (await preflight.json()).archiveId
+    const commit = await worker.fetch(request(`/v1/import/${archiveId}/commit`, { method: 'POST' }), env)
+    const taskId = (await commit.json()).taskId
+    let retried = false
+    await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { retried = true } }] }, env)
+    assert.equal(retried, true)
+    db.tasks[0].next_retry_at = 0
+    db.tasks[0].status = 'retrying'
+    await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { assert.fail('unexpected retry') } }] }, env)
+    assert.equal(db.bookmarks.filter(item => item.user_id === 1).length, 1)
+    assert.equal(db.mappings.length, 1)
+    assert.equal(db.tasks[0].status, 'succeeded')
 })

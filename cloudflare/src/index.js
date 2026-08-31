@@ -249,6 +249,39 @@ const migrationCollectionSourceId = value => {
     return String(value).trim().slice(0, 200) || null
 }
 
+const bytesToBase64 = bytes => {
+    let value = ''
+    for (let offset = 0; offset < bytes.length; offset += 0x8000)
+        value += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+    return btoa(value)
+}
+
+const base64ToBytes = value => Uint8Array.from(
+    atob(String(value).replace(/-/g, '+').replace(/_/g, '/')),
+    char => char.charCodeAt(0)
+)
+
+const migrationAssetData = (item, kind) => {
+    const value = item?.data ?? item?.content ?? item?.body ?? (kind === 'snapshot' ? item?.html : null)
+    if (value === undefined || value === null) return null
+    if (typeof value !== 'string') return null
+    if (item?.encoding === 'base64' || /^data:[^;]+;base64,/i.test(value))
+        return value.replace(/^data:[^;]+;base64,/i, '').replace(/\s+/g, '')
+    return bytesToBase64(encoder.encode(value))
+}
+
+const migrationAssets = (root, name, kind) => migrationArray(root, [name]).map((item, index) => {
+    const assetType = kind === 'cover' ? 'cover' : kind
+    return {
+        sourceId: migrationSourceId(item, index, assetType),
+        assetType,
+        bookmarkSourceId: migrationCollectionSourceId(item?.bookmarkId ?? item?.bookmark_id ?? item?.raindropId ?? item?.bookmark),
+        filename: safeFilename(item?.filename || (assetType === 'snapshot' ? 'snapshot.html' : assetType === 'cover' ? 'cover.png' : 'attachment')),
+        contentType: safeContentType(item?.contentType || item?.content_type || (assetType === 'snapshot' ? 'text/html' : assetType === 'cover' ? 'image/png' : 'application/octet-stream')),
+        data: migrationAssetData(item, assetType)
+    }
+})
+
 const normalizeMigrationArchive = input => {
     const root = input && typeof input === 'object' && !Array.isArray(input)
         ? (input.archive && typeof input.archive === 'object' && !Array.isArray(input.archive) ? input.archive : input)
@@ -275,7 +308,12 @@ const normalizeMigrationArchive = input => {
         }
     })
 
-    if (collections.length + bookmarks.length > migrationMaxItems)
+    const assets = [
+        ...migrationAssets(root, 'attachments', 'attachment'),
+        ...migrationAssets(root, 'covers', 'cover'),
+        ...migrationAssets(root, 'snapshots', 'snapshot')
+    ]
+    if (collections.length + bookmarks.length + assets.length > migrationMaxItems)
         throw metadataFailure('migration_too_large', 'The migration archive contains too many records', true)
     if (!collections.length && !bookmarks.length)
         throw metadataFailure('migration_empty', 'The migration archive has no Collections or Bookmarks', true)
@@ -292,10 +330,18 @@ const normalizeMigrationArchive = input => {
             throw metadataFailure('migration_invalid', 'The migration archive contains invalid Bookmarks', true)
         seen.add('bookmark:' + item.sourceId)
     }
+    for (const item of assets) {
+        let validData = false
+        try { validData = migrationAssetBytes(item.data).byteLength <= contentBodyLimit } catch {}
+        if (!item.bookmarkSourceId || !validData || seen.has('content:' + item.sourceId))
+            throw metadataFailure('migration_invalid', 'The migration archive contains invalid Protected Content', true)
+        seen.add('content:' + item.sourceId)
+    }
     return {
         source: String(root.source || root.provider || 'archive').trim().slice(0, 100) || 'archive',
         collections,
-        bookmarks
+        bookmarks,
+        assets
     }
 }
 
@@ -702,7 +748,7 @@ const selectContent = async (env, contentId, userId = null) => {
     const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
     const values = userId === null ? [contentId] : [contentId, userId]
     return env.DB.prepare(`SELECT id, user_id, bookmark_id, kind, status, object_key,
-        filename, content_type, size_bytes, created_at, updated_at, cleared_at
+        filename, content_type, size_bytes, created_at, updated_at, cleared_at, migration_key
         FROM content_objects WHERE ${where}`).bind(...values).first()
 }
 
@@ -1148,15 +1194,21 @@ const processTask = async (env, taskId, type) => {
     return { action: 'skip' }
 }
 
-const createContentRecord = async (env, { userId, bookmarkId, kind, filename, contentType, size, status = 'quarantined' }) => {
+const createContentRecord = async (env, { userId, bookmarkId, kind, filename, contentType, size, status = 'quarantined', migrationKey = null }) => {
     const id = randomToken(18)
     const objectKey = 'content/' + userId + '/' + id
     const now = Date.now()
-    await env.DB.prepare(`INSERT INTO content_objects
-        (id, user_id, bookmark_id, kind, status, object_key, filename, content_type, size_bytes, created_at, updated_at, cleared_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(id, userId, bookmarkId, kind, status === 'cleared' ? 'cleared' : 'quarantined', objectKey,
-            safeFilename(filename), safeContentType(contentType), size, now, now, status === 'cleared' ? now : null).run()
+    if (migrationKey) {
+        await env.DB.prepare(`INSERT INTO content_objects
+            (id, user_id, bookmark_id, kind, status, object_key, filename, content_type, size_bytes, created_at, updated_at, cleared_at, migration_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, userId, bookmarkId, kind, status === 'cleared' ? 'cleared' : 'quarantined', objectKey,
+                safeFilename(filename), safeContentType(contentType), size, now, now, status === 'cleared' ? now : null, migrationKey).run()
+    } else {
+        await env.DB.prepare(`INSERT INTO content_objects
+            (id, user_id, bookmark_id, kind, status, object_key, filename, content_type, size_bytes, created_at, updated_at, cleared_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, userId, bookmarkId, kind, status === 'cleared' ? 'cleared' : 'quarantined', objectKey,
+                safeFilename(filename), safeContentType(contentType), size, now, now, status === 'cleared' ? now : null).run()
+    }
     return selectContent(env, id)
 }
 
@@ -1287,7 +1339,8 @@ const migrationOutput = async (env, row, task = null) => {
         counts: {
             collections: Number(row.collection_count || archive.collections?.length || 0),
             bookmarks: Number(row.bookmark_count || archive.bookmarks?.length || 0),
-            total: Number(row.total_items || (archive.collections?.length || 0) + (archive.bookmarks?.length || 0)),
+            assets: Number(row.asset_count || archive.assets?.length || 0),
+            total: Number(row.total_items || (archive.collections?.length || 0) + (archive.bookmarks?.length || 0) + (archive.assets?.length || 0)),
             duplicates: duplicates.length,
             mapped: Number(row.completed_items || 0)
         },
@@ -1305,7 +1358,7 @@ const selectMigrationArchive = async (env, archiveId, userId = null) => {
     const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
     const values = userId === null ? [archiveId] : [archiveId, userId]
     return env.DB.prepare(`SELECT id, user_id, source, archive_json, preflight_json, review_json, status,
-        collection_count, bookmark_count, total_items, completed_items, task_id, error_code, error_message,
+        collection_count, bookmark_count, asset_count, total_items, completed_items, task_id, error_code, error_message,
         created_at, updated_at FROM migration_archives WHERE ${where}`).bind(...values).first()
 }
 
@@ -1337,6 +1390,9 @@ const createMigrationTask = async (env, request, userId, archiveId) => {
 
 const migrationMappingKey = (sourceType, sourceId) => sourceType + ':' + String(sourceId)
 
+const migrationResourceKey = (archiveId, sourceType, sourceId) =>
+    String(archiveId) + ':' + sourceType + ':' + String(sourceId)
+
 const migrationMappings = async (env, archiveId, userId) => {
     const rows = await env.DB.prepare(`SELECT source_type, source_id, resource_type, resource_id, decision
         FROM migration_mappings WHERE archive_id = ? AND user_id = ?`).bind(archiveId, userId).all()
@@ -1355,6 +1411,20 @@ const addMigrationMapping = async (env, { archiveId, userId, sourceType, sourceI
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(
         archiveId, userId, sourceType, String(sourceId), resourceType, Number(resourceId), decision, Date.now()).run()
 }
+
+const migrationAssetBytes = value => {
+    try {
+        const bytes = base64ToBytes(value)
+        if (!bytes.length) throw new Error('empty content')
+        return bytes
+    } catch {
+        throw metadataFailure('migration_invalid', 'The migration archive contains invalid Protected Content', true)
+    }
+}
+
+const selectMigrationContent = async (env, userId, migrationKey) => env.DB.prepare(`SELECT id, user_id, bookmark_id, kind, status, object_key,
+    filename, content_type, size_bytes, created_at, updated_at, cleared_at, migration_key
+    FROM content_objects WHERE user_id = ? AND migration_key = ?`).bind(userId, migrationKey).first()
 
 const updateMigrationProgress = async (env, task, archiveId, completed, total, status = 'processing') => {
     const progress = total ? Math.min(99, Math.floor(completed * 100 / total)) : 99
@@ -1380,7 +1450,7 @@ const processMigrationTask = async (env, taskId) => {
         const archive = parseTaskMetadata(archiveRow.archive_json)
         const decisions = parseMigrationDecisions(archiveRow.review_json)
         const mappings = await migrationMappings(env, archiveId, task.user_id)
-        const total = Number(archiveRow.total_items || (archive.collections?.length || 0) + (archive.bookmarks?.length || 0))
+        const total = Number(archiveRow.total_items || (archive.collections?.length || 0) + (archive.bookmarks?.length || 0) + (archive.assets?.length || 0))
         let completed = mappings.size
         await updateMigrationProgress(env, task, archiveId, completed, total)
 
@@ -1404,12 +1474,15 @@ const processMigrationTask = async (env, taskId) => {
             const key = migrationMappingKey('collection', item.sourceId)
             if (mappings.has(key)) continue
             const parent = item.parentSourceId && mappings.get(migrationMappingKey('collection', item.parentSourceId))
+            const migrationKey = migrationResourceKey(archiveId, 'collection', item.sourceId)
             const now = Date.now()
             const inserted = await env.DB.prepare(`INSERT INTO collections
-                (user_id, title, parent_id, created_at, updated_at, slug, is_public)
-                VALUES (?, ?, ?, ?, ?, ?, 0)`).bind(
-                task.user_id, item.title, parent?.resourceId || null, now, now, item.slug || slugify(item.title)).run()
-            const resourceId = Number(inserted?.meta?.last_row_id)
+                (user_id, title, parent_id, created_at, updated_at, slug, is_public, migration_key)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?) ON CONFLICT DO NOTHING`).bind(
+                task.user_id, item.title, parent?.resourceId || null, now, now, item.slug || slugify(item.title), migrationKey).run()
+            const existing = await env.DB.prepare('SELECT id FROM collections WHERE user_id = ? AND migration_key = ?')
+                .bind(task.user_id, migrationKey).first()
+            const resourceId = Number(existing?.id || inserted?.meta?.last_row_id)
             if (!Number.isSafeInteger(resourceId) || resourceId <= 0)
                 throw metadataFailure('migration_write_failed', 'The migration could not create a Collection', true)
             await env.DB.prepare(`INSERT INTO collection_collaborators (collection_id, user_id, role)
@@ -1438,17 +1511,57 @@ const processMigrationTask = async (env, taskId) => {
                 continue
             }
             const collection = item.collectionSourceId && mappings.get(migrationMappingKey('collection', item.collectionSourceId))
+            const migrationKey = migrationResourceKey(archiveId, 'bookmark', item.sourceId)
             const now = Date.now()
             const inserted = await env.DB.prepare(`INSERT INTO bookmarks
-                (user_id, url, title, description, note, highlights, created_at, updated_at, collection_id, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+                (user_id, url, title, description, note, highlights, created_at, updated_at, collection_id, tags, migration_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`).bind(
                 task.user_id, item.url, item.title, item.description, item.note, JSON.stringify(applyHighlightChanges('[]', item.highlights)),
-                now, now, collection?.resourceId || -1, JSON.stringify(item.tags)).run()
-            const resourceId = Number(inserted?.meta?.last_row_id)
+                now, now, collection?.resourceId || -1, JSON.stringify(item.tags), migrationKey).run()
+            const existing = await env.DB.prepare('SELECT id FROM bookmarks WHERE user_id = ? AND migration_key = ?')
+                .bind(task.user_id, migrationKey).first()
+            const resourceId = Number(existing?.id || inserted?.meta?.last_row_id)
             if (!Number.isSafeInteger(resourceId) || resourceId <= 0)
                 throw metadataFailure('migration_write_failed', 'The migration could not create a Bookmark', true)
             await addMigrationMapping(env, { archiveId, userId: task.user_id, sourceType: 'bookmark', sourceId: item.sourceId, resourceType: 'bookmark', resourceId })
             mappings.set(key, { resourceId, resourceType: 'bookmark', decision })
+            completed++
+            await updateMigrationProgress(env, task, archiveId, completed, total)
+        }
+
+        for (const asset of archive.assets || []) {
+            const key = migrationMappingKey('content', asset.sourceId)
+            if (mappings.has(key)) continue
+            const bookmark = mappings.get(migrationMappingKey('bookmark', asset.bookmarkSourceId))
+            if (!bookmark) throw metadataFailure('migration_invalid', 'Protected Content refers to an unknown Bookmark', true)
+            const migrationKey = migrationResourceKey(archiveId, 'content', asset.sourceId)
+            const bytes = migrationAssetBytes(asset.data)
+            if (bytes.byteLength > contentBodyLimit)
+                throw metadataFailure('content_too_large', 'The content exceeds the size limit', true)
+            const kind = asset.assetType === 'snapshot' ? 'snapshot' : asset.assetType === 'cover' ? 'screenshot' : 'attachment'
+            let content = await selectMigrationContent(env, task.user_id, migrationKey)
+            if (!content) {
+                content = await createContentRecord(env, {
+                    userId: task.user_id,
+                    bookmarkId: bookmark.resourceId,
+                    kind,
+                    filename: asset.filename,
+                    contentType: asset.contentType,
+                    size: bytes.byteLength,
+                    status: attachmentScanEnabled(env) ? 'quarantined' : 'cleared',
+                    migrationKey
+                })
+                await putContentObject(env, content, bytes, asset)
+            }
+            await addMigrationMapping(env, {
+                archiveId,
+                userId: task.user_id,
+                sourceType: 'content',
+                sourceId: asset.sourceId,
+                resourceType: 'content',
+                resourceId: bookmark.resourceId
+            })
+            mappings.set(key, { resourceId: bookmark.resourceId, resourceType: 'content', decision: 'keep' })
             completed++
             await updateMigrationProgress(env, task, archiveId, completed, total)
         }
@@ -2514,7 +2627,7 @@ export default {
                 } }, 200, request, env)
             }
 
-            if ((url.pathname === '/v1/import/preflight' || url.pathname === '/v1/import') && request.method === 'POST') {
+            if (url.pathname === '/v1/import/preflight' && request.method === 'POST') {
                 let archive
                 try { archive = await readMigrationArchive(request, env) } catch (failure) {
                     const details = taskFailureDetails(failure)
@@ -2527,19 +2640,19 @@ export default {
                 }
                 const archiveId = randomToken(18)
                 const now = Date.now()
-                const total = archive.collections.length + archive.bookmarks.length
+                const total = archive.collections.length + archive.bookmarks.length + archive.assets.length
                 await env.DB.prepare(`INSERT INTO migration_archives
                     (id, user_id, source, archive_json, preflight_json, review_json, status,
-                     collection_count, bookmark_count, total_items, completed_items, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, '{}', 'review', ?, ?, ?, 0, ?, ?)`)
+                     collection_count, bookmark_count, asset_count, total_items, completed_items, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, '{}', 'review', ?, ?, ?, ?, 0, ?, ?)`)
                     .bind(archiveId, session.user_id, archive.source, JSON.stringify(archive), JSON.stringify({ duplicates }),
-                        archive.collections.length, archive.bookmarks.length, total, now, now).run()
+                        archive.collections.length, archive.bookmarks.length, archive.assets.length, total, now, now).run()
                 await recordAudit(env, request, { userId: session.user_id, action: 'migration.preflight', resourceType: 'migration_archive', resourceId: archiveId, outcome: 'success' })
                 const review = migrationReviewItems({ duplicates }, {})
                 const preflight = {
                     archiveId,
                     source: archive.source,
-                    counts: { collections: archive.collections.length, bookmarks: archive.bookmarks.length, total, duplicates: review.length },
+                    counts: { collections: archive.collections.length, bookmarks: archive.bookmarks.length, assets: archive.assets.length, total, duplicates: review.length },
                     duplicates: review,
                     unresolvedDuplicates: review.length
                 }
@@ -2548,7 +2661,7 @@ export default {
 
             if (url.pathname === '/v1/import' && request.method === 'GET') {
                 const rows = await env.DB.prepare(`SELECT id, user_id, source, archive_json, preflight_json, review_json, status,
-                    collection_count, bookmark_count, total_items, completed_items, task_id, error_code, error_message,
+                    collection_count, bookmark_count, asset_count, total_items, completed_items, task_id, error_code, error_message,
                     created_at, updated_at FROM migration_archives WHERE user_id = ? ORDER BY created_at DESC`).bind(session.user_id).all()
                 const items = []
                 for (const row of rows.results || []) items.push(await migrationOutput(env, row))

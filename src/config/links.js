@@ -10,9 +10,9 @@ if (target == 'extension')
 
 export default {
     app: {
-        index: 'https://app.raindrop.io',
-        search: 'https://app.raindrop.io/my/0/',
-        import: 'https://app.raindrop.io/settings/import'
+        index: process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' ? process.env.APP_ORIGIN : 'https://app.raindrop.io',
+        search: process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' ? process.env.APP_ORIGIN + '/my/0/' : 'https://app.raindrop.io/my/0/',
+        import: process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' ? process.env.APP_ORIGIN + '/settings/import' : 'https://app.raindrop.io/settings/import'
     },
     
     download: 'https://raindrop.io/download',
