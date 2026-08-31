@@ -21,6 +21,7 @@ const request = async (path, options = {}) => {
 export default function BetaMigration() {
     const input = useRef()
     const timer = useRef()
+    const pollRef = useRef()
     const [state, setState] = useState({ phase: 'idle', archiveId: '', preflight: null, decisions: {}, task: null, error: '' })
 
     useEffect(() => () => window.clearTimeout(timer.current), [])
@@ -53,9 +54,9 @@ export default function BetaMigration() {
         } catch (error) { fail(error) }
     }
 
-    const poll = async taskId => {
+    const poll = async (taskId, archiveId = state.archiveId) => {
         try {
-            const result = await request('/v1/import/' + encodeURIComponent(state.archiveId) + '/status')
+            const result = await request('/v1/import/' + encodeURIComponent(archiveId) + '/status')
             const task = result.task
             if (task?.status === 'succeeded') {
                 setState(current => ({ ...current, phase: 'success', task, error: '' }))
@@ -66,15 +67,46 @@ export default function BetaMigration() {
                 return
             }
             setState(current => ({ ...current, phase: 'processing', task, error: '' }))
-            timer.current = window.setTimeout(() => poll(taskId), 1000)
+            timer.current = window.setTimeout(() => poll(taskId, archiveId), 1000)
         } catch (error) { fail(error) }
     }
 
+    pollRef.current = poll
+
+    useEffect(() => {
+        let active = true
+        const restore = async () => {
+            try {
+                const result = await request('/v1/import')
+                const current = (result.items || []).find(item => ['review', 'queued', 'processing', 'retrying'].includes(item.status))
+                if (!current || !active) return
+                const detail = await request('/v1/import/' + encodeURIComponent(current.archiveId) + '/status')
+                if (!active) return
+                const duplicates = detail.duplicates || current.duplicates || []
+                const decisions = Object.fromEntries(duplicates.filter(item => item.decision).map(item => [item.sourceId, item.decision]))
+                const task = detail.task || current.task
+                const phase = current.status === 'review' ? 'review' : 'processing'
+                setState({ phase, archiveId: current.archiveId, preflight: { counts: current.counts, duplicates, unresolvedDuplicates: duplicates.filter(item => !item.decision).length }, decisions, task, error: '' })
+                if (phase === 'processing' && task?.id)
+                    window.setTimeout(() => pollRef.current?.(task.id, current.archiveId), 0)
+            } catch {}
+        }
+        restore()
+        return () => { active = false }
+    }, [])
+
     const commit = async () => {
         try {
+            if (duplicates.length) {
+                const reviewed = await request('/v1/import/' + encodeURIComponent(state.archiveId) + '/review', {
+                    method: 'POST',
+                    body: JSON.stringify({ decisions: state.decisions })
+                })
+                setState(current => ({ ...current, preflight: { ...current.preflight, duplicates: reviewed.duplicates, unresolvedDuplicates: reviewed.unresolvedDuplicates }, error: '' }))
+            }
             const result = await request('/v1/import/' + encodeURIComponent(state.archiveId) + '/commit', { method: 'POST', body: '{}' })
             setState(current => ({ ...current, phase: 'processing', task: result.task, error: '' }))
-            poll(result.taskId)
+            poll(result.taskId, state.archiveId)
         } catch (error) { fail(error) }
     }
 

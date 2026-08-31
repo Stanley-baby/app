@@ -355,6 +355,7 @@ const bookmarkItem = item => {
         description,
         excerpt: description,
         note: item.note || '',
+        cover: item.cover || '',
         collectionId: item.removed_at ? -99 : item.collection_id,
         tags: bookmarkTags(item.tags),
         highlights: bookmarkHighlights(item.highlights),
@@ -385,7 +386,7 @@ const requestedSyncVersion = url => {
 
 const changedBookmarks = async (env, userId, since) => {
     const rows = await env.DB.prepare(`SELECT b.id, b.user_id, b.url, b.title, b.description, b.note,
-        b.collection_id, b.tags, b.highlights, b.removed_at, b.created_at, b.updated_at,
+        b.cover, b.collection_id, b.tags, b.highlights, b.removed_at, b.created_at, b.updated_at,
         c.version AS sync_version
         FROM bookmark_changes c JOIN bookmarks b ON b.id = c.bookmark_id AND b.user_id = c.user_id
         WHERE c.user_id = ? AND c.version > ? ORDER BY c.version`).bind(userId, since).all()
@@ -1400,7 +1401,7 @@ const migrationMappings = async (env, archiveId, userId) => {
         sourceType: row.source_type,
         sourceId: String(row.source_id),
         resourceType: row.resource_type,
-        resourceId: Number(row.resource_id),
+        resourceId: row.resource_type === 'content' ? String(row.resource_id) : Number(row.resource_id),
         decision: row.decision || 'keep'
     }]))
 }
@@ -1409,7 +1410,7 @@ const addMigrationMapping = async (env, { archiveId, userId, sourceType, sourceI
     await env.DB.prepare(`INSERT OR IGNORE INTO migration_mappings
         (archive_id, user_id, source_type, source_id, resource_type, resource_id, decision, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-        archiveId, userId, sourceType, String(sourceId), resourceType, Number(resourceId), decision, Date.now()).run()
+        archiveId, userId, sourceType, String(sourceId), resourceType, String(resourceId), decision, Date.now()).run()
 }
 
 const migrationAssetBytes = value => {
@@ -1551,7 +1552,13 @@ const processMigrationTask = async (env, taskId) => {
                     status: attachmentScanEnabled(env) ? 'quarantined' : 'cleared',
                     migrationKey
                 })
-                await putContentObject(env, content, bytes, asset)
+            }
+            if (!content) throw metadataFailure('content_storage_unavailable', 'Protected Content could not be stored', true)
+            await putContentObject(env, content, bytes, asset)
+            if (asset.assetType === 'cover') {
+                const cover = String(env.API_ORIGIN || '').replace(/\/+$/, '') + '/v1/content/' + encodeURIComponent(String(content.id)) + '/download'
+                await env.DB.prepare('UPDATE bookmarks SET cover = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                    .bind(cover, Date.now(), bookmark.resourceId, task.user_id).run()
             }
             await addMigrationMapping(env, {
                 archiveId,
@@ -1559,9 +1566,9 @@ const processMigrationTask = async (env, taskId) => {
                 sourceType: 'content',
                 sourceId: asset.sourceId,
                 resourceType: 'content',
-                resourceId: bookmark.resourceId
+                resourceId: content.id
             })
-            mappings.set(key, { resourceId: bookmark.resourceId, resourceType: 'content', decision: 'keep' })
+            mappings.set(key, { resourceId: content.id, resourceType: 'content', decision: 'keep' })
             completed++
             await updateMigrationProgress(env, task, archiveId, completed, total)
         }
@@ -2688,7 +2695,7 @@ export default {
                         sourceType: item.source_type,
                         sourceId: String(item.source_id),
                         resourceType: item.resource_type,
-                        resourceId: Number(item.resource_id),
+                        resourceId: item.resource_type === 'content' ? String(item.resource_id) : Number(item.resource_id),
                         decision: item.decision || 'keep',
                         createdAt: taskDate(item.created_at)
                     }))
@@ -3428,7 +3435,7 @@ export default {
                     where += ' AND (title LIKE ? OR url LIKE ? OR description LIKE ? OR tags LIKE ? OR note LIKE ? OR highlights LIKE ?)'
                     values.push(...Array(6).fill(`%${search}%`))
                 }
-                const rows = await env.DB.prepare(`SELECT id, user_id, url, title, description, note, collection_id, tags, highlights, removed_at, created_at, updated_at, change_version FROM bookmarks WHERE ${where} ORDER BY updated_at DESC`).bind(...values).all()
+                const rows = await env.DB.prepare(`SELECT id, user_id, url, title, description, note, cover, collection_id, tags, highlights, removed_at, created_at, updated_at, change_version FROM bookmarks WHERE ${where} ORDER BY updated_at DESC`).bind(...values).all()
                 const marker = await bookmarkSync(env, session.user_id)
                 return json({ result: true, items: rows.results.map(bookmarkItem), count: rows.results.length, ...marker }, 200, request, env)
             }

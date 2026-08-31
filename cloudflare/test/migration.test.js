@@ -78,6 +78,11 @@ class MigrationDatabase {
             if (sql.includes('INSERT INTO rate_limits') || sql.includes('INSERT INTO usage_counters') || sql.includes('INSERT INTO audit_records'))
                 return { meta: { changes: 1 } }
             if (sql.includes('UPDATE sessions SET last_seen_at')) return { meta: { changes: 1 } }
+            if (sql.includes('UPDATE bookmarks SET cover')) {
+                const item = this.bookmarks.find(item => item.id === Number(values[2]) && item.user_id === Number(values[3]))
+                if (item) item.cover = values[0]
+                return { meta: { changes: item ? 1 : 0 } }
+            }
             if (sql.includes('INSERT INTO migration_archives')) {
                 const [id, userId, source, archiveJson, preflightJson, collectionCount, bookmarkCount, assetCount, totalItems, createdAt, updatedAt] = values
                 this.archives.push({ id, user_id: userId, source, archive_json: archiveJson, preflight_json: preflightJson, review_json: '{}', status: 'review', collection_count: collectionCount, bookmark_count: bookmarkCount, asset_count: assetCount, total_items: totalItems, completed_items: 0, task_id: null, error_code: null, error_message: null, created_at: createdAt, updated_at: updatedAt })
@@ -166,7 +171,7 @@ class MigrationDatabase {
             if (sql.includes('INSERT INTO bookmarks')) {
                 const [userId, url, title, description, note, highlights, createdAt, updatedAt, collectionId, tags, migrationKey] = values
                 if (this.bookmarks.some(item => item.user_id === Number(userId) && item.migration_key === migrationKey)) return { meta: { changes: 0 } }
-                const item = { id: this.nextBookmarkId++, user_id: Number(userId), url, title, description, note, highlights, created_at: createdAt, updated_at: updatedAt, collection_id: collectionId, tags, migration_key: migrationKey, removed_at: null, change_version: this.nextChangeVersion }
+                const item = { id: this.nextBookmarkId++, user_id: Number(userId), url, title, description, note, highlights, created_at: createdAt, updated_at: updatedAt, collection_id: collectionId, tags, migration_key: migrationKey, cover: '', removed_at: null, change_version: this.nextChangeVersion }
                 this.bookmarks.push(item)
                 this.changes.push({ version: this.nextChangeVersion++, changed_at: updatedAt })
                 return { meta: { last_row_id: item.id, changes: 1 } }
@@ -177,7 +182,7 @@ class MigrationDatabase {
     }
 }
 
-const envFor = db => ({
+const envFor = (db, options = {}) => ({
     DB: db,
     SESSION_SECRET: 'migration-secret',
     API_ORIGIN: 'https://api.example.test',
@@ -188,7 +193,13 @@ const envFor = db => ({
     TASK_QUEUE: { send: async () => {} },
     CONTENT_BUCKET: {
         objects: new Map(),
-        put: async function (key, body) { this.objects.set(key, body) }
+        put: async function (key, body) {
+            if (options.failContentPutOnce) {
+                options.failContentPutOnce = false
+                throw new Error('forced content storage failure')
+            }
+            this.objects.set(key, body)
+        }
     }
 })
 
@@ -316,6 +327,9 @@ test('migration archives retain inline protected content and map its source iden
     assert.equal(db.contents.some(item => item.kind === 'snapshot'), true)
     assert.equal(db.contents.some(item => item.kind === 'attachment'), true)
     assert.equal(db.contents.some(item => item.kind === 'screenshot'), true)
+    const contentMappings = items.filter(item => item.sourceType === 'content')
+    assert.deepEqual(contentMappings.map(item => item.resourceId).sort(), db.contents.map(item => item.id).sort())
+    assert.ok(db.bookmarks[0].cover)
 })
 
 test('migration retries resume from a resource key without duplicating a partial write', async () => {
@@ -338,4 +352,27 @@ test('migration retries resume from a resource key without duplicating a partial
     assert.equal(db.bookmarks.filter(item => item.user_id === 1).length, 1)
     assert.equal(db.mappings.length, 1)
     assert.equal(db.tasks[0].status, 'succeeded')
+})
+
+test('migration retries protected content after storage failure without losing bytes', async () => {
+    const db = new MigrationDatabase()
+    const options = { failContentPutOnce: true }
+    const env = envFor(db, options)
+    const preflight = await worker.fetch(request('/v1/import/preflight', {
+        method: 'POST',
+        ...body({ bookmarks: [{ id: 'bookmark-1', url: 'https://example.com/storage-retry', title: 'Storage retry' }], attachments: [{ id: 'attachment-1', bookmarkId: 'bookmark-1', data: 'retry bytes' }] })
+    }), env)
+    const archiveId = (await preflight.json()).archiveId
+    const commit = await worker.fetch(request(`/v1/import/${archiveId}/commit`, { method: 'POST' }), env)
+    const taskId = (await commit.json()).taskId
+    let retried = false
+    await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { retried = true } }] }, env)
+    assert.equal(retried, true)
+    db.tasks[0].next_retry_at = 0
+    db.tasks[0].status = 'retrying'
+    await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { assert.fail('unexpected retry') } }] }, env)
+    assert.equal(db.tasks[0].status, 'succeeded')
+    assert.equal(db.contents.length, 1)
+    assert.equal(env.CONTENT_BUCKET.objects.size, 1)
+    assert.equal(db.mappings.filter(item => item.source_type === 'content').length, 1)
 })

@@ -814,7 +814,7 @@ paths:
     get:
       responses:
         '200':
-          description: Source identifiers mapped to new numeric Resource IDs.
+          description: Source identifiers mapped to assigned Resource IDs (numeric for Collections and Bookmarks, opaque for Protected Content).
   /v1/raindrop/file:
     put:
       requestBody:

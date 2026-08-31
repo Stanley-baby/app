@@ -77,6 +77,8 @@ The response lists duplicate Bookmarks before any write. Submit explicit
 `/v1/import/:id/review`, then start the resumable `migration_import`
 Background Task with `/v1/import/:id/commit`. `/v1/import/:id/status` and the
 existing `/v1/tasks/:id` endpoint expose progress; `/v1/import/:id/mappings`
-lists each source identifier and its assigned numeric Resource ID. Per-source
-keys make retries idempotent, while a failed task can be retried explicitly
-with `/v1/import/:id/retry`.
+lists each source identifier and its assigned Resource ID (numeric for
+Collections and Bookmarks, opaque for Protected Content). Per-source keys make
+retries idempotent, while a failed task can be retried explicitly with
+`/v1/import/:id/retry`. A skipped duplicate maps to the existing Resource ID so
+the source identifier remains traceable without creating a second Bookmark.
