@@ -821,8 +821,8 @@ export default {
                 const now = Date.now()
                 const removedBatch = randomToken(16)
                 const placeholders = ids.map(() => '?').join(',')
-                await env.DB.prepare(`UPDATE bookmarks SET removed_at = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND collection_id IN (${placeholders})`)
-                    .bind(now, now, session.user_id, ...ids).run()
+                await env.DB.prepare(`UPDATE bookmarks SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND collection_id IN (${placeholders})`)
+                    .bind(now, removedBatch, now, session.user_id, ...ids).run()
                 await env.DB.prepare(`UPDATE collections SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND id IN (${placeholders})`)
                     .bind(now, removedBatch, now, session.user_id, ...ids).run()
                 return json({ result: true, count: ids.length, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
@@ -862,14 +862,15 @@ export default {
                     if (!existing) return error('collection_not_found', 404, request, env)
 
                     if (data.removed === false && existing.removed_at) {
+                        const removedBatch = existing.removed_batch
                         const collections = await userCollections(env, session.user_id)
                         const ids = descendantCollectionIds(collections, [collectionId])
                         const now = Date.now()
                         const placeholders = ids.map(() => '?').join(',')
                         await env.DB.prepare(`UPDATE collections SET removed_at = NULL, removed_batch = NULL, updated_at = ? WHERE user_id = ? AND id IN (${placeholders}) AND removed_batch = ?`)
-                            .bind(now, session.user_id, ...ids, existing.removed_batch).run()
-                        await env.DB.prepare(`UPDATE bookmarks SET removed_at = NULL, updated_at = ? WHERE user_id = ? AND collection_id IN (${placeholders}) AND removed_at >= ?`)
-                            .bind(now, session.user_id, ...ids, Number(existing.removed_at)).run()
+                            .bind(now, session.user_id, ...ids, removedBatch).run()
+                        await env.DB.prepare(`UPDATE bookmarks SET removed_at = NULL, removed_batch = NULL, updated_at = ? WHERE user_id = ? AND collection_id IN (${placeholders}) AND removed_batch = ?`)
+                            .bind(now, session.user_id, ...ids, removedBatch).run()
                         const item = await env.DB.prepare(`SELECT c.*, COUNT(b.id) AS count FROM collections c
                             LEFT JOIN bookmarks b ON b.collection_id = c.id AND b.removed_at IS NULL
                             WHERE c.id = ? AND c.user_id = ? GROUP BY c.id`).bind(collectionId, session.user_id).first()
@@ -915,8 +916,8 @@ export default {
                     const placeholders = ids.map(() => '?').join(',')
                     const now = Date.now()
                     const removedBatch = randomToken(16)
-                    await env.DB.prepare(`UPDATE bookmarks SET removed_at = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND collection_id IN (${placeholders})`)
-                        .bind(now, now, session.user_id, ...ids).run()
+                    await env.DB.prepare(`UPDATE bookmarks SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND collection_id IN (${placeholders})`)
+                        .bind(now, removedBatch, now, session.user_id, ...ids).run()
                     await env.DB.prepare(`UPDATE collections SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND id IN (${placeholders})`)
                         .bind(now, removedBatch, now, session.user_id, ...ids).run()
                     return json({ result: true, count: ids.length, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
@@ -983,8 +984,9 @@ export default {
                     return json({ result: true, count: bookmarkIds.length }, 200, request, env)
                 }
                 const now = Date.now()
-                let query = 'UPDATE bookmarks SET removed_at = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL'
-                const values = [now, now, session.user_id]
+                const removedBatch = randomToken(16)
+                let query = 'UPDATE bookmarks SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL'
+                const values = [now, removedBatch, now, session.user_id]
                 if (collectionId > 0) {
                     query += ' AND collection_id = ?'
                     values.push(collectionId)
@@ -1135,6 +1137,7 @@ export default {
                     const tags = data.tags === undefined ? bookmarkTags(existing.tags) : bookmarkTags(data.tags)
                     let collectionId = data.collectionId === undefined ? existing.collection_id : parseBookmarkCollectionId(data.collectionId)
                     const removedAt = data.removed === false ? null : existing.removed_at
+                    const removedBatch = data.removed === false ? null : existing.removed_batch
                     const highlights = data.highlights === undefined ? bookmarkHighlights(existing.highlights) : data.highlights
                     if (data.collectionId === undefined && data.removed === false && collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId))
                         collectionId = -1
@@ -1152,15 +1155,16 @@ export default {
                         return error('collection_not_found', 404, request, env)
                     if (!validHighlightChanges(highlights))
                         return error('validation_failed', 400, request, env, 'Highlight text and note must be valid')
-                    await env.DB.prepare('UPDATE bookmarks SET url = ?, title = ?, description = ?, note = ?, collection_id = ?, tags = ?, highlights = ?, removed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(link, title, description, note, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)), removedAt, Date.now(), bookmarkId, session.user_id).run()
+                    await env.DB.prepare('UPDATE bookmarks SET url = ?, title = ?, description = ?, note = ?, collection_id = ?, tags = ?, highlights = ?, removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(link, title, description, note, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)), removedAt, removedBatch, Date.now(), bookmarkId, session.user_id).run()
                     const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, session.user_id).first()
                     return json({ result: true, item: bookmarkItem(item), ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }
                 if (request.method === 'DELETE') {
                     const now = Date.now()
-                    await env.DB.prepare('UPDATE bookmarks SET removed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(now, now, bookmarkId, session.user_id).run()
+                    const removedBatch = randomToken(16)
+                    await env.DB.prepare('UPDATE bookmarks SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(now, removedBatch, now, bookmarkId, session.user_id).run()
                     return json({ result: true, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }
             }
