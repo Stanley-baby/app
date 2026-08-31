@@ -260,7 +260,7 @@ const collectionOwned = async (env, userId, collectionId) =>
     collectionId <= 0 || Boolean(await env.DB.prepare('SELECT id FROM collections WHERE id = ? AND user_id = ? AND removed_at IS NULL').bind(collectionId, userId).first())
 
 const userCollections = async (env, userId) => {
-    const rows = await env.DB.prepare('SELECT id, parent_id, removed_at FROM collections WHERE user_id = ?').bind(userId).all()
+    const rows = await env.DB.prepare('SELECT id, parent_id, removed_at, removed_batch FROM collections WHERE user_id = ?').bind(userId).all()
     return rows.results || []
 }
 
@@ -819,11 +819,12 @@ export default {
                     return error('collection_not_found', 404, request, env)
                 const ids = descendantCollectionIds(collections, roots)
                 const now = Date.now()
+                const removedBatch = randomToken(16)
                 const placeholders = ids.map(() => '?').join(',')
                 await env.DB.prepare(`UPDATE bookmarks SET removed_at = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND collection_id IN (${placeholders})`)
                     .bind(now, now, session.user_id, ...ids).run()
-                await env.DB.prepare(`UPDATE collections SET removed_at = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND id IN (${placeholders})`)
-                    .bind(now, now, session.user_id, ...ids).run()
+                await env.DB.prepare(`UPDATE collections SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND id IN (${placeholders})`)
+                    .bind(now, removedBatch, now, session.user_id, ...ids).run()
                 return json({ result: true, count: ids.length, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
             }
 
@@ -865,8 +866,8 @@ export default {
                         const ids = descendantCollectionIds(collections, [collectionId])
                         const now = Date.now()
                         const placeholders = ids.map(() => '?').join(',')
-                        await env.DB.prepare(`UPDATE collections SET removed_at = NULL, updated_at = ? WHERE user_id = ? AND id IN (${placeholders}) AND removed_at >= ?`)
-                            .bind(now, session.user_id, ...ids, Number(existing.removed_at)).run()
+                        await env.DB.prepare(`UPDATE collections SET removed_at = NULL, removed_batch = NULL, updated_at = ? WHERE user_id = ? AND id IN (${placeholders}) AND removed_batch = ?`)
+                            .bind(now, session.user_id, ...ids, existing.removed_batch).run()
                         await env.DB.prepare(`UPDATE bookmarks SET removed_at = NULL, updated_at = ? WHERE user_id = ? AND collection_id IN (${placeholders}) AND removed_at >= ?`)
                             .bind(now, session.user_id, ...ids, Number(existing.removed_at)).run()
                         const item = await env.DB.prepare(`SELECT c.*, COUNT(b.id) AS count FROM collections c
@@ -913,10 +914,11 @@ export default {
                     const ids = descendantCollectionIds(collections, [collectionId])
                     const placeholders = ids.map(() => '?').join(',')
                     const now = Date.now()
+                    const removedBatch = randomToken(16)
                     await env.DB.prepare(`UPDATE bookmarks SET removed_at = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND collection_id IN (${placeholders})`)
                         .bind(now, now, session.user_id, ...ids).run()
-                    await env.DB.prepare(`UPDATE collections SET removed_at = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND id IN (${placeholders})`)
-                        .bind(now, now, session.user_id, ...ids).run()
+                    await env.DB.prepare(`UPDATE collections SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL AND id IN (${placeholders})`)
+                        .bind(now, removedBatch, now, session.user_id, ...ids).run()
                     return json({ result: true, count: ids.length, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }
             }

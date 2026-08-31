@@ -121,7 +121,7 @@ class MemoryDatabase {
                 return { meta: { last_row_id: bookmark.id, changes: 1 } }
             }
             if (sql.includes('INSERT INTO collections')) {
-                const collection = { id: this.collections.length + 1, user_id: values[0], title: values[1], parent_id: values[2], created_at: values[3], updated_at: values[4], removed_at: null }
+                const collection = { id: this.collections.length + 1, user_id: values[0], title: values[1], parent_id: values[2], created_at: values[3], updated_at: values[4], removed_at: null, removed_batch: null }
                 this.collections.push(collection)
                 return { meta: { last_row_id: collection.id, changes: 1 } }
             }
@@ -182,11 +182,13 @@ class MemoryDatabase {
             }
             if (sql.includes('UPDATE collections SET removed_at')) {
                 const restore = sql.includes('removed_at = NULL')
-                const userId = restore ? values[1] : values[2]
-                const ids = new Set(values.slice(restore ? 2 : 3, restore ? -1 : undefined).map(Number))
-                const threshold = restore ? Number(values.at(-1)) : 0
-                const matches = this.collections.filter(item => item.user_id === userId && ids.has(item.id) && (restore ? item.removed_at >= threshold : !item.removed_at))
-                for (const item of matches) Object.assign(item, restore ? { removed_at: null, updated_at: values[0] } : { removed_at: values[0], updated_at: values[1] })
+                const userId = restore ? values[1] : values[3]
+                const ids = new Set(values.slice(restore ? 2 : 4, restore ? -1 : undefined).map(Number))
+                const batch = restore ? values.at(-1) : values[1]
+                const matches = this.collections.filter(item => item.user_id === userId && ids.has(item.id) && (restore ? item.removed_batch === batch : !item.removed_at))
+                for (const item of matches) Object.assign(item, restore
+                    ? { removed_at: null, removed_batch: null, updated_at: values[0] }
+                    : { removed_at: values[0], removed_batch: batch, updated_at: values[2] })
                 return { meta: { changes: matches.length } }
             }
             if (sql.includes('UPDATE bookmarks SET tags')) {
@@ -974,9 +976,16 @@ test('recycle bin, metadata search, and last-write-wins stay user-scoped', async
         const staggeredRootId = (await staggeredRoot.json()).item._id
         const staggeredChild = await worker.fetch(request('/v1/collection', { title: 'Issue 7 staggered child', parentId: staggeredRootId }, { Cookie: ownerCookie }), testEnv)
         const staggeredChildId = (await staggeredChild.json()).item._id
+        const originalNow = Date.now
+        Date.now = () => 1735689600000
+        try {
+            assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + staggeredChildId, 'DELETE', undefined, ownerCookie), testEnv)).status, 200)
+            assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + staggeredRootId, 'DELETE', undefined, ownerCookie), testEnv)).status, 200)
+        } finally {
+            Date.now = originalNow
+        }
+        assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + staggeredChildId, 'PUT', { removed: false }, ownerCookie), testEnv)).status, 200)
         assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + staggeredChildId, 'DELETE', undefined, ownerCookie), testEnv)).status, 200)
-        await new Promise(resolve => setTimeout(resolve, 2))
-        assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + staggeredRootId, 'DELETE', undefined, ownerCookie), testEnv)).status, 200)
         assert.equal((await worker.fetch(jsonRequest('/v1/collection/' + staggeredRootId, 'PUT', { removed: false }, ownerCookie), testEnv)).status, 200)
         const staggeredRemoved = await worker.fetch(request('/v1/collections/all?removed=true', null, { Cookie: ownerCookie }), testEnv)
         assert.equal((await staggeredRemoved.json()).items.some(item => item._id === staggeredChildId), true)
