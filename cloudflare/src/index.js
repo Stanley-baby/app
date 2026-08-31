@@ -1897,7 +1897,7 @@ export default {
                 'Content-Type': content.content_type || object.httpMetadata?.contentType || 'application/octet-stream',
                 'Content-Length': String(content.size_bytes || object.size || 0),
                 'Content-Disposition': 'inline; filename="' + safeFilename(content.filename) + '"',
-                'Cache-Control': 'public, max-age=60',
+                'Cache-Control': 'no-store',
                 'X-Request-ID': requestId(request)
             }), request, env)
             return new Response(request.method === 'HEAD' ? null : object.body, { status: 200, headers })
