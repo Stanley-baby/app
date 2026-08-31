@@ -31,3 +31,9 @@ client rate bucket. A rejected request returns `429`, `Retry-After`,
 `retryAfter`, and `retryAt`. D1 `audit_records` and `alerts` store only actor,
 route, resource identifiers, outcome, and numeric reason metadata—never request
 bodies, cookies, passwords, tokens, page contents, or attachment contents.
+
+Bookmark saves create an idempotent `metadata_enrichment` task for public
+HTTP(S) URLs. The Queue consumer follows redirects manually and validates each
+target, records progress in `background_tasks`, retries failures three times
+with backoff, then marks the task `dead_letter` and exposes `POST
+/v1/tasks/:id/retry` for an explicit retry.

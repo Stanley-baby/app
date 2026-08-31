@@ -1,0 +1,189 @@
+import assert from 'node:assert/strict'
+import { webcrypto } from 'node:crypto'
+import test from 'node:test'
+import worker, { createMetadataTask, processMetadataTask, validateFetchableUrl } from '../src/index.js'
+
+globalThis.crypto ||= webcrypto
+
+class TaskDatabase {
+    constructor(task = {}) {
+        this.tasks = task.id ? [{
+            id: task.id,
+            user_id: task.user_id || 1,
+            bookmark_id: task.bookmark_id || 1,
+            type: task.type || 'metadata_enrichment',
+            status: task.status || 'queued',
+            progress: task.progress || 0,
+            retry_count: task.retry_count || 0,
+            idempotency_key: task.idempotency_key || 'existing',
+            source_url: task.source_url || 'https://public.example.test/page',
+            result_metadata: task.result_metadata || '{}',
+            error_code: task.error_code || null,
+            error_message: task.error_message || null,
+            next_retry_at: task.next_retry_at || null,
+            created_at: task.created_at || 1,
+            updated_at: task.updated_at || 1,
+            completed_at: task.completed_at || null
+        }] : []
+        this.bookmarks = [{ id: 1, user_id: 1, title: '', description: '', removed_at: null }]
+        this.nextId = 1
+    }
+
+    prepare(sql) {
+        let values = []
+        const first = async () => {
+            if (sql.includes('FROM background_tasks')) {
+                if (sql.includes('idempotency_key'))
+                    return this.tasks.find(task => task.idempotency_key === values[0] && task.user_id === values[1]) || null
+                return this.tasks.find(task => task.id === values[0] && (values.length < 2 || task.user_id === values[1])) || null
+            }
+            if (sql.includes('FROM bookmarks WHERE id'))
+                return this.bookmarks.find(bookmark => bookmark.id === values[0] && bookmark.user_id === values[1] && (!sql.includes('removed_at IS NULL') || !bookmark.removed_at)) || null
+            return null
+        }
+        const run = async () => {
+            if (sql.includes('INSERT INTO background_tasks')) {
+                const [id, userId, bookmarkId, type, key, sourceUrl, createdAt, updatedAt] = values
+                if (this.tasks.some(task => task.idempotency_key === key)) return { meta: { changes: 0 } }
+                this.tasks.push({ id, user_id: userId, bookmark_id: bookmarkId, type, status: 'queued', progress: 0, retry_count: 0, idempotency_key: key, source_url: sourceUrl, result_metadata: '{}', error_code: null, error_message: null, next_retry_at: null, created_at: createdAt, updated_at: updatedAt, completed_at: null })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE background_tasks SET status = \'processing\'')) {
+                const [updatedAt, id, retryAt] = values
+                const task = this.tasks.find(item => item.id === id && ['queued', 'retrying'].includes(item.status) && (!item.next_retry_at || item.next_retry_at <= retryAt))
+                if (!task) return { meta: { changes: 0 } }
+                Object.assign(task, { status: 'processing', progress: 10, next_retry_at: null, updated_at: updatedAt })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE background_tasks SET status = \'retrying\'')) {
+                const [retryCount, errorCode, errorMessage, nextRetryAt, updatedAt, id] = values
+                const task = this.tasks.find(item => item.id === id && item.status === 'processing')
+                if (!task) return { meta: { changes: 0 } }
+                Object.assign(task, { status: 'retrying', progress: 10, retry_count: retryCount, error_code: errorCode, error_message: errorMessage, next_retry_at: nextRetryAt, updated_at: updatedAt })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE background_tasks SET status = \'dead_letter\'')) {
+                const [retryCount, errorCode, errorMessage, updatedAt, completedAt, id] = values
+                const task = this.tasks.find(item => item.id === id && item.status === 'processing')
+                if (!task) return { meta: { changes: 0 } }
+                Object.assign(task, { status: 'dead_letter', progress: 0, retry_count: retryCount, error_code: errorCode, error_message: errorMessage, next_retry_at: null, updated_at: updatedAt, completed_at: completedAt })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE background_tasks SET status = \'succeeded\'')) {
+                const [metadata, updatedAt, completedAt, id] = values
+                const task = this.tasks.find(item => item.id === id && item.status === 'processing')
+                if (!task) return { meta: { changes: 0 } }
+                Object.assign(task, { status: 'succeeded', progress: 100, result_metadata: metadata, error_code: null, error_message: null, next_retry_at: null, updated_at: updatedAt, completed_at: completedAt })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE bookmarks SET')) {
+                const [title, description, updatedAt, id, userId] = values
+                const bookmark = this.bookmarks.find(item => item.id === id && item.user_id === userId && !item.removed_at)
+                if (!bookmark) return { meta: { changes: 0 } }
+                if (!bookmark.title) bookmark.title = title
+                if (!bookmark.description) bookmark.description = description
+                bookmark.updated_at = updatedAt
+                return { meta: { changes: 1 } }
+            }
+            return { meta: { changes: 1 } }
+        }
+        return { bind: (...next) => { values = next; return { first, run } } }
+    }
+}
+
+const baseEnv = db => ({ DB: db, SESSION_SECRET: 'task-secret', API_ORIGIN: 'https://api.example.test' })
+
+test('fetchable URL validation rejects internal destinations and accepts public HTTP(S)', () => {
+    for (const value of [
+        'http://localhost/private',
+        'http://127.0.0.1:8080',
+        'http://10.0.0.1',
+        'http://169.254.169.254/latest/meta-data',
+        'http://[::1]/',
+        'http://metadata.google.internal/',
+        'ftp://public.example.test/file',
+        'https://user:password@public.example.test/'
+    ]) assert.equal(validateFetchableUrl(value).ok, false, value)
+    assert.equal(validateFetchableUrl('https://public.example.test/page').ok, true)
+    assert.equal(validateFetchableUrl('http://public.example.test:80/page').ok, true)
+})
+
+test('metadata task creation is idempotent and queue payload contains no URL or secret', async () => {
+    const db = new TaskDatabase()
+    const sent = []
+    const env = { ...baseEnv(db), TASK_QUEUE: { send: async body => sent.push(body) } }
+    const first = await createMetadataTask(env, null, 1, 1, 'https://public.example.test/page')
+    const second = await createMetadataTask(env, null, 1, 1, 'https://public.example.test/page')
+    assert.equal(first.id, second.id)
+    assert.equal(db.tasks.length, 1)
+    assert.deepEqual(sent, [{ taskId: first.id, type: 'metadata_enrichment' }])
+})
+
+test('queue follows redirects, enriches empty fields, and records success', async t => {
+    const db = new TaskDatabase({ id: 'task-success', source_url: 'https://public.example.test/start' })
+    const env = baseEnv(db)
+    const originalFetch = globalThis.fetch
+    const requested = []
+    globalThis.fetch = async (url, options) => {
+        requested.push([String(url), options.redirect])
+        if (requested.length === 1) return new Response(null, { status: 302, headers: { Location: 'https://public.example.test/final' } })
+        return new Response('<html><title>Fetched title</title><meta name="description" content="Fetched description"></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })
+    }
+    t.after(() => { globalThis.fetch = originalFetch })
+    const message = { body: { taskId: 'task-success' }, ack: () => {}, retry: () => {} }
+    await worker.queue({ messages: [message] }, env)
+    assert.deepEqual(requested, [['https://public.example.test/start', 'manual'], ['https://public.example.test/final', 'manual']])
+    assert.equal(db.tasks[0].status, 'succeeded')
+    assert.equal(db.tasks[0].progress, 100)
+    assert.equal(db.bookmarks[0].title, 'Fetched title')
+    assert.equal(db.bookmarks[0].description, 'Fetched description')
+})
+
+test('unsafe redirect is dead-lettered without retrying', async t => {
+    const db = new TaskDatabase({ id: 'task-redirect', source_url: 'https://public.example.test/start' })
+    const dlq = []
+    const env = { ...baseEnv(db), TASK_DLQ: { send: async body => dlq.push(body) } }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response(null, { status: 302, headers: { Location: 'http://127.0.0.1/private' } })
+    t.after(() => { globalThis.fetch = originalFetch })
+    let retries = 0
+    await worker.queue({ messages: [{ body: { taskId: 'task-redirect' }, ack: () => {}, retry: () => { retries++ } }] }, env)
+    assert.equal(db.tasks[0].status, 'dead_letter')
+    assert.equal(retries, 0)
+    assert.equal(dlq.length, 1)
+    assert.equal(dlq[0].failure.code, 'redirect_not_public')
+})
+
+test('metadata failures get three backoff retries before dead-letter', async t => {
+    const db = new TaskDatabase({ id: 'task-failure', source_url: 'https://public.example.test/fails' })
+    const dlq = []
+    const env = { ...baseEnv(db), TASK_DLQ: { send: async body => dlq.push(body) } }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => { throw new Error('network down') }
+    t.after(() => { globalThis.fetch = originalFetch })
+    let retries = 0
+    for (let attempt = 0; attempt < 4; attempt++) {
+        db.tasks[0].next_retry_at = 0
+        await worker.queue({ messages: [{ body: { taskId: 'task-failure' }, ack: () => {}, retry: options => { retries++; assert.ok(options.delaySeconds > 0) } }] }, env)
+    }
+    assert.equal(retries, 3)
+    assert.equal(db.tasks[0].status, 'dead_letter')
+    assert.equal(db.tasks[0].retry_count, 3)
+    assert.equal(dlq.length, 1)
+    assert.equal(dlq[0].failure.code, 'metadata_fetch_failed')
+})
+
+test('processMetadataTask ignores duplicate delivery after success', async () => {
+    const db = new TaskDatabase({ id: 'task-duplicate', status: 'succeeded', source_url: 'https://public.example.test/page', result_metadata: '{"title":"done"}' })
+    const env = baseEnv(db)
+    const originalFetch = globalThis.fetch
+    let fetches = 0
+    globalThis.fetch = async () => { fetches++; return new Response('', { status: 200 }) }
+    try {
+        const result = await processMetadataTask(env, 'task-duplicate')
+        assert.equal(result.action, 'skip')
+        assert.equal(fetches, 0)
+    } finally {
+        globalThis.fetch = originalFetch
+    }
+})

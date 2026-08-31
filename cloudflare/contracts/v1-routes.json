@@ -224,6 +224,30 @@
             "responses": [202, 401, 409]
         },
         {
+            "method": "GET",
+            "path": "/v1/tasks/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/tasks/:id/status",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/tasks/:id/failure",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/tasks/:id/retry",
+            "authentication": "required",
+            "responses": [202, 400, 401, 404, 409]
+        },
+        {
             "method": "DELETE",
             "path": "/v1/user/deletion",
             "authentication": "required",

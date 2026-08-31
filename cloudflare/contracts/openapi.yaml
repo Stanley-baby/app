@@ -618,3 +618,67 @@ paths:
       responses:
         '200':
           description: Scheduled deletion cancelled.
+  /v1/tasks/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      responses:
+        '200':
+          description: Authorized Background Task status, progress, retry count, and safe failure details.
+        '401':
+          description: Login required.
+        '404':
+          description: Task not found for this User.
+  /v1/tasks/{id}/status:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      responses:
+        '200':
+          description: Authorized Background Task status and progress.
+        '401':
+          description: Login required.
+        '404':
+          description: Task not found for this User.
+  /v1/tasks/{id}/failure:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      responses:
+        '200':
+          description: Safe Background Task failure details, or null when it has not failed.
+        '401':
+          description: Login required.
+        '404':
+          description: Task not found for this User.
+  /v1/tasks/{id}/retry:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      responses:
+        '202':
+          description: Failed Background Task queued for an explicit manual retry.
+        '400':
+          description: Task type cannot be retried.
+        '401':
+          description: Login required.
+        '404':
+          description: Task not found for this User.
+        '409':
+          description: Task is not in a retryable failure state.

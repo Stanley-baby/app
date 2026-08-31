@@ -6,6 +6,12 @@ const deletionDays = 30
 const passwordIterations = 100000
 const usageWindowMs = 24 * 60 * 60 * 1000
 const rateWindowMs = 60 * 1000
+const metadataTaskType = 'metadata_enrichment'
+const metadataMaxRetries = 3
+const metadataMaxRedirects = 5
+const metadataBodyLimit = 256 * 1024
+const metadataFetchTimeoutMs = 8000
+const metadataRetryDelays = [5, 30, 300]
 
 const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
 
@@ -254,6 +260,365 @@ const changedBookmarks = async (env, userId, since) => {
     return [...latest.values()].map(bookmarkItem)
 }
 
+const ipv4Parts = hostname => {
+    if (!/^\d+(?:\.\d+){3}$/.test(hostname)) return null
+    const parts = hostname.split('.').map(Number)
+    return parts.every(part => Number.isInteger(part) && part >= 0 && part <= 255) ? parts : null
+}
+
+const privateIpv4 = parts => {
+    if (!parts) return false
+    const [first, second, third, fourth] = parts
+    return first === 0 || first === 10 || first === 127 || first >= 224 ||
+        first === 100 && second >= 64 && second <= 127 ||
+        first === 169 && second === 254 ||
+        first === 172 && second >= 16 && second <= 31 ||
+        first === 192 && (second === 0 || second === 2 || second === 168) ||
+        first === 192 && second === 88 && third === 99 ||
+        first === 198 && (second === 18 || second === 19 || second === 51) ||
+        first === 203 && second === 0 && third === 113 ||
+        first === 255 && second === 255 && third === 255 && fourth === 255
+}
+
+const ipv6Parts = hostname => {
+    const value = hostname.replace(/^\[/, '').replace(/\]$/, '').toLowerCase()
+    if (!value.includes(':')) return null
+    const halves = value.split('::')
+    if (halves.length > 2) return null
+    const parse = part => part ? part.split(':').map(value => /^[0-9a-f]{1,4}$/.test(value) ? parseInt(value, 16) : NaN) : []
+    const left = parse(halves[0])
+    const right = parse(halves[1] || '')
+    if (left.some(Number.isNaN) || right.some(Number.isNaN)) return null
+    const missing = 8 - left.length - right.length
+    if (halves.length === 1 && missing !== 0 || halves.length === 2 && missing < 1) return null
+    return [...left, ...Array(Math.max(0, missing)).fill(0), ...right]
+}
+
+const privateIpv6 = parts => {
+    if (!parts) return false
+    const first = parts[0]
+    const allZero = parts.every(part => part === 0)
+    const mapped = parts.slice(0, 5).every(part => part === 0) && parts[5] === 0xffff
+    const mappedIpv4 = mapped ? [parts[6] >> 8, parts[6] & 255, parts[7] >> 8, parts[7] & 255] : null
+    return allZero || parts.every((part, index) => index === 7 ? part === 1 : part === 0) ||
+        first >= 0xfc00 && first <= 0xfdff ||
+        first >= 0xfe80 && first <= 0xfebf ||
+        first >= 0xff00 ||
+        first === 0x2001 && parts[1] === 0xdb8 ||
+        mapped && privateIpv4(mappedIpv4)
+}
+
+const validateFetchableUrl = value => {
+    try {
+        const url = new URL(String(value || '').trim())
+        const hostname = url.hostname.toLowerCase().replace(/\.$/, '')
+        const protocol = url.protocol.toLowerCase()
+        const blockedName = hostname === 'localhost' || hostname.endsWith('.localhost') ||
+            hostname.endsWith('.local') || hostname.endsWith('.internal') || hostname.endsWith('.intranet') ||
+            hostname === 'metadata' || hostname === 'metadata.google.internal' ||
+            hostname === 'instance-data' || hostname === 'host.docker.internal' || hostname.endsWith('.svc') ||
+            hostname === 'localtest.me' || hostname.endsWith('.localtest.me') ||
+            hostname.endsWith('.nip.io') || hostname.endsWith('.sslip.io') || hostname.endsWith('.lvh.me')
+        const address = ipv4Parts(hostname)
+        const ipv6 = ipv6Parts(hostname)
+        const isIp = Boolean(address || ipv6)
+
+        if (!['http:', 'https:'].includes(protocol) || !hostname || blockedName ||
+            !isIp && !hostname.includes('.') || privateIpv4(address) || privateIpv6(ipv6) ||
+            url.username || url.password || url.port && !((protocol === 'http:' && url.port === '80') || (protocol === 'https:' && url.port === '443')))
+            return { ok: false, code: 'url_not_public', message: 'Only public HTTP(S) URLs can be processed' }
+
+        return { ok: true, url }
+    } catch {
+        return { ok: false, code: 'url_not_public', message: 'Only public HTTP(S) URLs can be processed' }
+    }
+}
+
+const metadataFailure = (code, message, fatal = false) => Object.assign(new Error(message), { code, fatal })
+
+const readLimitedText = async response => {
+    const contentLength = Number(response.headers.get('Content-Length'))
+    if (Number.isSafeInteger(contentLength) && contentLength > metadataBodyLimit)
+        throw metadataFailure('metadata_too_large', 'The remote page is too large to process', true)
+    if (!response.body?.getReader) return (await response.text()).slice(0, metadataBodyLimit)
+
+    const reader = response.body.getReader()
+    const chunks = []
+    let size = 0
+    try {
+        let chunk
+        do {
+            chunk = await reader.read()
+            if (chunk.done) break
+            size += chunk.value.byteLength
+            if (size > metadataBodyLimit) {
+                await reader.cancel()
+                throw metadataFailure('metadata_too_large', 'The remote page is too large to process', true)
+            }
+            chunks.push(chunk.value)
+        } while (!chunk.done)
+    } finally {
+        reader.releaseLock?.()
+    }
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.byteLength
+    }
+    return new TextDecoder().decode(bytes)
+}
+
+const decodeHtml = value => String(value || '')
+    .replace(/&#(\d+);/g, (_, code) => Number(code) <= 0x10ffff ? String.fromCodePoint(Number(code)) : '')
+    .replace(/&#x([\da-f]+);/gi, (_, code) => parseInt(code, 16) <= 0x10ffff ? String.fromCodePoint(parseInt(code, 16)) : '')
+    .replace(/&quot;/gi, '"').replace(/&apos;/gi, String.fromCharCode(39))
+    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+    .replace(/<[^>]+>/g, '').trim()
+
+const htmlAttributes = tag => Object.fromEntries([...tag.matchAll(/([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)]
+    .map(match => [match[1].toLowerCase(), match[2] ?? match[3] ?? match[4] ?? '']))
+
+const parsePageMetadata = html => {
+    const tags = [...html.matchAll(/<meta\b[^>]*>/gi)].map(match => htmlAttributes(match[0]))
+    const meta = names => {
+        const tag = tags.find(item => names.includes(String(item.name || item.property || '').toLowerCase()))
+        return decodeHtml(tag?.content || '')
+    }
+    const title = decodeHtml(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '')
+    return {
+        ...(title ? { title: title.slice(0, 500) } : {}),
+        ...(meta(['description', 'og:description', 'twitter:description']) ? { description: meta(['description', 'og:description', 'twitter:description']).slice(0, 10000) } : {}),
+        ...(meta(['og:image', 'twitter:image']) ? { cover: meta(['og:image', 'twitter:image']).slice(0, 2000) } : {}),
+        ...(meta(['og:type']) ? { type: meta(['og:type']).slice(0, 100) } : {})
+    }
+}
+
+const fetchPageMetadata = async source => {
+    let current = validateFetchableUrl(source)
+    if (!current.ok) throw metadataFailure(current.code, current.message, true)
+
+    for (let redirect = 0; redirect <= metadataMaxRedirects; redirect++) {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), metadataFetchTimeoutMs)
+        let response
+        try {
+            response = await fetch(current.url, { redirect: 'manual', signal: controller.signal })
+        } catch {
+            throw metadataFailure('metadata_fetch_failed', 'The remote page could not be fetched')
+        } finally {
+            clearTimeout(timer)
+        }
+
+        if (response.status >= 300 && response.status < 400) {
+            const location = response.headers.get('Location')
+            if (!location || redirect === metadataMaxRedirects)
+                throw metadataFailure('metadata_redirect_failed', 'The remote page returned too many redirects', true)
+            let target
+            try {
+                target = new URL(location, current.url).toString()
+            } catch {
+                throw metadataFailure('metadata_redirect_failed', 'The remote page returned an invalid redirect', true)
+            }
+            const next = validateFetchableUrl(target)
+            if (!next.ok) throw metadataFailure('redirect_not_public', 'The remote page redirected to a private address', true)
+            current = next
+            continue
+        }
+        if (!response.ok) throw metadataFailure('metadata_upstream_error', 'The remote page returned an error')
+
+        const contentType = String(response.headers.get('Content-Type') || '').toLowerCase()
+        if (contentType && !contentType.includes('text/html') && !contentType.includes('application/xhtml+xml'))
+            return {}
+        return parsePageMetadata(await readLimitedText(response))
+    }
+    throw metadataFailure('metadata_redirect_failed', 'The remote page returned too many redirects', true)
+}
+
+const taskDate = value => value ? new Date(Number(value)).toISOString() : null
+
+const parseTaskMetadata = value => {
+    try {
+        const metadata = JSON.parse(value || '{}')
+        return metadata && typeof metadata === 'object' ? metadata : {}
+    } catch {
+        return {}
+    }
+}
+
+const publicTask = task => ({
+    id: String(task.id),
+    taskId: String(task.id),
+    type: task.type,
+    bookmarkId: Number(task.bookmark_id),
+    status: task.status,
+    progress: Number(task.progress || 0),
+    retryCount: Number(task.retry_count || 0),
+    attempts: task.status === 'queued' ? 0 : Number(task.retry_count || 0) + 1,
+    metadata: parseTaskMetadata(task.result_metadata),
+    failure: task.error_code ? { code: task.error_code, message: task.error_message } : null,
+    createdAt: taskDate(task.created_at),
+    updatedAt: taskDate(task.updated_at),
+    nextRetryAt: taskDate(task.next_retry_at),
+    completedAt: taskDate(task.completed_at)
+})
+
+const selectTask = async (env, taskId, userId = null) => {
+    try {
+        const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
+        const values = userId === null ? [taskId] : [taskId, userId]
+        return await env.DB.prepare(`SELECT id, user_id, bookmark_id, type, status, progress, retry_count,
+            result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at
+            FROM background_tasks WHERE ${where}`).bind(...values).first()
+    } catch {
+        return null
+    }
+}
+
+const taskPayload = task => ({ taskId: String(task.id), type: task.type })
+
+const enqueueTask = async (env, task) => {
+    if (!env.TASK_QUEUE?.send) return true
+    try {
+        await env.TASK_QUEUE.send(taskPayload(task))
+        return true
+    } catch {
+        try {
+            await env.DB.prepare(`UPDATE background_tasks SET status = 'dead_letter', progress = 0,
+                error_code = ?, error_message = ?, updated_at = ?, completed_at = ? WHERE id = ?`).bind(
+                'task_enqueue_failed', 'Background task could not be queued', Date.now(), Date.now(), task.id).run()
+        } catch {}
+        return false
+    }
+}
+
+const createMetadataTask = async (env, request, userId, bookmarkId, sourceUrl) => {
+    try {
+        const idempotencyKey = 'metadata:' + bookmarkId + ':' + await hmac(sourceUrl, env.SESSION_SECRET || 'task-key')
+        const now = Date.now()
+        const id = randomToken(18)
+        const inserted = await env.DB.prepare(`INSERT INTO background_tasks
+            (id, user_id, bookmark_id, type, status, progress, retry_count, idempotency_key, source_url, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'queued', 0, 0, ?, ?, ?, ?)
+            ON CONFLICT(idempotency_key) DO NOTHING`).bind(
+            id, userId, bookmarkId, metadataTaskType, idempotencyKey, sourceUrl, now, now).run()
+        let task = await selectTask(env, id, userId)
+        if (!task)
+            task = await env.DB.prepare('SELECT id, user_id, bookmark_id, type, status, progress, retry_count, result_metadata, error_code, error_message, next_retry_at, created_at, updated_at, completed_at FROM background_tasks WHERE idempotency_key = ? AND user_id = ?').bind(idempotencyKey, userId).first()
+        if (!task) return null
+
+        if (Number(inserted?.meta?.changes || 0) === 1) {
+            await enqueueTask(env, task)
+            task = await selectTask(env, task.id, userId) || task
+            if (request) await recordAudit(env, request, { userId, action: 'task.created', resourceType: 'background_task', resourceId: task.id, outcome: 'success' })
+        }
+        return task
+    } catch {
+        return null
+    }
+}
+
+const taskFailureDetails = failure => {
+    const messages = {
+        metadata_fetch_failed: 'The remote page could not be fetched',
+        metadata_upstream_error: 'The remote page returned an error',
+        metadata_redirect_failed: 'The remote page returned too many redirects',
+        redirect_not_public: 'The remote page redirected to a private address',
+        metadata_too_large: 'The remote page is too large to process'
+    }
+    const code = messages[failure?.code] ? failure.code : 'metadata_failed'
+    return { code, message: messages[code] || 'Metadata enrichment failed' }
+}
+
+const taskRequest = (env, taskId) => {
+    try {
+        return new Request(new URL('/v1/tasks/' + encodeURIComponent(taskId), env.API_ORIGIN || 'https://worker.invalid'))
+    } catch {
+        return new Request('https://worker.invalid/v1/tasks/' + encodeURIComponent(taskId))
+    }
+}
+
+const markTaskFailure = async (env, task, failure) => {
+    const now = Date.now()
+    const details = taskFailureDetails(failure)
+    const retryCount = Number(task.retry_count || 0) + 1
+    if (!failure?.fatal && retryCount <= metadataMaxRetries) {
+        const delaySeconds = metadataRetryDelays[retryCount - 1]
+        await env.DB.prepare(`UPDATE background_tasks SET status = 'retrying', progress = 10,
+            retry_count = ?, error_code = ?, error_message = ?, next_retry_at = ?, updated_at = ?
+            WHERE id = ? AND status = 'processing'`).bind(
+            retryCount, details.code, details.message, now + delaySeconds * 1000, now, task.id).run()
+        return { action: 'retry', delaySeconds }
+    }
+
+    await env.DB.prepare(`UPDATE background_tasks SET status = 'dead_letter', progress = 0,
+        retry_count = ?, error_code = ?, error_message = ?, next_retry_at = NULL,
+        updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`).bind(
+        Math.min(metadataMaxRetries, retryCount), details.code, details.message, now, now, task.id).run()
+    await recordAlert(env, taskRequest(env, task.id), {
+        userId: task.user_id,
+        kind: 'metadata_enrichment_failed',
+        metadata: { taskId: task.id, code: details.code, retryCount: Math.min(metadataMaxRetries, retryCount) }
+    })
+    return { action: 'dead_letter', failure: details }
+}
+
+const claimTask = async (env, taskId) => {
+    const task = await selectTask(env, taskId)
+    if (!task || task.type !== metadataTaskType) return { action: 'skip' }
+    if (['succeeded', 'dead_letter'].includes(task.status)) return { action: 'skip' }
+    if (task.status === 'retrying' && task.next_retry_at > Date.now())
+        return { action: 'defer', delaySeconds: Math.max(1, Math.ceil((task.next_retry_at - Date.now()) / 1000)) }
+    const now = Date.now()
+    const claimed = await env.DB.prepare(`UPDATE background_tasks SET status = 'processing', progress = 10,
+        next_retry_at = NULL, updated_at = ? WHERE id = ? AND status IN ('queued', 'retrying')
+        AND (next_retry_at IS NULL OR next_retry_at <= ?)`).bind(now, taskId, now).run()
+    if (Number(claimed?.meta?.changes || 0) !== 1) return { action: 'skip' }
+    return { action: 'process', task }
+}
+
+const processMetadataTask = async (env, taskId) => {
+    const claimed = await claimTask(env, taskId)
+    if (claimed.action !== 'process') return claimed
+
+    try {
+        const metadata = await fetchPageMetadata(claimed.task.source_url)
+        const bookmark = await env.DB.prepare('SELECT id, title, description FROM bookmarks WHERE id = ? AND user_id = ? AND removed_at IS NULL')
+            .bind(claimed.task.bookmark_id, claimed.task.user_id).first()
+        if (bookmark && (metadata.title && !bookmark.title || metadata.description && !bookmark.description)) {
+            await env.DB.prepare(`UPDATE bookmarks SET
+                title = CASE WHEN title = '' THEN ? ELSE title END,
+                description = CASE WHEN description = '' THEN ? ELSE description END,
+                updated_at = ? WHERE id = ? AND user_id = ? AND removed_at IS NULL`).bind(
+                metadata.title || '', metadata.description || '', Date.now(), claimed.task.bookmark_id, claimed.task.user_id).run()
+        }
+        const now = Date.now()
+        await env.DB.prepare(`UPDATE background_tasks SET status = 'succeeded', progress = 100,
+            result_metadata = ?, error_code = NULL, error_message = NULL, next_retry_at = NULL,
+            updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`).bind(
+            JSON.stringify(metadata), now, now, taskId).run()
+        return { action: 'ack' }
+    } catch (failure) {
+        return markTaskFailure(env, claimed.task, failure)
+    }
+}
+
+const retryDeadLetterTask = async (env, request, task, userId) => {
+    const now = Date.now()
+    const updated = await env.DB.prepare(`UPDATE background_tasks SET status = 'queued', progress = 0,
+        retry_count = 0, result_metadata = '{}', error_code = NULL, error_message = NULL,
+        next_retry_at = NULL, updated_at = ?, completed_at = NULL
+        WHERE id = ? AND user_id = ? AND type = ? AND status = 'dead_letter'`).bind(
+        now, task.id, userId, metadataTaskType).run()
+    if (Number(updated?.meta?.changes || 0) !== 1)
+        return { task, status: 409 }
+    let next = await selectTask(env, task.id, userId)
+    if (!next) return { task, status: 404 }
+    if (!await enqueueTask(env, next)) next = await selectTask(env, task.id, userId) || next
+    await recordAudit(env, request, { userId, action: 'task.retry', resourceType: 'background_task', resourceId: task.id, outcome: 'success' })
+    return { task: next, status: 202 }
+}
+
 const collectionItem = item => ({
     _id: Number(item.id),
     title: item.title,
@@ -419,7 +784,8 @@ const auditRoute = request => {
         [/^\/v1\/raindrops\/-?\d+$/, '/v1/raindrops/:collectionId'],
         [/^\/v1\/tags\/-?\d+$/, '/v1/tags/:collectionId'],
         [/^\/v1\/filters\/-?\d+$/, '/v1/filters/:collectionId'],
-        [/^\/v1\/sessions\/[^/]+$/, '/v1/sessions/:id']
+        [/^\/v1\/sessions\/[^/]+$/, '/v1/sessions/:id'],
+        [/^\/v1\/tasks\/[^/]+(?:\/(?:status|failure|retry))?$/, '/v1/tasks/:id']
     ]
     const match = patterns.find(([pattern]) => pattern.test(pathname))
     if (match) return pathname.replace(match[0], match[1])
@@ -431,6 +797,7 @@ const auditRoute = request => {
         '/v1/collection', '/v1/tags/recent', '/v1/tags/0', '/v1/tag',
         '/v1/raindrops', '/v1/raindrops/changes', '/v1/raindrop', '/v1/user', '/v1/user/quota',
         '/v1/user/connect/google', '/v1/user/connect/google/revoke', '/v1/user/deletion',
+        '/v1/tasks',
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats'
     ])
     return known.has(pathname) ? pathname : '/v1/unknown'
@@ -711,6 +1078,7 @@ const deleteUserData = async (env, userId) => {
         env.DB.prepare('DELETE FROM connected_identities WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM oauth_states WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM collection_collaborators WHERE collection_id IN (SELECT id FROM collections WHERE user_id = ?) OR user_id = ?').bind(userId, userId),
+        env.DB.prepare('DELETE FROM background_tasks WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM bookmark_changes WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM bookmarks WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM collections WHERE user_id = ?').bind(userId),
@@ -1011,6 +1379,29 @@ export default {
                 } }, 200, request, env)
             }
 
+            const taskMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(status|failure|retry))?$/)
+            if (taskMatch) {
+                const task = await selectTask(env, decodeURIComponent(taskMatch[1]), session.user_id)
+                if (!task) return error('task_not_found', 404, request, env, 'Background task was not found')
+                const action = taskMatch[2]
+                if (request.method === 'GET' && action !== 'retry') {
+                    const item = publicTask(task)
+                    return action === 'failure'
+                        ? json({ result: true, taskId: item.id, status: item.status, failure: item.failure }, 200, request, env)
+                        : json({ result: true, task: item }, 200, request, env)
+                }
+                if (request.method === 'POST' && action === 'retry') {
+                    if (task.type !== metadataTaskType)
+                        return error('task_not_retryable', 400, request, env, 'This background task cannot be retried')
+                    const retried = await retryDeadLetterTask(env, request, task, session.user_id)
+                    if (retried.status === 409)
+                        return error('task_not_retryable', 409, request, env, 'Only failed background tasks can be retried')
+                    if (retried.status === 404)
+                        return error('task_not_found', 404, request, env, 'Background task was not found')
+                    return json({ result: true, task: publicTask(retried.task) }, 202, request, env)
+                }
+            }
+
             if (url.pathname === '/v1/user/stats' && request.method === 'GET') {
                 const rows = await env.DB.prepare(`SELECT
                     SUM(CASE WHEN removed_at IS NULL THEN 1 ELSE 0 END) AS all_count,
@@ -1120,6 +1511,7 @@ export default {
                         const bookmarkIds = (removed.results || []).map(item => Number(item.id))
                         if (bookmarkIds.length) {
                             const placeholders = bookmarkIds.map(() => '?').join(',')
+                            await env.DB.prepare(`DELETE FROM background_tasks WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                             await env.DB.prepare(`DELETE FROM bookmark_changes WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                             await env.DB.prepare(`DELETE FROM bookmarks WHERE user_id = ? AND id IN (${placeholders}) AND removed_at IS NOT NULL`).bind(session.user_id, ...bookmarkIds).run()
                         }
@@ -1207,6 +1599,7 @@ export default {
                     const bookmarkIds = (removed.results || []).map(item => Number(item.id))
                     if (bookmarkIds.length) {
                         const placeholders = bookmarkIds.map(() => '?').join(',')
+                        await env.DB.prepare(`DELETE FROM background_tasks WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                         await env.DB.prepare(`DELETE FROM bookmark_changes WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                         await env.DB.prepare(`DELETE FROM bookmarks WHERE user_id = ? AND id IN (${placeholders}) AND removed_at IS NOT NULL`).bind(session.user_id, ...bookmarkIds).run()
                     }
@@ -1272,11 +1665,12 @@ export default {
                 if (!Array.isArray(data.items) || !data.items.length)
                     return error('validation_failed', 400, request, env, 'Provide at least one bookmark')
                 const items = []
+                const tasks = []
                 for (const input of data.items) {
                     const link = String(input.link || input.url || '').trim()
                     const title = String(input.title || '').trim()
-                    if (!['http:', 'https:'].includes((() => { try { return new URL(link).protocol } catch { return '' } })()))
-                        return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL')
+                    const urlCheck = validateFetchableUrl(link)
+                    if (!urlCheck.ok) return error(urlCheck.code, 400, request, env, urlCheck.message)
                     if (input.tags !== undefined && !validTagList(input.tags))
                         return error('validation_failed', 400, request, env, 'Bookmark tags must be 100 characters or fewer')
                     const description = String(input.description ?? input.excerpt ?? '').trim()
@@ -1294,23 +1688,20 @@ export default {
                     const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
                         .bind(inserted.meta.last_row_id, session.user_id).first()
                     items.push(bookmarkItem(item || { id: inserted.meta.last_row_id, url: link, title, description, note, highlights: JSON.stringify(highlights), created_at: now, updated_at: now, collection_id: collectionId, tags: JSON.stringify(tags), removed_at: null }))
+                    const task = await createMetadataTask(env, request, session.user_id, inserted.meta.last_row_id, link)
+                    if (task) tasks.push(publicTask(task))
                     await recordAudit(env, request, { userId: session.user_id, action: 'bookmark.create_bulk', resourceType: 'bookmark', resourceId: inserted.meta.last_row_id, outcome: 'success' })
                 }
-                return json({ result: true, items, ...(await bookmarkSync(env, session.user_id)) }, 201, request, env)
+                return json({ result: true, items, tasks, ...(await bookmarkSync(env, session.user_id)) }, 201, request, env)
             }
 
             if (url.pathname === '/v1/raindrop' && request.method === 'POST') {
                 const { data } = await readBody(request)
                 const bookmarkUrl = String(data.link || data.url || '').trim()
                 const title = String(data.title || '').trim()
-                let protocol
-                try {
-                    protocol = new URL(bookmarkUrl).protocol
-                } catch {
-                    protocol = ''
-                }
-                if (!['http:', 'https:'].includes(protocol) || title.length > 500)
-                    return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL and a title under 500 characters')
+                const urlCheck = validateFetchableUrl(bookmarkUrl)
+                if (!urlCheck.ok || title.length > 500)
+                    return error(urlCheck.ok ? 'validation_failed' : urlCheck.code, 400, request, env, urlCheck.ok ? 'Enter an HTTP(S) bookmark URL and a title under 500 characters' : urlCheck.message)
                 if (data.tags !== undefined && !validTagList(data.tags))
                     return error('validation_failed', 400, request, env, 'Bookmark tags must be 100 characters or fewer')
                 const description = String(data.description ?? data.excerpt ?? '').trim()
@@ -1328,10 +1719,12 @@ export default {
                     .bind(session.user_id, bookmarkUrl, title, description, note, JSON.stringify(applyHighlightChanges('[]', highlights)), now, now, collectionId, JSON.stringify(tags)).run()
                 const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
                     .bind(inserted.meta.last_row_id, session.user_id).first()
+                const task = await createMetadataTask(env, request, session.user_id, inserted.meta.last_row_id, bookmarkUrl)
                 await recordAudit(env, request, { userId: session.user_id, action: 'bookmark.create', resourceType: 'bookmark', resourceId: inserted.meta.last_row_id, outcome: 'success' })
                 return json({
                     result: true,
                     item: bookmarkItem(item || { id: inserted.meta.last_row_id, url: bookmarkUrl, title, description, note, highlights: JSON.stringify(highlights), created_at: now, updated_at: now, collection_id: collectionId, tags: JSON.stringify(tags), removed_at: null }),
+                    ...(task ? { task: publicTask(task), taskId: String(task.id) } : {}),
                     ...(await bookmarkSync(env, session.user_id))
                 }, 201, request, env)
             }
@@ -1374,14 +1767,9 @@ export default {
                     const highlights = data.highlights === undefined ? bookmarkHighlights(existing.highlights) : data.highlights
                     if (data.collectionId === undefined && data.removed === false && collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId))
                         collectionId = -1
-                    let protocol
-                    try {
-                        protocol = new URL(link).protocol
-                    } catch {
-                        protocol = ''
-                    }
-                    if (!['http:', 'https:'].includes(protocol) || title.length > 500 || description.length > 10000 || note.length > 10000)
-                        return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL and a title under 500 characters')
+                    const urlCheck = validateFetchableUrl(link)
+                    if (!urlCheck.ok || title.length > 500 || description.length > 10000 || note.length > 10000)
+                        return error(urlCheck.ok ? 'validation_failed' : urlCheck.code, 400, request, env, urlCheck.ok ? 'Enter an HTTP(S) bookmark URL and a title under 500 characters' : urlCheck.message)
                     if (data.tags !== undefined && !validTagList(data.tags))
                         return error('validation_failed', 400, request, env, 'Bookmark tags must be 100 characters or fewer')
                     if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
@@ -1391,8 +1779,11 @@ export default {
                     await env.DB.prepare('UPDATE bookmarks SET url = ?, title = ?, description = ?, note = ?, collection_id = ?, tags = ?, highlights = ?, removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
                         .bind(link, title, description, note, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)), removedAt, removedBatch, Date.now(), bookmarkId, session.user_id).run()
                     const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, session.user_id).first()
+                    const task = link !== existing.url
+                        ? await createMetadataTask(env, request, session.user_id, bookmarkId, link)
+                        : null
                     await recordAudit(env, request, { userId: session.user_id, action: data.removed === false ? 'bookmark.restore' : 'bookmark.update', resourceType: 'bookmark', resourceId: bookmarkId, outcome: 'success' })
-                    return json({ result: true, item: bookmarkItem(item), ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
+                    return json({ result: true, item: bookmarkItem(item), ...(task ? { task: publicTask(task), taskId: String(task.id) } : {}), ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }
                 if (request.method === 'DELETE') {
                     const now = Date.now()
@@ -1483,7 +1874,38 @@ export default {
         return error('not_found', 404, request, env)
     },
 
+    async queue(batch, env) {
+        for (const message of batch.messages) {
+            let body
+            try {
+                body = typeof message.body === 'string' ? JSON.parse(message.body) : message.body
+            } catch {
+                message.ack?.()
+                continue
+            }
+            if (!body?.taskId) {
+                message.ack?.()
+                continue
+            }
+            try {
+                const result = await processMetadataTask(env, body.taskId)
+                if (result.action === 'retry') message.retry?.({ delaySeconds: result.delaySeconds })
+                else if (result.action === 'defer') message.retry?.({ delaySeconds: result.delaySeconds })
+                else if (result.action === 'dead_letter') {
+                    try {
+                        await env.TASK_DLQ?.send({ taskId: body.taskId, type: body.type || metadataTaskType, failure: result.failure })
+                    } catch {}
+                    message.ack?.()
+                } else message.ack?.()
+            } catch {
+                message.retry?.({ delaySeconds: metadataRetryDelays[0] })
+            }
+        }
+    },
+
     async scheduled(controller, env, ctx) {
         ctx.waitUntil(Promise.all([purgeExpiredDeletions(env), purgeAccounting(env)]))
     }
 }
+
+export { createMetadataTask, fetchPageMetadata, processMetadataTask, validateFetchableUrl }

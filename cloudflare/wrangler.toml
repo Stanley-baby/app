@@ -41,6 +41,13 @@ queue = "raindrop-tasks-local"
 binding = "TASK_DLQ"
 queue = "raindrop-tasks-dlq-local"
 
+[[queues.consumers]]
+queue = "raindrop-tasks-local"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "raindrop-tasks-dlq-local"
+
 [ai]
 binding = "AI"
 
@@ -82,6 +89,13 @@ queue = "raindrop-tasks-preview"
 binding = "TASK_DLQ"
 queue = "raindrop-tasks-dlq-preview"
 
+[[env.preview.queues.consumers]]
+queue = "raindrop-tasks-preview"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "raindrop-tasks-dlq-preview"
+
 [env.preview.ai]
 binding = "AI"
 
@@ -122,6 +136,13 @@ queue = "raindrop-tasks-beta"
 [[env.beta.queues.producers]]
 binding = "TASK_DLQ"
 queue = "raindrop-tasks-dlq-beta"
+
+[[env.beta.queues.consumers]]
+queue = "raindrop-tasks-beta"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "raindrop-tasks-dlq-beta"
 
 [env.beta.ai]
 binding = "AI"
@@ -167,6 +188,13 @@ queue = "raindrop-tasks-production"
 [[env.production.queues.producers]]
 binding = "TASK_DLQ"
 queue = "raindrop-tasks-dlq-production"
+
+[[env.production.queues.consumers]]
+queue = "raindrop-tasks-production"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "raindrop-tasks-dlq-production"
 
 [env.production.ai]
 binding = "AI"
