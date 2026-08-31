@@ -40,12 +40,18 @@ with backoff, then marks the task `dead_letter` and exposes `POST
 When `FETCH_DNS_RESOLVER` is configured, each hostname is resolved over HTTPS
 and private or non-public A/AAAA answers are rejected before the fetch.
 
-Protected content is stored only in the private `CONTENT_BUCKET`. Uploads are
-limited to `ATTACHMENT_MAX_BYTES` (50 MiB in every profile), start quarantined,
-and enqueue an `attachment_scan` task. Set `SCANNER_URL` and
+Protected content is stored only in the private `CONTENT_BUCKET`. When
+`ATTACHMENT_SCAN_ENABLED=true`, uploads are limited to `ATTACHMENT_MAX_BYTES`
+(50 MiB in every profile), start quarantined, and enqueue an `attachment_scan`
+task. Set `SCANNER_URL` and
 `SCANNER_API_KEY` as Worker secrets for a scanner that returns `clean: true` or
 an approved/cleared status before downloads become available. `POST
 /v1/raindrop/:id/capture` is the only path that creates a Dynamic Capture task;
 the Beta Worker uses the `BROWSER` Browser Run binding, stores the result
 privately, and applies the same safety check.
 Downloads use `/v1/content/:id/download` and never expose an R2 object URL.
+
+Beta currently sets `ATTACHMENT_SCAN_ENABLED=false`, so attachments remain
+private but are marked Cleared immediately and do not enqueue a scanner task.
+Set it to `true` before enabling `SCANNER_URL` and `SCANNER_API_KEY` for
+quarantine-first uploads.

@@ -23,6 +23,7 @@ USAGE_QUOTA_DAILY = "1000"
 RATE_LIMIT_PER_MINUTE = "60"
 FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 ATTACHMENT_MAX_BYTES = "52428800"
+ATTACHMENT_SCAN_ENABLED = "true"
 
 [[d1_databases]]
 binding = "DB"
@@ -76,6 +77,7 @@ USAGE_QUOTA_DAILY = "1000"
 RATE_LIMIT_PER_MINUTE = "60"
 FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 ATTACHMENT_MAX_BYTES = "52428800"
+ATTACHMENT_SCAN_ENABLED = "true"
 
 [[env.preview.d1_databases]]
 binding = "DB"
@@ -129,6 +131,7 @@ USAGE_QUOTA_DAILY = "1000"
 RATE_LIMIT_PER_MINUTE = "60"
 FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 ATTACHMENT_MAX_BYTES = "52428800"
+ATTACHMENT_SCAN_ENABLED = "false"
 
 [[env.beta.d1_databases]]
 binding = "DB"
@@ -186,6 +189,7 @@ USAGE_QUOTA_DAILY = "1000"
 RATE_LIMIT_PER_MINUTE = "60"
 FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
 ATTACHMENT_MAX_BYTES = "52428800"
+ATTACHMENT_SCAN_ENABLED = "true"
 
 [[env.production.d1_databases]]
 binding = "DB"

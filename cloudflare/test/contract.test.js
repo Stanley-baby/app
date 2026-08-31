@@ -23,6 +23,8 @@ test('environment profiles keep origins, resources, and secret scopes separate',
     unique(profiles.map(profile => profile.aiPageOrigin))
     unique(profiles.map(profile => profile.workerName))
     unique(profiles.map(profile => profile.secretScope))
+    assert.equal(environments.beta.attachmentScanEnabled, false)
+    assert.equal(profiles.filter(profile => profile !== environments.beta).every(profile => profile.attachmentScanEnabled), true)
 
     const resourceNames = profiles.flatMap(profile => Object.values(profile.resourceNames))
     assert.equal(new Set(resourceNames).size, resourceNames.length)

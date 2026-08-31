@@ -58,8 +58,8 @@ class ContentDatabase {
                 return { meta: { last_row_id: item.id, changes: 1 } }
             }
             if (sql.includes('INSERT INTO content_objects')) {
-                const [id, userId, bookmarkId, kind, objectKey, filename, contentType, size, createdAt, updatedAt] = values
-                this.contents.push({ id, user_id: userId, bookmark_id: bookmarkId, kind, status: 'quarantined', object_key: objectKey, filename, content_type: contentType, size_bytes: size, created_at: createdAt, updated_at: updatedAt, cleared_at: null })
+                const [id, userId, bookmarkId, kind, status, objectKey, filename, contentType, size, createdAt, updatedAt, clearedAt] = values
+                this.contents.push({ id, user_id: userId, bookmark_id: bookmarkId, kind, status, object_key: objectKey, filename, content_type: contentType, size_bytes: size, created_at: createdAt, updated_at: updatedAt, cleared_at: clearedAt })
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('INSERT INTO background_tasks')) {
@@ -172,6 +172,23 @@ test('uploads stay quarantined until the scanner clears them and never expose an
     const cleared = await worker.fetch(request('/v1/content/' + body.content.id + '/download', { headers: { Cookie: cookie } }), env)
     assert.equal(cleared.status, 200)
     assert.equal(await cleared.text(), 'private attachment')
+})
+
+test('attachments can bypass scanning when the Beta switch is disabled', async () => {
+    const db = new ContentDatabase()
+    const bucket = new MemoryBucket()
+    const queue = { messages: [], send: async message => queue.messages.push(message) }
+    const env = { ...envFor(db, bucket, queue), ATTACHMENT_SCAN_ENABLED: 'false' }
+    const form = new FormData()
+    form.append('file', new Blob(['unscanned attachment'], { type: 'text/plain' }), 'unscanned.txt')
+    const uploaded = await worker.fetch(request('/v1/raindrop/file', { method: 'PUT', headers: { Cookie: cookie }, body: form }), env)
+    assert.equal(uploaded.status, 201)
+    const body = await uploaded.json()
+    assert.equal(body.content.status, 'cleared')
+    assert.equal(queue.messages.length, 0)
+    const downloaded = await worker.fetch(request('/v1/content/' + body.content.id + '/download', { headers: { Cookie: cookie } }), env)
+    assert.equal(downloaded.status, 200)
+    assert.equal(await downloaded.text(), 'unscanned attachment')
 })
 
 test('capture tasks are created only by an explicit request and are safety checked', async t => {

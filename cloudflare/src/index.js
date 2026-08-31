@@ -66,6 +66,10 @@ const attachmentMaxBytes = env => Math.min(
     integerEnv(env, ['ATTACHMENT_MAX_BYTES', 'CONTENT_MAX_BYTES'], contentBodyLimit)
 )
 
+const attachmentScanEnabled = env => !['false', '0', 'off', 'no'].includes(
+    String(env.ATTACHMENT_SCAN_ENABLED ?? 'true').trim().toLowerCase()
+)
+
 const retryableError = (code, request, env, errorMessage, retryAfterMs, details = {}) => {
     const retryAfter = Math.max(1, Math.ceil(retryAfterMs / 1000))
     const retryAt = details.retryAt || new Date(Date.now() + retryAfter * 1000).toISOString()
@@ -755,7 +759,7 @@ const putContentObject = async (env, content, body, metadata = {}) => {
         customMetadata: {
             contentId: String(content.id),
             bookmarkId: String(content.bookmark_id),
-            status: 'quarantined'
+            status: content.status
         }
     })
 }
@@ -1008,6 +1012,16 @@ const processAttachmentScanTask = async (env, taskId) => {
     try {
         const content = await selectContent(env, claimed.task.content_id)
         if (!content) throw metadataFailure('content_missing', 'Protected content is no longer available', true)
+        if (!attachmentScanEnabled(env)) {
+            const now = Date.now()
+            await env.DB.prepare(`UPDATE content_objects SET status = 'cleared', updated_at = ?, cleared_at = ?
+                WHERE id = ? AND status = 'quarantined'`).bind(now, now, content.id).run()
+            await env.DB.prepare(`UPDATE background_tasks SET status = 'succeeded', progress = 100,
+                result_metadata = ?, error_code = NULL, error_message = NULL, next_retry_at = NULL,
+                updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`).bind(
+                JSON.stringify({ contentId: content.id, status: 'cleared', scanned: false }), now, now, taskId).run()
+            return { action: 'ack' }
+        }
         const result = await scanStoredContent(env, content)
         const now = Date.now()
         await env.DB.prepare(`UPDATE background_tasks SET status = 'succeeded', progress = 100,
@@ -1054,14 +1068,15 @@ const processTask = async (env, taskId, type) => {
     return { action: 'skip' }
 }
 
-const createContentRecord = async (env, { userId, bookmarkId, kind, filename, contentType, size }) => {
+const createContentRecord = async (env, { userId, bookmarkId, kind, filename, contentType, size, status = 'quarantined' }) => {
     const id = randomToken(18)
     const objectKey = 'content/' + userId + '/' + id
     const now = Date.now()
     await env.DB.prepare(`INSERT INTO content_objects
-        (id, user_id, bookmark_id, kind, status, object_key, filename, content_type, size_bytes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'quarantined', ?, ?, ?, ?, ?, ?)`)
-        .bind(id, userId, bookmarkId, kind, objectKey, safeFilename(filename), safeContentType(contentType), size, now, now).run()
+        (id, user_id, bookmark_id, kind, status, object_key, filename, content_type, size_bytes, created_at, updated_at, cleared_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(id, userId, bookmarkId, kind, status === 'cleared' ? 'cleared' : 'quarantined', objectKey,
+            safeFilename(filename), safeContentType(contentType), size, now, now, status === 'cleared' ? now : null).run()
     return selectContent(env, id)
 }
 
@@ -1911,6 +1926,7 @@ export default {
             const uploadContentFile = (url.pathname === '/v1/content/upload' || attachmentMatch) && ['POST', 'PUT'].includes(request.method)
             if (uploadBookmarkFile || uploadContentFile) {
                 const upload = await readUpload(request, attachmentMaxBytes(env))
+                const scanEnabled = attachmentScanEnabled(env)
                 if (upload.error === 'content_too_large')
                     return error('content_too_large', 413, request, env, 'The uploaded file exceeds the 50 MB limit')
                 if (upload.error)
@@ -1957,13 +1973,19 @@ export default {
                         kind: 'attachment',
                         filename: upload.filename,
                         contentType: upload.contentType,
-                        size: upload.size
+                        size: upload.size,
+                        status: scanEnabled ? 'quarantined' : 'cleared'
                     })
                     await putContentObject(env, content, upload.body, upload)
                 } catch {
                     try { await removeContentRecord(env, content) } catch {}
                     if (createdBookmark) await env.DB.prepare('DELETE FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmark.id, session.user_id).run()
                     return error('content_upload_failed', 503, request, env, 'The file could not be stored')
+                }
+
+                if (!scanEnabled) {
+                    await recordAudit(env, request, { userId: session.user_id, action: 'content.upload', resourceType: 'content', resourceId: content.id, outcome: 'scan_skipped' })
+                    return json({ result: true, item: bookmarkItem(bookmark), content: publicContent(content) }, 201, request, env)
                 }
 
                 const task = await createContentTask(env, request, {

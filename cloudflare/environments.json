@@ -34,7 +34,8 @@
             "SCANNER_URL",
             "SCANNER_API_KEY"
         ],
-        "attachmentMaxBytes": 52428800
+        "attachmentMaxBytes": 52428800,
+        "attachmentScanEnabled": true
     },
     "preview": {
         "workerName": "raindrop-api-preview",
@@ -69,7 +70,8 @@
             "SCANNER_URL",
             "SCANNER_API_KEY"
         ],
-        "attachmentMaxBytes": 52428800
+        "attachmentMaxBytes": 52428800,
+        "attachmentScanEnabled": true
     },
     "beta": {
         "workerName": "raindrop-api-beta",
@@ -104,7 +106,8 @@
             "SCANNER_URL",
             "SCANNER_API_KEY"
         ],
-        "attachmentMaxBytes": 52428800
+        "attachmentMaxBytes": 52428800,
+        "attachmentScanEnabled": false
     },
     "production": {
         "workerName": "raindrop-api-production",
@@ -139,6 +142,7 @@
             "SCANNER_URL",
             "SCANNER_API_KEY"
         ],
-        "attachmentMaxBytes": 52428800
+        "attachmentMaxBytes": 52428800,
+        "attachmentScanEnabled": true
     }
 }
