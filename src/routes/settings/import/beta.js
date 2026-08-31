@@ -78,14 +78,14 @@ export default function BetaMigration() {
         const restore = async () => {
             try {
                 const result = await request('/v1/import')
-                const current = (result.items || []).find(item => ['review', 'queued', 'processing', 'retrying'].includes(item.status))
+                const current = (result.items || []).find(item => ['review', 'queued', 'processing', 'retrying', 'dead_letter'].includes(item.status))
                 if (!current || !active) return
                 const detail = await request('/v1/import/' + encodeURIComponent(current.archiveId) + '/status')
                 if (!active) return
                 const duplicates = detail.duplicates || current.duplicates || []
                 const decisions = Object.fromEntries(duplicates.filter(item => item.decision).map(item => [item.sourceId, item.decision]))
                 const task = detail.task || current.task
-                const phase = current.status === 'review' ? 'review' : 'processing'
+                const phase = current.status === 'review' ? 'review' : current.status === 'dead_letter' || task?.status === 'dead_letter' ? 'error' : 'processing'
                 setState({ phase, archiveId: current.archiveId, preflight: { counts: current.counts, duplicates, unresolvedDuplicates: duplicates.filter(item => !item.decision).length }, decisions, task, error: '' })
                 if (phase === 'processing' && task?.id)
                     window.setTimeout(() => pollRef.current?.(task.id, current.archiveId), 0)
@@ -110,6 +110,14 @@ export default function BetaMigration() {
         } catch (error) { fail(error) }
     }
 
+    const retry = async () => {
+        try {
+            const result = await request('/v1/import/' + encodeURIComponent(state.archiveId) + '/retry', { method: 'POST' })
+            setState(current => ({ ...current, phase: 'processing', task: result.task, error: '' }))
+            poll(result.taskId, state.archiveId)
+        } catch (error) { fail(error) }
+    }
+
     const reset = () => {
         window.clearTimeout(timer.current)
         setState({ phase: 'idle', archiveId: '', preflight: null, decisions: {}, task: null, error: '' })
@@ -129,7 +137,7 @@ export default function BetaMigration() {
                 </Button>
             )}
             {state.phase === 'loading' && <Alert>Preparing Migration Preflight…</Alert>}
-            {state.preflight && ['review', 'processing', 'success'].includes(state.phase) && (
+            {state.preflight && ['review', 'processing', 'success', 'error'].includes(state.phase) && (
                 <>
                     <Alert>
                         {state.preflight.counts?.collections || 0} collections, {state.preflight.counts?.bookmarks || 0} bookmarks, {state.preflight.counts?.assets || 0} protected files
@@ -158,6 +166,7 @@ export default function BetaMigration() {
                         </Progress>
                     )}
                     {state.phase === 'success' && <Alert variant='success'>Migration Archive imported successfully.</Alert>}
+                    {state.phase === 'error' && state.task?.status === 'dead_letter' && <Button variant='primary' onClick={retry}>Retry import</Button>}
                 </>
             )}
             {state.error && <Alert variant='warning'>{state.error}</Alert>}

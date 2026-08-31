@@ -1256,6 +1256,20 @@ const retryDeadLetterTask = async (env, request, task, userId) => {
     return { task: next, status: 202 }
 }
 
+const ensureContentScanTask = async (env, { userId, bookmarkId, contentId, sourceUrl, kind }) => {
+    let task = await createContentTask(env, null, {
+        userId,
+        bookmarkId,
+        type: attachmentTaskType,
+        contentId,
+        sourceUrl,
+        payload: { kind }
+    })
+    if (task?.status === 'dead_letter')
+        task = (await retryDeadLetterTask(env, null, task, userId)).task
+    return task && task.status !== 'dead_letter' ? task : null
+}
+
 const migrationMaxBytes = env => Math.min(
     migrationDefaultMaxBytes,
     integerEnv(env, ['MIGRATION_MAX_BYTES', 'IMPORT_MAX_BYTES'], migrationDefaultMaxBytes)
@@ -1559,6 +1573,16 @@ const processMigrationTask = async (env, taskId) => {
                 const cover = String(env.API_ORIGIN || '').replace(/\/+$/, '') + '/v1/content/' + encodeURIComponent(String(content.id)) + '/download'
                 await env.DB.prepare('UPDATE bookmarks SET cover = ?, updated_at = ? WHERE id = ? AND user_id = ?')
                     .bind(cover, Date.now(), bookmark.resourceId, task.user_id).run()
+            }
+            if (attachmentScanEnabled(env)) {
+                const scanTask = await ensureContentScanTask(env, {
+                    userId: task.user_id,
+                    bookmarkId: bookmark.resourceId,
+                    contentId: content.id,
+                    sourceUrl: 'content://' + content.id,
+                    kind
+                })
+                if (!scanTask) throw metadataFailure('content_task_unavailable', 'The content safety check could not be queued', true)
             }
             await addMigrationMapping(env, {
                 archiveId,

@@ -83,6 +83,11 @@ class MigrationDatabase {
                 if (item) item.cover = values[0]
                 return { meta: { changes: item ? 1 : 0 } }
             }
+            if (sql.includes('UPDATE content_objects SET status = \'cleared\'')) {
+                const item = this.contents?.find(item => item.id === values[2])
+                if (item) Object.assign(item, { status: 'cleared', updated_at: values[0], cleared_at: values[1] })
+                return { meta: { changes: item ? 1 : 0 } }
+            }
             if (sql.includes('INSERT INTO migration_archives')) {
                 const [id, userId, source, archiveJson, preflightJson, collectionCount, bookmarkCount, assetCount, totalItems, createdAt, updatedAt] = values
                 this.archives.push({ id, user_id: userId, source, archive_json: archiveJson, preflight_json: preflightJson, review_json: '{}', status: 'review', collection_count: collectionCount, bookmark_count: bookmarkCount, asset_count: assetCount, total_items: totalItems, completed_items: 0, task_id: null, error_code: null, error_message: null, created_at: createdAt, updated_at: updatedAt })
@@ -137,10 +142,13 @@ class MigrationDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('INSERT INTO background_tasks')) {
-                const [id, userId, type, idempotencyKey, sourceUrl, payload, createdAt, updatedAt] = values
+                const migration = sql.includes('VALUES (?, ?, NULL, ?,')
+                const [id, userId, bookmarkId, type, idempotencyKey, sourceUrl, contentId, payload, createdAt, updatedAt] = migration
+                    ? [values[0], values[1], null, values[2], values[3], values[4], null, values[5], values[6], values[7]]
+                    : values
                 const existing = this.tasks.find(item => item.idempotency_key === idempotencyKey)
                 if (existing) return { meta: { changes: 0 } }
-                this.tasks.push({ id, user_id: userId, bookmark_id: null, type, status: 'queued', progress: 0, retry_count: 0, idempotency_key: idempotencyKey, source_url: sourceUrl, content_id: null, payload, result_metadata: '{}', error_code: null, error_message: null, next_retry_at: null, created_at: createdAt, updated_at: updatedAt, completed_at: null })
+                this.tasks.push({ id, user_id: userId, bookmark_id: bookmarkId, type, status: 'queued', progress: 0, retry_count: 0, idempotency_key: idempotencyKey, source_url: sourceUrl, content_id: contentId, payload, result_metadata: '{}', error_code: null, error_message: null, next_retry_at: null, created_at: createdAt, updated_at: updatedAt, completed_at: null })
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE background_tasks SET status = \'processing\'')) {
@@ -188,6 +196,7 @@ const envFor = (db, options = {}) => ({
     API_ORIGIN: 'https://api.example.test',
     APP_ORIGIN: 'https://app.example.test',
     CORS_ORIGINS: 'https://app.example.test',
+    ATTACHMENT_SCAN_ENABLED: options.scanEnabled ? 'true' : 'false',
     ENVIRONMENT: 'local',
     VERSION: 'test',
     TASK_QUEUE: { send: async () => {} },
@@ -375,4 +384,35 @@ test('migration retries protected content after storage failure without losing b
     assert.equal(db.contents.length, 1)
     assert.equal(env.CONTENT_BUCKET.objects.size, 1)
     assert.equal(db.mappings.filter(item => item.source_type === 'content').length, 1)
+})
+
+test('scan-enabled migration queues one safety task per protected asset', async () => {
+    const db = new MigrationDatabase()
+    const env = envFor(db, { scanEnabled: true })
+    const preflight = await worker.fetch(request('/v1/import/preflight', {
+        method: 'POST',
+        ...body({
+            bookmarks: [{ id: 'bookmark-1', url: 'https://example.com/scanned', title: 'Scanned bookmark' }],
+            attachments: [{ id: 'attachment-1', bookmarkId: 'bookmark-1', data: 'attachment' }],
+            covers: [{ id: 'cover-1', bookmarkId: 'bookmark-1', data: 'Y292ZXI=', encoding: 'base64' }],
+            snapshots: [{ id: 'snapshot-1', bookmarkId: 'bookmark-1', html: '<html>snapshot</html>' }]
+        })
+    }), env)
+    const archiveId = (await preflight.json()).archiveId
+    const commit = await worker.fetch(request(`/v1/import/${archiveId}/commit`, { method: 'POST' }), env)
+    const taskId = (await commit.json()).taskId
+    await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { assert.fail('unexpected retry') } }] }, env)
+    const scanTasks = db.tasks.filter(item => item.type === 'attachment_scan')
+    assert.equal(scanTasks.length, 3)
+    assert.equal(db.contents.every(item => item.status === 'quarantined'), true)
+
+    env.ATTACHMENT_SCAN_ENABLED = 'false'
+    for (const task of scanTasks)
+        await worker.queue({ messages: [{ body: { taskId: task.id }, ack() {}, retry() { assert.fail('unexpected retry') } }] }, env)
+    assert.equal(db.contents.every(item => item.status === 'cleared'), true)
+    assert.equal(db.tasks.filter(item => item.type === 'attachment_scan').length, 3)
+
+    db.tasks.find(item => item.id === taskId).status = 'queued'
+    await worker.queue({ messages: [{ body: { taskId }, ack() {}, retry() { assert.fail('unexpected retry') } }] }, env)
+    assert.equal(db.tasks.filter(item => item.type === 'attachment_scan').length, 3)
 })
