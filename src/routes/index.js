@@ -11,6 +11,7 @@ import Add from './add'
 import Extension from './extension'
 import My from './my'
 import Join from './join'
+import Public from './public'
 import Settings from './settings'
 
 const Router = target == 'web' ? BrowserRouter : HashRouter
@@ -23,6 +24,7 @@ export default function Pages() {
 
                 <Route path='account'>{Account()}</Route>
                 <Route path='extension'>{Extension()}</Route>
+                <Route path='public/:resource' element={<Public />} />
 
                 <Route element={<Protected redirect />}>
                     <Route path='add' element={<Add />} />

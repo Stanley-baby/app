@@ -21,6 +21,8 @@ const captureBodyLimit = 10 * 1024 * 1024
 const metadataFetchTimeoutMs = 8000
 const metadataLeaseMs = 60 * 1000
 const metadataRetryDelays = [5, 30, 300]
+const invitationDays = 7
+const collectionRoles = new Set(['owner', 'editor', 'viewer'])
 
 const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
 
@@ -646,9 +648,8 @@ const bookmarkAccessible = async (env, bookmarkId, userId) => {
         .bind(bookmarkId, userId).first()
     if (owned) return owned
     try {
-        return await env.DB.prepare(`SELECT b.* FROM bookmarks b
-            JOIN collection_collaborators cc ON cc.collection_id = b.collection_id
-            WHERE b.id = ? AND cc.user_id = ? AND cc.role IN ('owner', 'editor', 'viewer')`).bind(bookmarkId, userId).first()
+        const shared = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ?').bind(bookmarkId).first()
+        return shared && await collectionRole(env, userId, shared.collection_id) ? shared : null
     } catch {
         return null
     }
@@ -657,11 +658,9 @@ const bookmarkAccessible = async (env, bookmarkId, userId) => {
 const contentAuthorized = async (env, content, userId) => {
     if (!content || Number(content.user_id) === Number(userId)) return Boolean(content)
     try {
-        const authorized = await env.DB.prepare(`SELECT 1 FROM collection_collaborators cc
-            JOIN bookmarks b ON b.collection_id = cc.collection_id
-            WHERE cc.user_id = ? AND b.id = ? AND b.user_id = ?
-            AND cc.role IN ('owner', 'editor', 'viewer') LIMIT 1`).bind(userId, content.bookmark_id, content.user_id).first()
-        return Boolean(authorized)
+        const bookmark = await env.DB.prepare('SELECT collection_id FROM bookmarks WHERE id = ? AND user_id = ?')
+            .bind(content.bookmark_id, content.user_id).first()
+        return Boolean(bookmark && await collectionRole(env, userId, bookmark.collection_id))
     } catch {
         return false
     }
@@ -1129,7 +1128,14 @@ const collectionItem = item => ({
     parentId: item.parent_id,
     count: Number(item.count || 0),
     removed: Boolean(item.removed_at),
-    access: { level: 4, draggable: true }
+    public: Boolean(item.is_public),
+    slug: item.slug || slugify(item.title) || String(item.id),
+    publicLink: item.public_link,
+    access: {
+        level: roleLevel(item.role || 'owner'),
+        role: item.role || 'owner',
+        draggable: roleLevel(item.role || 'owner') >= roleLevel('editor')
+    }
 })
 
 const parseCollectionId = value => {
@@ -1143,6 +1149,229 @@ const parseBookmarkCollectionId = value => {
     const id = Number(value)
     return Number.isSafeInteger(id) && id >= -1 ? (id > 0 ? id : -1) : NaN
 }
+
+const normalizeRole = value => {
+    const role = String(value || '').toLowerCase()
+    return role === 'member' ? 'editor' : collectionRoles.has(role) ? role : null
+}
+
+const roleLevel = role => ({ owner: 4, editor: 3, viewer: 2 }[normalizeRole(role)] || 0)
+
+const slugify = value => String(value || '').trim().toLowerCase()
+    .normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80)
+
+const persistedSlug = async (env, item) => {
+    const current = String(item?.slug || '').trim().toLowerCase()
+    if (current) return current
+    const slug = slugify(item?.title) || String(item?.id)
+    try {
+        await env.DB.prepare('UPDATE collections SET slug = ? WHERE id = ? AND (slug IS NULL OR slug = \'\')')
+            .bind(slug, item.id).run()
+    } catch {}
+    return slug
+}
+
+const publicOrigin = env => String(env.PUBLIC_ORIGIN || env.APP_ORIGIN || env.API_ORIGIN || '').replace(/\/+$/, '')
+
+const publicCollectionLink = async (env, item) => {
+    const slug = await persistedSlug(env, item)
+    const base = publicOrigin(env)
+    return base ? base + '/public/' + encodeURIComponent(slug) + '-' + Number(item.id) : ''
+}
+
+const collectionRole = async (env, userId, collectionId) => {
+    let current = Number(collectionId)
+    const visited = new Set()
+    let bestRole = null
+    while (Number.isSafeInteger(current) && current > 0 && !visited.has(current)) {
+        visited.add(current)
+        const collection = await env.DB.prepare('SELECT id, user_id, parent_id, removed_at FROM collections WHERE id = ?').bind(current).first()
+        if (!collection || collection.removed_at) return null
+        if (Number(collection.user_id) === Number(userId)) bestRole = 'owner'
+        const member = await env.DB.prepare('SELECT role FROM collection_collaborators WHERE collection_id = ? AND user_id = ?')
+            .bind(current, userId).first()
+        const role = normalizeRole(member?.role)
+        if (role && roleLevel(role) > roleLevel(bestRole)) bestRole = role
+        current = Number(collection.parent_id || 0)
+    }
+    return bestRole
+}
+
+const collectionCanWrite = async (env, userId, collectionId) =>
+    roleLevel(await collectionRole(env, userId, collectionId)) >= roleLevel('editor')
+
+const collectionDescendants = async (env, collectionId) => {
+    const rows = await env.DB.prepare('SELECT id, parent_id FROM collections WHERE removed_at IS NULL').bind().all()
+    return descendantCollectionIds(rows.results || [], [Number(collectionId)])
+}
+
+const selectCollection = async (env, collectionId, userId = null) => {
+    const item = await env.DB.prepare(`SELECT c.*, COUNT(b.id) AS count
+        FROM collections c LEFT JOIN bookmarks b ON b.collection_id = c.id AND b.removed_at IS NULL
+        WHERE c.id = ? GROUP BY c.id`).bind(Number(collectionId)).first()
+    if (!item || item.removed_at) return null
+    if (userId === null) return item
+    const role = await collectionRole(env, userId, collectionId)
+    return role ? { ...item, role } : null
+}
+
+const collaboratorItem = item => {
+    const role = normalizeRole(item.role) || 'viewer'
+    return {
+        _id: Number(item.user_id),
+        name: item.name || item.email || '',
+        email: item.email || '',
+        role,
+        canonicalRole: role,
+        inherited: Boolean(item.inherited)
+    }
+}
+
+const publicSnapshotItem = (item, env) => ({
+    id: String(item.content_id || item.id),
+    contentId: String(item.content_id || item.id),
+    bookmarkId: Number(item.bookmark_id),
+    kind: item.kind,
+    filename: item.filename || 'snapshot.html',
+    contentType: item.content_type || 'text/html',
+    size: Number(item.size_bytes || 0),
+    publishedAt: item.published_at ? new Date(item.published_at).toISOString() : null,
+    downloadUrl: String(env.API_ORIGIN || publicOrigin(env)).replace(/\/+$/, '') + '/public/content/' + encodeURIComponent(String(item.content_id || item.id))
+})
+
+const publicBookmarkItem = item => ({
+    _id: Number(item.id),
+    id: Number(item.id),
+    link: item.url,
+    title: item.title,
+    description: item.description || '',
+    excerpt: item.description || '',
+    tags: bookmarkTags(item.tags),
+    created: item.created_at ? new Date(item.created_at).toISOString() : null,
+    lastUpdate: item.updated_at ? new Date(item.updated_at).toISOString() : null
+})
+
+const publishedSnapshotsFor = async (env, collectionId) => {
+    const rows = await env.DB.prepare(`SELECT ps.content_id, ps.bookmark_id, ps.published_at,
+        co.kind, co.filename, co.content_type, co.size_bytes
+        FROM published_snapshots ps JOIN content_objects co ON co.id = ps.content_id
+        WHERE ps.collection_id = ? AND ps.revoked_at IS NULL AND co.status = 'cleared'
+        ORDER BY ps.published_at DESC`).bind(collectionId).all()
+    return rows.results || []
+}
+
+const publicCollectionPayload = async (env, collectionId, suppliedSlug = '') => {
+    const collection = await env.DB.prepare(`SELECT id, user_id, title, parent_id, slug, is_public, removed_at, created_at, updated_at
+        FROM collections WHERE id = ?`).bind(Number(collectionId)).first()
+    if (!collection || collection.removed_at || !Number(collection.is_public)) return null
+
+    const slug = await persistedSlug(env, collection)
+    const descendants = await collectionDescendants(env, collectionId)
+    const placeholders = descendants.map(() => '?').join(',') || '?'
+    const rows = await env.DB.prepare(`SELECT id, url, title, description, tags, created_at, updated_at
+        FROM bookmarks WHERE removed_at IS NULL AND collection_id IN (${placeholders}) ORDER BY updated_at DESC`).bind(...descendants).all()
+    const visibleBookmarkIds = new Set((rows.results || []).map(item => Number(item.id)))
+    const snapshots = (await publishedSnapshotsFor(env, collectionId)).filter(item => visibleBookmarkIds.has(Number(item.bookmark_id)))
+    const byBookmark = new Map()
+    for (const snapshot of snapshots) {
+        const item = publicSnapshotItem(snapshot, env)
+        const list = byBookmark.get(Number(snapshot.bookmark_id)) || []
+        list.push(item)
+        byBookmark.set(Number(snapshot.bookmark_id), list)
+    }
+    const items = (rows.results || []).map(item => ({
+        ...publicBookmarkItem(item),
+        publishedSnapshots: byBookmark.get(Number(item.id)) || []
+    }))
+    const result = {
+        id: Number(collection.id),
+        _id: Number(collection.id),
+        title: collection.title,
+        slug,
+        public: true,
+        publicLink: await publicCollectionLink(env, collection),
+        parentId: collection.parent_id,
+        created: collection.created_at ? new Date(collection.created_at).toISOString() : null,
+        lastUpdate: collection.updated_at ? new Date(collection.updated_at).toISOString() : null
+    }
+    return {
+        result: true,
+        collection: result,
+        item: result,
+        items,
+        bookmarks: items,
+        publishedSnapshots: snapshots.map(snapshot => publicSnapshotItem(snapshot, env)),
+        ...(suppliedSlug && suppliedSlug !== slug ? { canonicalSlug: slug } : {})
+    }
+}
+
+const selectPublishedContent = async (env, contentId) => {
+    const item = await env.DB.prepare(`SELECT co.id, co.bookmark_id, co.kind, co.status, co.object_key, co.filename,
+        co.content_type, co.size_bytes, ps.published_at, ps.collection_id, b.collection_id AS bookmark_collection_id
+        FROM published_snapshots ps JOIN content_objects co ON co.id = ps.content_id
+        JOIN bookmarks b ON b.id = co.bookmark_id AND b.removed_at IS NULL
+        JOIN collections c ON c.id = ps.collection_id
+        WHERE ps.content_id = ? AND ps.revoked_at IS NULL AND c.is_public = 1
+        AND c.removed_at IS NULL AND co.status = 'cleared'`).bind(contentId).first()
+    if (!item) return null
+    const descendants = await collectionDescendants(env, item.collection_id)
+    return descendants.includes(Number(item.bookmark_collection_id)) ? item : null
+}
+
+const inviteLink = (env, token) => {
+    const base = publicOrigin(env)
+    return base ? base + '/join/' + encodeURIComponent(token) : ''
+}
+
+const createCollectionInvitation = async (env, collectionId, userId, role) => {
+    const token = randomToken(32)
+    const now = Date.now()
+    await env.DB.prepare(`INSERT INTO collection_invitations
+        (token_hash, collection_id, invited_by, role, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)`).bind(
+        await hmac(token, env.SESSION_SECRET), collectionId, userId, role,
+        now + invitationDays * 86400 * 1000, now).run()
+    return { token, expiresAt: now + invitationDays * 86400 * 1000 }
+}
+
+const collectionCollaborators = async (env, collectionId) => {
+    const rows = await env.DB.prepare(`SELECT cc.collection_id, cc.user_id, cc.role, u.name, u.email
+        FROM collection_collaborators cc JOIN users u ON u.id = cc.user_id
+        WHERE cc.collection_id = ? ORDER BY CASE cc.role WHEN 'owner' THEN 0 WHEN 'editor' THEN 1 ELSE 2 END, u.id`).bind(collectionId).all()
+    return rows.results || []
+}
+
+const setPublishedSnapshots = async (env, collectionId, userId, contentIds, published) => {
+    const ids = [...new Set((contentIds || []).map(String).filter(Boolean))]
+    if (!ids.length) return { error: 'validation_failed' }
+    const descendants = await collectionDescendants(env, collectionId)
+    const placeholders = descendants.map(() => '?').join(',') || '?'
+    const records = []
+    for (const contentId of ids) {
+        const content = await env.DB.prepare(`SELECT co.id, co.bookmark_id, co.kind, co.status
+            FROM content_objects co JOIN bookmarks b ON b.id = co.bookmark_id
+            WHERE co.id = ? AND b.removed_at IS NULL AND b.collection_id IN (${placeholders})`).bind(contentId, ...descendants).first()
+        if (!content) return { error: 'content_not_found', contentId }
+        if (!['snapshot', 'screenshot'].includes(content.kind)) return { error: 'snapshot_required', contentId }
+        if (published && content.status !== 'cleared') return { error: 'content_quarantined', contentId }
+        const now = Date.now()
+        if (published) {
+            await env.DB.prepare(`INSERT INTO published_snapshots
+                (content_id, collection_id, bookmark_id, published_by, published_at, revoked_at)
+                VALUES (?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(content_id) DO UPDATE SET collection_id = excluded.collection_id,
+                    bookmark_id = excluded.bookmark_id, published_by = excluded.published_by,
+                    published_at = excluded.published_at, revoked_at = NULL`)
+                .bind(content.id, collectionId, content.bookmark_id, userId, now).run()
+        } else {
+            await env.DB.prepare('UPDATE published_snapshots SET revoked_at = ? WHERE content_id = ? AND collection_id = ? AND revoked_at IS NULL')
+                .bind(now, content.id, collectionId).run()
+        }
+        records.push(content)
+    }
+    return { items: records }
+}
+
 
 const collectionOwned = async (env, userId, collectionId) =>
     collectionId <= 0 || Boolean(await env.DB.prepare('SELECT id FROM collections WHERE id = ? AND user_id = ? AND removed_at IS NULL').bind(collectionId, userId).first())
@@ -1293,7 +1522,10 @@ const auditRoute = request => {
         [/^\/v1\/content\/[^/]+\/download$/, '/v1/content/:id/download'],
         [/^\/v1\/content\/[^/]+$/, '/v1/content/:id'],
         [/^\/v1\/raindrop\/\d+\/(?:content|capture)(?:\/status)?$/, '/v1/raindrop/:id/content'],
-        [/^\/v1\/raindrop\/\d+\/attachments?$/, '/v1/raindrop/:id/attachments']
+        [/^\/v1\/raindrop\/\d+\/attachments?$/, '/v1/raindrop/:id/attachments'],
+        [/^\/v1\/collection\/\d+\/sharing(?:\/\d+)?$/, '/v1/collection/:id/sharing'],
+        [/^\/v1\/collection\/\d+\/(?:transfer|ownership|published-snapshots|snapshots)(?:\/[^/]+)?$/, '/v1/collection/:id/sharing'],
+        [/^\/v1\/content\/[^/]+\/publish$/, '/v1/content/:id/publish']
     ]
     const match = patterns.find(([pattern]) => pattern.test(pathname))
     if (match) return pathname.replace(match[0], match[1])
@@ -1307,7 +1539,7 @@ const auditRoute = request => {
         '/v1/user/connect/google', '/v1/user/connect/google/revoke', '/v1/user/deletion',
         '/v1/tasks',
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
-        '/v1/raindrop/file', '/v1/content/upload'
+        '/v1/raindrop/file', '/v1/content/upload', '/v1/collaborators/join'
     ])
     return known.has(pathname) ? pathname : '/v1/unknown'
 }
@@ -1490,6 +1722,7 @@ const sendVerification = async (env, email, token) => {
 const requiresVerification = pathname =>
     pathname.startsWith('/v1/oauth/') ||
     pathname.startsWith('/v1/developer/') ||
+    pathname.startsWith('/v1/collaborators/') ||
     pathname.includes('/sharing') ||
     pathname.startsWith('/v1/backups') ||
     pathname.startsWith('/v1/import/') ||
@@ -1595,6 +1828,8 @@ const deleteUserData = async (env, userId) => {
         env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM connected_identities WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM oauth_states WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM published_snapshots WHERE published_by = ? OR bookmark_id IN (SELECT id FROM bookmarks WHERE user_id = ?)').bind(userId, userId),
+        env.DB.prepare('DELETE FROM collection_invitations WHERE invited_by = ? OR collection_id IN (SELECT id FROM collections WHERE user_id = ?)').bind(userId, userId),
         env.DB.prepare('DELETE FROM collection_collaborators WHERE collection_id IN (SELECT id FROM collections WHERE user_id = ?) OR user_id = ?').bind(userId, userId),
         env.DB.prepare('DELETE FROM background_tasks WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM content_objects WHERE user_id = ?').bind(userId),
@@ -1650,6 +1885,32 @@ export default {
 
         if (url.pathname === '/version')
             return json({ result: true, environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
+
+        const publicContentMatch = url.pathname.match(/^\/(?:v1\/)?public\/content\/([^/]+)$/)
+        if (publicContentMatch && ['GET', 'HEAD'].includes(request.method)) {
+            const content = await selectPublishedContent(env, decodeURIComponent(publicContentMatch[1]))
+            if (!content || !env.CONTENT_BUCKET?.get)
+                return error('content_not_found', 404, request, env)
+            const object = await env.CONTENT_BUCKET.get(content.object_key)
+            if (!object) return error('content_not_found', 404, request, env)
+            const headers = addCorsHeaders(new Headers({
+                'Content-Type': content.content_type || object.httpMetadata?.contentType || 'application/octet-stream',
+                'Content-Length': String(content.size_bytes || object.size || 0),
+                'Content-Disposition': 'inline; filename="' + safeFilename(content.filename) + '"',
+                'Cache-Control': 'public, max-age=60',
+                'X-Request-ID': requestId(request)
+            }), request, env)
+            return new Response(request.method === 'HEAD' ? null : object.body, { status: 200, headers })
+        }
+
+        const publicCollectionMatch = url.pathname.match(/^\/(?:v1\/)?public\/collections?\/(\d+)(?:\/([^/]+))?$/)
+        const publicLegacyMatch = url.pathname.match(/^\/public\/([^/]+)-(\d+)$/)
+        if ((publicCollectionMatch || publicLegacyMatch) && request.method === 'GET') {
+            const collectionId = Number(publicCollectionMatch?.[1] || publicLegacyMatch?.[2])
+            const suppliedSlug = decodeURIComponent(publicCollectionMatch?.[2] || publicLegacyMatch?.[1] || '')
+            const payload = await publicCollectionPayload(env, collectionId, suppliedSlug)
+            return payload ? json(payload, 200, request, env) : error('collection_not_found', 404, request, env)
+        }
 
         if (url.pathname.startsWith('/v1/')) {
             const rateSession = authReady(env) ? await getSession(request, env) : null
@@ -1898,6 +2159,160 @@ export default {
                 } }, 200, request, env)
             }
 
+            const sharingMatch = url.pathname.match(/^\/v1\/collection\/(\d+)\/sharing(?:\/(\d+))?$/)
+            if (sharingMatch) {
+                const collectionId = Number(sharingMatch[1])
+                const memberId = sharingMatch[2] ? Number(sharingMatch[2]) : null
+                const collection = await env.DB.prepare('SELECT id, user_id, title, parent_id, slug, is_public, removed_at FROM collections WHERE id = ?')
+                    .bind(collectionId).first()
+                const role = collection && !collection.removed_at ? await collectionRole(env, session.user_id, collectionId) : null
+                if (!collection || !role) return error('collection_not_found', 404, request, env)
+
+                if (!memberId && request.method === 'GET') {
+                    let rows = await collectionCollaborators(env, collectionId)
+                    if (!rows.some(item => Number(item.user_id) === Number(collection.user_id)))
+                        rows = [{ collection_id: collectionId, user_id: collection.user_id, role: 'owner', name: '', email: '' }, ...rows]
+                    return json({ result: true, items: rows.map(collaboratorItem) }, 200, request, env)
+                }
+
+                if (!memberId && request.method === 'POST') {
+                    if (roleLevel(role) < roleLevel('editor'))
+                        return error('permission_denied', 403, request, env, 'Only Collection Owners and Editors can invite Collaborators')
+                    const { data } = await readBody(request)
+                    const inviteRole = normalizeRole(data.role || data.access || 'editor')
+                    if (!['editor', 'viewer'].includes(inviteRole))
+                        return error('validation_failed', 400, request, env, 'Invitation role must be editor or viewer')
+                    const invitation = await createCollectionInvitation(env, collectionId, session.user_id, inviteRole)
+                    await recordAudit(env, request, { userId: session.user_id, action: 'collection.invitation.create', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
+                    return json({ result: true, role: inviteRole, token: invitation.token, expiresAt: new Date(invitation.expiresAt).toISOString(), link: inviteLink(env, invitation.token) }, 201, request, env)
+                }
+
+                if (!memberId) {
+                    if (request.method === 'DELETE') {
+                        if (role !== 'owner') return error('permission_denied', 403, request, env, 'Only the Collection Owner can remove sharing')
+                        await env.DB.prepare('DELETE FROM collection_collaborators WHERE collection_id = ? AND user_id != ?').bind(collectionId, collection.user_id).run()
+                        await env.DB.prepare('DELETE FROM collection_invitations WHERE collection_id = ?').bind(collectionId).run()
+                        await recordAudit(env, request, { userId: session.user_id, action: 'collection.unshare', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
+                        return json({ result: true }, 200, request, env)
+                    }
+                } else if (['PUT', 'PATCH', 'DELETE'].includes(request.method)) {
+                    if (role !== 'owner') return error('permission_denied', 403, request, env, 'Only the Collection Owner can manage Collaborators')
+                    const target = await env.DB.prepare('SELECT id, name, email FROM users WHERE id = ?').bind(memberId).first()
+                    if (!target) return error('user_not_found', 404, request, env)
+                    if (memberId === Number(collection.user_id))
+                        return error('owner_required', 409, request, env, 'The Collection Owner cannot be removed')
+                    if (request.method === 'DELETE') {
+                        await env.DB.prepare('DELETE FROM collection_collaborators WHERE collection_id = ? AND user_id = ?').bind(collectionId, memberId).run()
+                        await recordAudit(env, request, { userId: session.user_id, action: 'collection.collaborator.remove', resourceType: 'collection', resourceId: memberId, outcome: 'success' })
+                        return json({ result: true }, 200, request, env)
+                    }
+                    const { data } = await readBody(request)
+                    const updatedRole = normalizeRole(data.role || data.access)
+                    if (!['editor', 'viewer'].includes(updatedRole))
+                        return error('validation_failed', 400, request, env, 'Collaborator role must be editor or viewer')
+                    await env.DB.prepare(`INSERT INTO collection_collaborators (collection_id, user_id, role)
+                        VALUES (?, ?, ?) ON CONFLICT(collection_id, user_id) DO UPDATE SET role = excluded.role`)
+                        .bind(collectionId, memberId, updatedRole).run()
+                    await recordAudit(env, request, { userId: session.user_id, action: 'collection.collaborator.update', resourceType: 'collection', resourceId: memberId, outcome: 'success' })
+                    return json({ result: true, item: collaboratorItem({ collection_id: collectionId, user_id: memberId, role: updatedRole, ...target }) }, 200, request, env)
+                }
+            }
+
+            if (url.pathname === '/v1/collaborators/join' && ['GET', 'POST'].includes(request.method)) {
+                const { data } = request.method === 'POST' ? await readBody(request) : { data: {} }
+                const tokenValue = String(url.searchParams.get('token') || data.token || '').trim()
+                if (!tokenValue || tokenValue.length > 512)
+                    return error('invitation_invalid', 400, request, env, 'The invitation link is invalid or expired')
+                const invitation = await env.DB.prepare(`SELECT token_hash, collection_id, role, expires_at, used_at
+                    FROM collection_invitations WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`)
+                    .bind(await hmac(tokenValue, env.SESSION_SECRET), Date.now()).first()
+                if (!invitation) return error('invitation_invalid', 400, request, env, 'The invitation link is invalid or expired')
+                const collection = await env.DB.prepare('SELECT id, user_id, removed_at FROM collections WHERE id = ?').bind(invitation.collection_id).first()
+                if (!collection || collection.removed_at) return error('collection_not_found', 404, request, env)
+                if (Number(collection.user_id) === Number(session.user_id)) {
+                    await env.DB.prepare('UPDATE collection_invitations SET used_at = ? WHERE token_hash = ?').bind(Date.now(), invitation.token_hash).run()
+                    return json({ result: true, cId: Number(collection.id), role: 'owner' }, 200, request, env)
+                }
+                await env.DB.prepare(`INSERT INTO collection_collaborators (collection_id, user_id, role)
+                    VALUES (?, ?, ?) ON CONFLICT(collection_id, user_id) DO UPDATE SET role = excluded.role`)
+                    .bind(collection.id, session.user_id, normalizeRole(invitation.role)).run()
+                await env.DB.prepare('UPDATE collection_invitations SET used_at = ? WHERE token_hash = ? AND used_at IS NULL').bind(Date.now(), invitation.token_hash).run()
+                await recordAudit(env, request, { userId: session.user_id, action: 'collection.invitation.accept', resourceType: 'collection', resourceId: collection.id, outcome: 'success' })
+                return json({ result: true, cId: Number(collection.id), role: normalizeRole(invitation.role) }, 200, request, env)
+            }
+
+            const transferMatch = url.pathname.match(/^\/v1\/collection\/(\d+)\/(?:transfer|ownership)$/)
+            if (transferMatch && ['POST', 'PUT', 'PATCH'].includes(request.method)) {
+                const collectionId = Number(transferMatch[1])
+                const collection = await env.DB.prepare('SELECT id, user_id, removed_at FROM collections WHERE id = ?').bind(collectionId).first()
+                if (!collection || collection.removed_at) return error('collection_not_found', 404, request, env)
+                if (Number(collection.user_id) !== Number(session.user_id))
+                    return error('permission_denied', 403, request, env, 'Only the Collection Owner can transfer ownership')
+                const { data } = await readBody(request)
+                const targetId = Number(data.userId || data.ownerId || data.toUserId)
+                if (!Number.isSafeInteger(targetId) || targetId <= 0 || targetId === Number(session.user_id))
+                    return error('validation_failed', 400, request, env, 'Provide another User ID as the new Owner')
+                const target = await env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(targetId).first()
+                if (!target) return error('user_not_found', 404, request, env)
+                const ids = await collectionDescendants(env, collectionId)
+                if (!ids.includes(collectionId)) ids.unshift(collectionId)
+                for (const id of ids) {
+                    await env.DB.prepare('UPDATE collections SET user_id = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(targetId, Date.now(), id, session.user_id).run()
+                    await env.DB.prepare(`INSERT INTO collection_collaborators (collection_id, user_id, role)
+                        VALUES (?, ?, 'owner') ON CONFLICT(collection_id, user_id) DO UPDATE SET role = 'owner'`).bind(id, targetId).run()
+                    await env.DB.prepare(`INSERT INTO collection_collaborators (collection_id, user_id, role)
+                        VALUES (?, ?, 'editor') ON CONFLICT(collection_id, user_id) DO UPDATE SET role = 'editor'`).bind(id, session.user_id).run()
+                }
+                await recordAudit(env, request, { userId: session.user_id, action: 'collection.ownership.transfer', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
+                return json({ result: true, collectionId, ownerId: targetId }, 200, request, env)
+            }
+
+            const publishedMatch = url.pathname.match(/^\/v1\/collection\/(\d+)\/(?:published-snapshots|snapshots|publish)(?:\/([^/]+))?$/)
+            if (publishedMatch) {
+                const collectionId = Number(publishedMatch[1])
+                const collection = await env.DB.prepare('SELECT id, user_id, is_public, removed_at FROM collections WHERE id = ?').bind(collectionId).first()
+                if (!collection || collection.removed_at) return error('collection_not_found', 404, request, env)
+                if (Number(collection.user_id) !== Number(session.user_id))
+                    return error('permission_denied', 403, request, env, 'Only the Collection Owner can publish snapshots')
+                if (request.method === 'GET') {
+                    const items = (await publishedSnapshotsFor(env, collectionId)).map(item => publicSnapshotItem(item, env))
+                    return json({ result: true, items, publishedSnapshots: items }, 200, request, env)
+                }
+                const body = request.method === 'DELETE' && publishedMatch[2]
+                    ? { data: { contentId: decodeURIComponent(publishedMatch[2]) } }
+                    : await readBody(request)
+                const ids = publishedMatch[2]
+                    ? [decodeURIComponent(publishedMatch[2])]
+                    : body.data.contentIds || body.data.snapshotIds || [body.data.contentId || body.data.snapshotId].filter(Boolean)
+                const publish = request.method !== 'DELETE'
+                const changed = await setPublishedSnapshots(env, collectionId, session.user_id, ids, publish)
+                if (changed.error === 'validation_failed') return error(changed.error, 400, request, env, 'Provide one or more snapshot Content IDs')
+                if (changed.error === 'content_not_found') return error(changed.error, 404, request, env)
+                if (changed.error === 'snapshot_required') return error(changed.error, 400, request, env, 'Only saved-page snapshots can be published')
+                if (changed.error === 'content_quarantined') return error(changed.error, 409, request, env, 'The snapshot must be Cleared Content before publishing')
+                const items = (await publishedSnapshotsFor(env, collectionId)).map(item => publicSnapshotItem(item, env))
+                await recordAudit(env, request, { userId: session.user_id, action: publish ? 'collection.snapshot.publish' : 'collection.snapshot.revoke', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
+                return json({ result: true, items, publishedSnapshots: items }, 200, request, env)
+            }
+
+            const contentPublishMatch = url.pathname.match(/^\/v1\/content\/([^/]+)\/publish$/)
+            if (contentPublishMatch && ['POST', 'DELETE'].includes(request.method)) {
+                const contentId = decodeURIComponent(contentPublishMatch[1])
+                const content = await env.DB.prepare(`SELECT co.id, co.bookmark_id, b.collection_id
+                    FROM content_objects co JOIN bookmarks b ON b.id = co.bookmark_id WHERE co.id = ?`).bind(contentId).first()
+                if (!content) return error('content_not_found', 404, request, env)
+                const collection = await env.DB.prepare('SELECT id, user_id, removed_at FROM collections WHERE id = ?').bind(content.collection_id).first()
+                if (!collection || collection.removed_at) return error('collection_not_found', 404, request, env)
+                if (Number(collection.user_id) !== Number(session.user_id))
+                    return error('permission_denied', 403, request, env, 'Only the Collection Owner can publish snapshots')
+                const changed = await setPublishedSnapshots(env, collection.id, session.user_id, [contentId], request.method === 'POST')
+                if (changed.error === 'snapshot_required') return error(changed.error, 400, request, env, 'Only saved-page snapshots can be published')
+                if (changed.error === 'content_quarantined') return error(changed.error, 409, request, env, 'The snapshot must be Cleared Content before publishing')
+                if (changed.error) return error(changed.error, 404, request, env)
+                return json({ result: true, published: request.method === 'POST' }, 200, request, env)
+            }
+
             const taskMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)(?:\/(status|failure|retry))?$/)
             if (taskMatch) {
                 const task = await selectTask(env, decodeURIComponent(taskMatch[1]), session.user_id)
@@ -1943,10 +2358,13 @@ export default {
                         return error('validation_failed', 400, request, env, 'Provide a Bookmark ID for this attachment')
                     bookmark = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
                         .bind(suppliedBookmarkId, session.user_id).first()
+                    if (!bookmark) bookmark = await bookmarkAccessible(env, suppliedBookmarkId, session.user_id)
                     if (!bookmark) return error('bookmark_not_found', 404, request, env)
+                    if (roleLevel(bookmark.user_id === session.user_id ? 'owner' : await collectionRole(env, session.user_id, bookmark.collection_id)) < roleLevel('editor'))
+                        return error('permission_denied', 403, request, env, 'Editor access is required to add Protected Content')
                 } else {
                     const collectionId = fields.collectionId === undefined ? -1 : parseBookmarkCollectionId(fields.collectionId)
-                    if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
+                    if (!Number.isSafeInteger(collectionId) || collectionId < -1 || collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId) && !await collectionCanWrite(env, session.user_id, collectionId))
                         return error('collection_not_found', 404, request, env)
                     const title = String(fields.title || upload.filename || '').trim()
                     const description = String(fields.description || fields.excerpt || '').trim()
@@ -2014,8 +2432,13 @@ export default {
             const captureMatch = url.pathname.match(/^\/v1\/raindrop\/(\d+)\/capture(?:\/status)?$/)
             if (captureMatch) {
                 const bookmarkId = Number(captureMatch[1])
-                const bookmark = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
+                let bookmark = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
                     .bind(bookmarkId, session.user_id).first()
+                if (!bookmark) {
+                    const shared = await bookmarkAccessible(env, bookmarkId, session.user_id)
+                    if (shared && roleLevel(await collectionRole(env, session.user_id, shared.collection_id)) >= roleLevel('editor'))
+                        bookmark = shared
+                }
                 if (!bookmark) return error('bookmark_not_found', 404, request, env)
                 if (request.method === 'GET')
                     return json({ result: true, items: (await listContent(env, bookmarkId, session.user_id)).filter(item => ['snapshot', 'screenshot'].includes(item.kind)) }, 200, request, env)
@@ -2108,7 +2531,28 @@ export default {
                 const rows = await env.DB.prepare(`SELECT c.*, COUNT(b.id) AS count
                     FROM collections c LEFT JOIN bookmarks b ON b.collection_id = c.id AND b.removed_at IS NULL
                     WHERE c.user_id = ? AND c.removed_at IS ${removed ? 'NOT NULL' : 'NULL'} GROUP BY c.id ORDER BY c.id`).bind(session.user_id).all()
-                return json({ result: true, items: rows.results.map(collectionItem) }, 200, request, env)
+                const items = []
+                const seen = new Set()
+                for (const item of rows.results || [])
+                    if (!seen.has(Number(item.id))) {
+                        seen.add(Number(item.id))
+                        items.push(collectionItem({ ...item, role: 'owner', public_link: await publicCollectionLink(env, item) }))
+                    }
+                if (!removed) {
+                    const shared = await env.DB.prepare(`SELECT c.*, COUNT(b.id) AS count
+                        FROM collections c
+                        LEFT JOIN bookmarks b ON b.collection_id = c.id AND b.removed_at IS NULL
+                        WHERE c.user_id != ? AND c.removed_at IS NULL GROUP BY c.id ORDER BY c.id`)
+                        .bind(session.user_id).all()
+                    for (const item of shared.results || []) {
+                        if (seen.has(Number(item.id))) continue
+                        const role = await collectionRole(env, session.user_id, item.id)
+                        if (!role) continue
+                        seen.add(Number(item.id))
+                        items.push(collectionItem({ ...item, role, public_link: await publicCollectionLink(env, item) }))
+                    }
+                }
+                return json({ result: true, items }, 200, request, env)
             }
 
             if (url.pathname === '/v1/collections' && request.method === 'DELETE') {
@@ -2137,13 +2581,18 @@ export default {
                 if (!title || title.length > 200)
                     return error('validation_failed', 400, request, env, 'Enter a collection title under 200 characters')
                 const parentId = parseCollectionId(data.parentId)
-                if (Number.isNaN(parentId) || parentId && !await collectionOwned(env, session.user_id, parentId))
+                if (Number.isNaN(parentId) || parentId && !await collectionOwned(env, session.user_id, parentId) && !await collectionCanWrite(env, session.user_id, parentId))
                     return error('collection_not_found', 404, request, env)
                 const now = Date.now()
-                const inserted = await env.DB.prepare('INSERT INTO collections (user_id, title, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
-                    .bind(session.user_id, title, parentId || null, now, now).run()
+                const slug = slugify(data.slug) || slugify(title) || String(now)
+                const inserted = await env.DB.prepare('INSERT INTO collections (user_id, title, parent_id, created_at, updated_at, slug, is_public) VALUES (?, ?, ?, ?, ?, ?, 0)')
+                    .bind(session.user_id, title, parentId || null, now, now, slug).run()
+                await env.DB.prepare(`INSERT INTO collection_collaborators (collection_id, user_id, role)
+                    VALUES (?, ?, 'owner') ON CONFLICT(collection_id, user_id) DO UPDATE SET role = 'owner'`)
+                    .bind(inserted.meta.last_row_id, session.user_id).run()
                 await recordAudit(env, request, { userId: session.user_id, action: 'collection.create', resourceType: 'collection', resourceId: inserted.meta.last_row_id, outcome: 'success' })
-                return json({ result: true, item: collectionItem({ id: inserted.meta.last_row_id, title, parent_id: parentId || null }) }, 201, request, env)
+                const link = await publicCollectionLink(env, { id: inserted.meta.last_row_id, title, slug })
+                return json({ result: true, item: collectionItem({ id: inserted.meta.last_row_id, title, parent_id: parentId || null, slug, is_public: 0, role: 'owner', public_link: link }) }, 201, request, env)
             }
 
             const collectionMatch = url.pathname.match(/^\/v1\/collection\/(-?\d+)(?:\/lastAction)?$/)
@@ -2158,14 +2607,24 @@ export default {
                     const item = await env.DB.prepare(`SELECT c.*, COUNT(b.id) AS count FROM collections c
                         LEFT JOIN bookmarks b ON b.collection_id = c.id AND b.removed_at IS NULL
                         WHERE c.id = ? AND c.user_id = ? GROUP BY c.id`).bind(collectionId, session.user_id).first()
-                    return item ? json({ result: true, item: collectionItem(item) }, 200, request, env) : error('collection_not_found', 404, request, env)
+                    if (item) {
+                        const link = await publicCollectionLink(env, item)
+                        return json({ result: true, item: collectionItem({ ...item, role: 'owner', public_link: link }) }, 200, request, env)
+                    }
+                    const shared = await selectCollection(env, collectionId, session.user_id)
+                    if (!shared) return error('collection_not_found', 404, request, env)
+                    const link = await publicCollectionLink(env, shared)
+                    return json({ result: true, item: collectionItem({ ...shared, public_link: link }) }, 200, request, env)
                 }
                 if (request.method === 'PUT') {
                     const { data } = await readBody(request)
-                    const existing = await env.DB.prepare('SELECT * FROM collections WHERE id = ? AND user_id = ?').bind(collectionId, session.user_id).first()
+                    const owned = await env.DB.prepare('SELECT * FROM collections WHERE id = ? AND user_id = ?').bind(collectionId, session.user_id).first()
+                    const existing = owned || await selectCollection(env, collectionId, session.user_id)
                     if (!existing) return error('collection_not_found', 404, request, env)
+                    const role = existing.role || (owned ? 'owner' : await collectionRole(env, session.user_id, collectionId))
 
                     if (data.removed === false && existing.removed_at) {
+                        if (role !== 'owner') return error('permission_denied', 403, request, env, 'Only the Collection Owner can restore a Collection')
                         const removedBatch = existing.removed_batch
                         const collections = await userCollections(env, session.user_id)
                         const ids = descendantCollectionIds(collections, [collectionId])
@@ -2179,19 +2638,32 @@ export default {
                         const item = await env.DB.prepare(`SELECT c.*, COUNT(b.id) AS count FROM collections c
                             LEFT JOIN bookmarks b ON b.collection_id = c.id AND b.removed_at IS NULL
                             WHERE c.id = ? AND c.user_id = ? GROUP BY c.id`).bind(collectionId, session.user_id).first()
-                        return json({ result: true, item: collectionItem(item || { ...existing, removed_at: null }) }, 200, request, env)
+                        const link = await publicCollectionLink(env, item || { ...existing, removed_at: null })
+                        return json({ result: true, item: collectionItem({ ...(item || { ...existing, removed_at: null }), role, public_link: link }) }, 200, request, env)
                     }
 
                     const title = data.title === undefined ? existing.title : String(data.title).trim()
                     if (!title || title.length > 200)
                         return error('validation_failed', 400, request, env, 'Enter a collection title under 200 characters')
                     const parentId = data.parentId === undefined ? existing.parent_id : parseCollectionId(data.parentId)
-                    if (Number.isNaN(parentId) || parentId && !await collectionParentAllowed(env, session.user_id, collectionId, parentId))
+                    if (roleLevel(role) < roleLevel('editor'))
+                        return error('permission_denied', 403, request, env, 'Editor access is required to update a Collection')
+                    if (Number.isNaN(parentId) || parentId && !await collectionParentAllowed(env, session.user_id, collectionId, parentId) && !await collectionCanWrite(env, session.user_id, parentId))
                         return error('collection_not_found', 404, request, env)
-                    await env.DB.prepare('UPDATE collections SET title = ?, parent_id = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(title, parentId || null, Date.now(), collectionId, session.user_id).run()
+                    const changesPublic = data.public !== undefined || data.isPublic !== undefined || data.slug !== undefined
+                    if (changesPublic && role !== 'owner')
+                        return error('permission_denied', 403, request, env, 'Only the Collection Owner can change public settings')
+                    const isPublic = data.public === undefined && data.isPublic === undefined
+                        ? Number(existing.is_public || 0) : (data.public === true || data.isPublic === true || String(data.public ?? data.isPublic).toLowerCase() === 'true' ? 1 : 0)
+                    const nextSlug = data.slug === undefined ? await persistedSlug(env, existing) : slugify(data.slug)
+                    if (data.slug !== undefined && !nextSlug)
+                        return error('validation_failed', 400, request, env, 'Public Link slug must contain letters or numbers')
+                    const ownerId = Number(existing.user_id || session.user_id)
+                    await env.DB.prepare('UPDATE collections SET title = ?, parent_id = ?, slug = ?, is_public = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(title, parentId || null, nextSlug, isPublic, Date.now(), collectionId, ownerId).run()
                     await recordAudit(env, request, { userId: session.user_id, action: 'collection.update', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
-                    return json({ result: true, item: collectionItem({ ...existing, title, parent_id: parentId || null }) }, 200, request, env)
+                    const link = await publicCollectionLink(env, { ...existing, id: collectionId, title, slug: nextSlug, is_public: isPublic })
+                    return json({ result: true, item: collectionItem({ ...existing, title, parent_id: parentId || null, slug: nextSlug, is_public: isPublic, role, public_link: link }) }, 200, request, env)
                 }
                 if (request.method === 'DELETE') {
                     if (collectionId === -99) {
@@ -2200,6 +2672,7 @@ export default {
                         if (bookmarkIds.length) {
                             await deleteContentObjects(env, session.user_id, bookmarkIds)
                             const placeholders = bookmarkIds.map(() => '?').join(',')
+                            await env.DB.prepare(`DELETE FROM published_snapshots WHERE bookmark_id IN (${placeholders})`).bind(...bookmarkIds).run()
                             await env.DB.prepare(`DELETE FROM background_tasks WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                             await env.DB.prepare(`DELETE FROM bookmark_changes WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                             await env.DB.prepare(`DELETE FROM bookmarks WHERE user_id = ? AND id IN (${placeholders}) AND removed_at IS NOT NULL`).bind(session.user_id, ...bookmarkIds).run()
@@ -2208,6 +2681,8 @@ export default {
                         const collectionIds = (collections.results || []).map(item => Number(item.id))
                         if (collectionIds.length) {
                             const placeholders = collectionIds.map(() => '?').join(',')
+                            await env.DB.prepare(`DELETE FROM published_snapshots WHERE collection_id IN (${placeholders})`).bind(...collectionIds).run()
+                            await env.DB.prepare(`DELETE FROM collection_invitations WHERE collection_id IN (${placeholders})`).bind(...collectionIds).run()
                             await env.DB.prepare(`DELETE FROM collection_collaborators WHERE collection_id IN (${placeholders})`).bind(...collectionIds).run()
                             await env.DB.prepare(`DELETE FROM collections WHERE user_id = ? AND id IN (${placeholders}) AND removed_at IS NOT NULL`).bind(session.user_id, ...collectionIds).run()
                         }
@@ -2259,6 +2734,8 @@ export default {
                 }
                 const ids = [...empty].sort((left, right) => depth(right) - depth(left))
                 for (const id of ids) {
+                    await env.DB.prepare('DELETE FROM published_snapshots WHERE collection_id = ?').bind(id).run()
+                    await env.DB.prepare('DELETE FROM collection_invitations WHERE collection_id = ?').bind(id).run()
                     await env.DB.prepare('DELETE FROM collection_collaborators WHERE collection_id = ?').bind(id).run()
                     await env.DB.prepare('DELETE FROM collections WHERE user_id = ? AND id = ? AND removed_at IS NULL').bind(session.user_id, id).run()
                 }
@@ -2289,6 +2766,7 @@ export default {
                     if (bookmarkIds.length) {
                         await deleteContentObjects(env, session.user_id, bookmarkIds)
                         const placeholders = bookmarkIds.map(() => '?').join(',')
+                        await env.DB.prepare(`DELETE FROM published_snapshots WHERE bookmark_id IN (${placeholders})`).bind(...bookmarkIds).run()
                         await env.DB.prepare(`DELETE FROM background_tasks WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                         await env.DB.prepare(`DELETE FROM bookmark_changes WHERE user_id = ? AND bookmark_id IN (${placeholders})`).bind(session.user_id, ...bookmarkIds).run()
                         await env.DB.prepare(`DELETE FROM bookmarks WHERE user_id = ? AND id IN (${placeholders}) AND removed_at IS NOT NULL`).bind(session.user_id, ...bookmarkIds).run()
@@ -2330,7 +2808,18 @@ export default {
                 if (spaceId === -99) where += ' AND removed_at IS NOT NULL'
                 else {
                     where += ' AND removed_at IS NULL'
-                    if (spaceId !== 0) { where += ' AND collection_id = ?'; values.push(spaceId) }
+                    if (spaceId !== 0) {
+                        const owned = await collectionOwned(env, session.user_id, spaceId)
+                        if (!owned) {
+                            const role = await collectionRole(env, session.user_id, spaceId)
+                            if (!role) return error('collection_not_found', 404, request, env)
+                            where = 'removed_at IS NULL AND collection_id = ?'
+                            values.splice(0, values.length, spaceId)
+                        } else {
+                            where += ' AND collection_id = ?'
+                            values.push(spaceId)
+                        }
+                    }
                 }
                 if (search) {
                     where += ' AND (title LIKE ? OR url LIKE ? OR description LIKE ? OR tags LIKE ? OR note LIKE ? OR highlights LIKE ?)'
@@ -2402,7 +2891,7 @@ export default {
 
                 const now = Date.now()
                 const collectionId = data.collectionId === undefined ? -1 : parseBookmarkCollectionId(data.collectionId)
-                if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
+                if (!Number.isSafeInteger(collectionId) || collectionId < -1 || collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId) && !await collectionCanWrite(env, session.user_id, collectionId))
                     return error('collection_not_found', 404, request, env)
                 const tags = bookmarkTags(data.tags)
                 const inserted = await env.DB.prepare('INSERT INTO bookmarks (user_id, url, title, description, note, highlights, created_at, updated_at, collection_id, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
@@ -2421,8 +2910,7 @@ export default {
 
             const highlightExport = url.pathname.match(/^\/v1\/raindrop\/(\d+)\/highlights\.(txt|csv)$/)
             if (highlightExport && request.method === 'GET') {
-                const bookmark = await env.DB.prepare('SELECT highlights FROM bookmarks WHERE id = ? AND user_id = ?')
-                    .bind(Number(highlightExport[1]), session.user_id).first()
+                const bookmark = await bookmarkAccessible(env, Number(highlightExport[1]), session.user_id)
                 if (!bookmark) return error('bookmark_not_found', 404, request, env)
                 const highlights = bookmarkHighlights(bookmark.highlights)
                 const body = highlightExport[2] === 'csv'
@@ -2438,11 +2926,15 @@ export default {
             const bookmarkMatch = url.pathname.match(/^\/v1\/raindrop\/(\d+)$/)
             if (bookmarkMatch) {
                 const bookmarkId = Number(bookmarkMatch[1])
-                const existing = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, session.user_id).first()
+                const owned = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, session.user_id).first()
+                const existing = owned || await bookmarkAccessible(env, bookmarkId, session.user_id)
                 if (!existing) return error('bookmark_not_found', 404, request, env)
+                const accessRole = owned ? 'owner' : await collectionRole(env, session.user_id, existing.collection_id)
                 if (request.method === 'GET')
                     return json({ result: true, item: bookmarkItem(existing) }, 200, request, env)
                 if (request.method === 'PUT') {
+                    if (roleLevel(accessRole) < roleLevel('editor'))
+                        return error('permission_denied', 403, request, env, 'Editor access is required to update this Bookmark')
                     const { data } = await readBody(request)
                     const title = data.title === undefined ? existing.title : String(data.title).trim()
                     const link = data.link === undefined ? existing.url : String(data.link).trim()
@@ -2455,20 +2947,20 @@ export default {
                     const removedAt = data.removed === false ? null : existing.removed_at
                     const removedBatch = data.removed === false ? null : existing.removed_batch
                     const highlights = data.highlights === undefined ? bookmarkHighlights(existing.highlights) : data.highlights
-                    if (data.collectionId === undefined && data.removed === false && collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId))
+                    if (data.collectionId === undefined && data.removed === false && collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId) && !await collectionCanWrite(env, session.user_id, collectionId))
                         collectionId = -1
                     const urlCheck = validateFetchableUrl(link)
                     if (!urlCheck.ok || title.length > 500 || description.length > 10000 || note.length > 10000)
                         return error(urlCheck.ok ? 'validation_failed' : urlCheck.code, 400, request, env, urlCheck.ok ? 'Enter an HTTP(S) bookmark URL and a title under 500 characters' : urlCheck.message)
                     if (data.tags !== undefined && !validTagList(data.tags))
                         return error('validation_failed', 400, request, env, 'Bookmark tags must be 100 characters or fewer')
-                    if (!Number.isSafeInteger(collectionId) || collectionId < -1 || !await collectionOwned(env, session.user_id, collectionId))
+                    if (!Number.isSafeInteger(collectionId) || collectionId < -1 || collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId) && !await collectionCanWrite(env, session.user_id, collectionId))
                         return error('collection_not_found', 404, request, env)
                     if (!validHighlightChanges(highlights))
                         return error('validation_failed', 400, request, env, 'Highlight text and note must be valid')
                     await env.DB.prepare('UPDATE bookmarks SET url = ?, title = ?, description = ?, note = ?, collection_id = ?, tags = ?, highlights = ?, removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(link, title, description, note, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)), removedAt, removedBatch, Date.now(), bookmarkId, session.user_id).run()
-                    const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, session.user_id).first()
+                        .bind(link, title, description, note, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)), removedAt, removedBatch, Date.now(), bookmarkId, existing.user_id).run()
+                    const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, existing.user_id).first()
                     const task = link !== existing.url
                         ? await createMetadataTask(env, request, session.user_id, bookmarkId, link)
                         : null
@@ -2476,10 +2968,12 @@ export default {
                     return json({ result: true, item: bookmarkItem(item), ...(task ? { task: publicTask(task), taskId: String(task.id) } : {}), ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }
                 if (request.method === 'DELETE') {
+                    if (roleLevel(accessRole) < roleLevel('editor'))
+                        return error('permission_denied', 403, request, env, 'Editor access is required to remove this Bookmark')
                     const now = Date.now()
                     const removedBatch = randomToken(16)
                     await env.DB.prepare('UPDATE bookmarks SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(now, removedBatch, now, bookmarkId, session.user_id).run()
+                        .bind(now, removedBatch, now, bookmarkId, existing.user_id).run()
                     await recordAudit(env, request, { userId: session.user_id, action: 'bookmark.remove', resourceType: 'bookmark', resourceId: bookmarkId, outcome: 'success' })
                     return json({ result: true, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
                 }

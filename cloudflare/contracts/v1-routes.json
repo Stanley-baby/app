@@ -306,6 +306,90 @@
             "path": "/v1/content/:id/download",
             "authentication": "required",
             "responses": [200, 401, 404, 409, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/collection/:id/sharing",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/collection/:id/sharing",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403, 404]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/collection/:id/sharing/:userId",
+            "authentication": "required",
+            "responses": [200, 400, 401, 403, 404]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/collection/:id/sharing/:userId",
+            "authentication": "required",
+            "responses": [200, 401, 403, 404]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/collection/:id/sharing",
+            "authentication": "required",
+            "responses": [200, 401, 403, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/collaborators/join",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/collection/:id/transfer",
+            "authentication": "required",
+            "responses": [200, 400, 401, 403, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/collection/:id/published-snapshots",
+            "authentication": "required",
+            "responses": [200, 401, 403, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/collection/:id/published-snapshots",
+            "authentication": "required",
+            "responses": [200, 400, 401, 403, 404, 409]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/collection/:id/published-snapshots/:contentId",
+            "authentication": "required",
+            "responses": [200, 401, 403, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/content/:id/publish",
+            "authentication": "required",
+            "responses": [200, 400, 401, 403, 404, 409]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/content/:id/publish",
+            "authentication": "required",
+            "responses": [200, 401, 403, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/public/collections/:id/:slug",
+            "authentication": "none",
+            "responses": [200, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/public/content/:id",
+            "authentication": "none",
+            "responses": [200, 404]
         }
     ]
 }

@@ -55,3 +55,16 @@ Beta currently sets `ATTACHMENT_SCAN_ENABLED=false`, so attachments remain
 private but are marked Cleared immediately and do not enqueue a scanner task.
 Set it to `true` before enabling `SCANNER_URL` and `SCANNER_API_KEY` for
 quarantine-first uploads.
+
+Collections support one-time invitations through `collection/:id/sharing` and
+`collaborators/join`. Roles are Owner, Editor, and Viewer; a role granted on a
+Parent Collection is inherited by its descendants and is never silently
+weakened by a lower child role. Ownership changes use the explicit
+`collection/:id/transfer` route.
+
+Public Collections expose a stable link containing the numeric Resource ID and
+mutable slug. Bookmark metadata is public only when the Collection is public;
+Protected Content and Saved-page Snapshots remain private until the Owner
+explicitly publishes a Cleared Snapshot through
+`collection/:id/published-snapshots`. Public snapshot streams still go through
+the Worker and never expose an R2 object URL.

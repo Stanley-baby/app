@@ -872,3 +872,173 @@ paths:
           description: Content not found for this User.
         '409':
           description: Content is still Quarantined.
+  /v1/collection/{id}/sharing:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: Direct Collaborators and their roles.}
+        '401': {description: Login required.}
+        '404': {description: Collection not found.}
+    post:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+                  enum: [editor, viewer, member]
+      responses:
+        '201': {description: One-time invitation created.}
+        '400': {description: Invalid role.}
+        '401': {description: Login required.}
+        '403': {description: Editor or Owner access required.}
+  /v1/collection/{id}/sharing/{userId}:
+    put:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+        - in: path
+          name: userId
+          required: true
+          schema: {type: integer}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [editor, viewer, member]
+      responses:
+        '200': {description: Collaborator role updated.}
+        '400': {description: Invalid role.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or User not found.}
+    delete:
+      responses:
+        '200': {description: Collaborator removed.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or User not found.}
+  /v1/collaborators/join:
+    get:
+      parameters:
+        - in: query
+          name: token
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Invitation accepted.}
+        '400': {description: Invitation is invalid or expired.}
+        '401': {description: Login required.}
+        '404': {description: Collection not found.}
+  /v1/collection/{id}/transfer:
+    post:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId: {type: integer, minimum: 1}
+      responses:
+        '200': {description: Collection ownership transferred explicitly.}
+        '400': {description: Invalid target User.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or User not found.}
+  /v1/collection/{id}/published-snapshots:
+    get:
+      responses:
+        '200': {description: Published snapshot metadata.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contentId: {type: string}
+                contentIds:
+                  type: array
+                  items: {type: string}
+      responses:
+        '200': {description: Cleared snapshot explicitly published.}
+        '400': {description: Snapshot validation failed.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or content not found.}
+        '409': {description: Snapshot is not Cleared Content.}
+  /v1/collection/{id}/published-snapshots/{contentId}:
+    delete:
+      responses:
+        '200': {description: Published snapshot revoked.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or content not found.}
+  /v1/content/{id}/publish:
+    post:
+      responses:
+        '200': {description: Cleared snapshot published to its Owner Collection.}
+        '400': {description: Snapshot validation failed.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Content not found.}
+        '409': {description: Snapshot is not Cleared Content.}
+    delete:
+      responses:
+        '200': {description: Published snapshot revoked.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Content not found.}
+  /v1/public/collections/{id}/{slug}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+        - in: path
+          name: slug
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Public Collection metadata and Bookmark list without private content.}
+        '404': {description: Collection is private, removed, or not found.}
+  /v1/public/content/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Published Cleared Snapshot stream.}
+        '404': {description: Content is not currently published.}

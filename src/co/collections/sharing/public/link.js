@@ -7,9 +7,9 @@ import { Layout, Text, Buttons } from '~co/common/form'
 import Button from '~co/common/button'
 import Icon from '~co/common/icon'
 
-export default function SharingLink({ collection: { slug, _id, public: pub } }) {
+export default function SharingLink({ collection: { slug, _id, public: pub, publicLink } }) {
     const user = useSelector(state=>getUser(state))
-    const link = `https://${user.name}.raindrop.page/${slug||''}-${_id}`
+    const link = publicLink || `https://${user.name}.raindrop.page/${slug||''}-${_id}`
 
     const input = useRef(null)
     const copy = useCallback(()=>{
