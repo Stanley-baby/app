@@ -24,7 +24,6 @@ const metadataLeaseMs = 60 * 1000
 const metadataRetryDelays = [5, 30, 300]
 const invitationDays = 7
 const collectionRoles = new Set(['owner', 'editor', 'viewer'])
-const collectionViews = new Set(['list', 'grid', 'masonry', 'simple'])
 const migrationDefaultMaxBytes = 2 * 1024 * 1024
 const migrationMaxItems = 10000
 
@@ -1641,7 +1640,6 @@ const collectionItem = item => ({
     public: Boolean(item.is_public),
     slug: item.slug || slugify(item.title) || String(item.id),
     publicLink: item.public_link,
-    view: normalizeCollectionView(item.view),
     access: {
         level: roleLevel(item.role || 'owner'),
         role: item.role || 'owner',
@@ -1660,13 +1658,6 @@ const parseBookmarkCollectionId = value => {
     const id = Number(value)
     return Number.isSafeInteger(id) && id >= -1 ? (id > 0 ? id : -1) : NaN
 }
-
-const parseCollectionView = value => {
-    const view = String(value || '').toLowerCase()
-    return collectionViews.has(view) ? view : null
-}
-
-const normalizeCollectionView = value => parseCollectionView(value) || 'list'
 
 const normalizeRole = value => {
     const role = String(value || '').toLowerCase()
@@ -1779,7 +1770,7 @@ const publishedSnapshotsFor = async (env, collectionId) => {
 }
 
 const publicCollectionPayload = async (env, collectionId, suppliedSlug = '') => {
-    const collection = await env.DB.prepare(`SELECT id, user_id, title, parent_id, slug, is_public, view, removed_at, created_at, updated_at
+    const collection = await env.DB.prepare(`SELECT id, user_id, title, parent_id, slug, is_public, removed_at, created_at, updated_at
         FROM collections WHERE id = ?`).bind(Number(collectionId)).first()
     if (!collection || collection.removed_at || !Number(collection.is_public)) return null
 
@@ -1808,7 +1799,6 @@ const publicCollectionPayload = async (env, collectionId, suppliedSlug = '') => 
         slug,
         public: true,
         publicLink: await publicCollectionLink(env, collection),
-        view: normalizeCollectionView(collection.view),
         parentId: collection.parent_id,
         created: collection.created_at ? new Date(collection.created_at).toISOString() : null,
         lastUpdate: collection.updated_at ? new Date(collection.updated_at).toISOString() : null
@@ -3244,17 +3234,6 @@ export default {
                 return json({ result: true, count: ids.length, ...(await bookmarkSync(env, session.user_id)) }, 200, request, env)
             }
 
-            if (url.pathname === '/v1/collections' && request.method === 'PUT') {
-                const { data } = await readBody(request)
-                const view = parseCollectionView(data.view)
-                if (!view)
-                    return error('validation_failed', 400, request, env, 'Collection view must be list, grid, masonry, or simple')
-                await env.DB.prepare('UPDATE collections SET view = ?, updated_at = ? WHERE user_id = ? AND removed_at IS NULL')
-                    .bind(view, Date.now(), session.user_id).run()
-                await recordAudit(env, request, { userId: session.user_id, action: 'collection.update_view_bulk', resourceType: 'collection', resourceId: session.user_id, outcome: 'success' })
-                return json({ result: true, view }, 200, request, env)
-            }
-
             if (url.pathname === '/v1/collection' && request.method === 'POST') {
                 const { data } = await readBody(request)
                 const title = String(data.title || '').trim()
@@ -3338,15 +3317,12 @@ export default {
                     const nextSlug = data.slug === undefined ? await persistedSlug(env, existing) : slugify(data.slug)
                     if (data.slug !== undefined && !nextSlug)
                         return error('validation_failed', 400, request, env, 'Public Link slug must contain letters or numbers')
-                    const nextView = data.view === undefined ? normalizeCollectionView(existing.view) : parseCollectionView(data.view)
-                    if (!nextView)
-                        return error('validation_failed', 400, request, env, 'Collection view must be list, grid, masonry, or simple')
                     const ownerId = Number(existing.user_id || session.user_id)
-                    await env.DB.prepare('UPDATE collections SET title = ?, parent_id = ?, slug = ?, is_public = ?, view = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(title, parentId || null, nextSlug, isPublic, nextView, Date.now(), collectionId, ownerId).run()
+                    await env.DB.prepare('UPDATE collections SET title = ?, parent_id = ?, slug = ?, is_public = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(title, parentId || null, nextSlug, isPublic, Date.now(), collectionId, ownerId).run()
                     await recordAudit(env, request, { userId: session.user_id, action: 'collection.update', resourceType: 'collection', resourceId: collectionId, outcome: 'success' })
                     const link = await publicCollectionLink(env, { ...existing, id: collectionId, title, slug: nextSlug, is_public: isPublic })
-                    return json({ result: true, item: collectionItem({ ...existing, title, parent_id: parentId || null, slug: nextSlug, is_public: isPublic, view: nextView, role, public_link: link }) }, 200, request, env)
+                    return json({ result: true, item: collectionItem({ ...existing, title, parent_id: parentId || null, slug: nextSlug, is_public: isPublic, role, public_link: link }) }, 200, request, env)
                 }
                 if (request.method === 'DELETE') {
                     if (collectionId === -99) {
