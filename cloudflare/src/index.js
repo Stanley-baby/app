@@ -12,6 +12,7 @@ const metadataTaskType = 'metadata_enrichment'
 const attachmentTaskType = 'attachment_scan'
 const captureTaskType = 'capture'
 const migrationTaskType = 'migration_import'
+const backupTaskType = 'backup'
 const backgroundTaskTypes = new Set([metadataTaskType, attachmentTaskType, captureTaskType, migrationTaskType])
 const metadataMaxRetries = 3
 const metadataMaxRedirects = 5
@@ -26,6 +27,10 @@ const invitationDays = 7
 const collectionRoles = new Set(['owner', 'editor', 'viewer'])
 const migrationDefaultMaxBytes = 2 * 1024 * 1024
 const migrationMaxItems = 10000
+const backupDailyRetention = 30
+const backupMonthlyRetention = 12
+const backupMaxBytes = 16 * 1024 * 1024
+const backupUserPageSize = 100
 
 const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
 
@@ -1192,7 +1197,464 @@ const processTask = async (env, taskId, type) => {
     if (type === attachmentTaskType) return processAttachmentScanTask(env, taskId)
     if (type === captureTaskType) return processCaptureTask(env, taskId)
     if (type === migrationTaskType) return processMigrationTask(env, taskId)
+    if (type === backupTaskType) return processBackupTask(env, taskId)
     return { action: 'skip' }
+}
+
+const readR2Object = async object => {
+    if (!object) return null
+    if (object.arrayBuffer) return new Uint8Array(await object.arrayBuffer())
+    if (object.body) return new Uint8Array(await new Response(object.body).arrayBuffer())
+    return null
+}
+
+const exportBookmark = item => ({
+    _id: Number(item.id ?? item._id),
+    id: Number(item.id ?? item._id),
+    link: String(item.link ?? item.url ?? ''),
+    title: String(item.title || ''),
+    description: String(item.description ?? item.excerpt ?? ''),
+    excerpt: String(item.description ?? item.excerpt ?? ''),
+    note: String(item.note || ''),
+    cover: String(item.cover || ''),
+    collectionId: Number(item.collectionId ?? item.collection_id ?? -1),
+    tags: bookmarkTags(item.tags),
+    highlights: bookmarkHighlights(item.highlights),
+    created: item.created || taskDate(item.created_at),
+    lastUpdate: item.lastUpdate || taskDate(item.updated_at)
+})
+
+const exportCollection = item => ({
+    _id: Number(item.id ?? item._id),
+    id: Number(item.id ?? item._id),
+    title: String(item.title || ''),
+    parentId: item.parentId ?? item.parent_id ?? null,
+    slug: String(item.slug || ''),
+    created: item.created || taskDate(item.created_at),
+    lastUpdate: item.lastUpdate || taskDate(item.updated_at)
+})
+
+const exportIds = url => {
+    const raw = url.searchParams.get('ids')
+    if (raw === null) return null
+    const values = String(raw).split(',')
+        .map(Number).filter(id => Number.isSafeInteger(id) && id > 0)
+    return new Set(values)
+}
+
+const exportSearchMatch = (item, search) => {
+    if (!search) return true
+    const value = search.toLowerCase()
+    return [item.url, item.link, item.title, item.description, item.excerpt, item.note, item.tags, item.highlights]
+        .some(field => String(field || '').toLowerCase().includes(value))
+}
+
+const exportData = async (env, userId, { spaceId = 0, url = null, includeContent = false } = {}) => {
+    const requestedIds = url ? exportIds(url) : null
+    const search = url ? String(url.searchParams.get('search') || '').replace(/^"|"$/g, '').trim() : ''
+    const targetCollection = Number(spaceId)
+    const rows = (await env.DB.prepare(`WITH RECURSIVE accessible(id) AS (
+            SELECT c.id FROM collections c
+            LEFT JOIN collection_collaborators cc ON cc.collection_id = c.id AND cc.user_id = ?
+            WHERE c.removed_at IS NULL AND (c.user_id = ? OR cc.user_id IS NOT NULL)
+            UNION
+            SELECT c.id FROM collections c JOIN accessible parent ON c.parent_id = parent.id
+            WHERE c.removed_at IS NULL
+        )
+        SELECT b.* FROM bookmarks b WHERE b.removed_at IS NULL
+        AND (b.user_id = ? OR b.collection_id IN (SELECT id FROM accessible))
+        ORDER BY b.updated_at DESC`).bind(userId, userId, userId).all()).results || []
+
+    const bookmarks = []
+    for (const row of rows) {
+        const id = Number(row.id)
+        const collectionId = Number(row.collection_id)
+        if (targetCollection > 0 && collectionId !== targetCollection ||
+            targetCollection === -1 && collectionId !== -1 || requestedIds && !requestedIds.has(id) ||
+            !exportSearchMatch(row, search)) continue
+        bookmarks.push(row)
+    }
+
+    const collections = []
+    const result = await env.DB.prepare(`WITH RECURSIVE accessible(id) AS (
+            SELECT c.id FROM collections c
+            LEFT JOIN collection_collaborators cc ON cc.collection_id = c.id AND cc.user_id = ?
+            WHERE c.removed_at IS NULL AND (c.user_id = ? OR cc.user_id IS NOT NULL)
+            UNION
+            SELECT c.id FROM collections c JOIN accessible parent ON c.parent_id = parent.id
+            WHERE c.removed_at IS NULL
+        )
+        SELECT c.* FROM collections c JOIN accessible ON accessible.id = c.id ORDER BY c.id`)
+        .bind(userId, userId).all()
+    const bookmarkCollections = new Set(bookmarks.map(item => Number(item.collection_id)).filter(id => id > 0))
+    for (const row of result.results || []) {
+        const id = Number(row.id)
+        if (targetCollection > 0 && id !== targetCollection || targetCollection === -1 ||
+            targetCollection === 0 && !bookmarkCollections.has(id) && Number(row.user_id) !== Number(userId)) continue
+        collections.push(row)
+    }
+
+    const contents = []
+    if (includeContent && bookmarks.length) {
+        let result
+        try {
+            const placeholders = bookmarks.map(() => '?').join(',')
+            result = await env.DB.prepare(`SELECT id, user_id, bookmark_id, kind, status, object_key,
+                filename, content_type, size_bytes, created_at, updated_at, cleared_at
+                FROM content_objects WHERE bookmark_id IN (${placeholders}) AND status = 'cleared' ORDER BY created_at`)
+                .bind(...bookmarks.map(bookmark => bookmark.id)).all()
+        } catch { throw new Error('Export content could not be read') }
+        const bookmarkOwners = new Map(bookmarks.map(bookmark => [Number(bookmark.id), Number(bookmark.user_id)]))
+        const maxBytes = integerEnv(env, ['BACKUP_MAX_BYTES'], backupMaxBytes)
+        const declaredBytes = (result.results || []).reduce((total, content) => total + Number(content.size_bytes || 0), 0)
+        if (declaredBytes > maxBytes)
+            throw Object.assign(new Error('Export content exceeds the archive limit'), { code: 'export_too_large', status: 413 })
+        for (const content of result.results || []) {
+            if (content.status !== 'cleared' || Number(content.user_id) !== bookmarkOwners.get(Number(content.bookmark_id))) continue
+            let bytes
+            if (!env.CONTENT_BUCKET?.get) throw new Error('Export content storage is unavailable')
+            try { bytes = await readR2Object(await env.CONTENT_BUCKET.get(content.object_key)) } catch { throw new Error('Export content could not be read') }
+            if (!bytes) continue
+            contents.push({
+                id: String(content.id),
+                bookmarkId: Number(content.bookmark_id),
+                kind: content.kind,
+                filename: safeFilename(content.filename),
+                contentType: safeContentType(content.content_type),
+                size: Number(content.size_bytes || bytes.byteLength),
+                data: bytesToBase64(bytes)
+            })
+        }
+    }
+
+    return {
+        collections: collections.map(exportCollection),
+        bookmarks: bookmarks.map(exportBookmark),
+        contents
+    }
+}
+
+const htmlEscape = value => String(value || '').replace(/[&<>"']/g, char =>
+    char === '&' ? '&amp;' : char === '<' ? '&lt;' : char === '>' ? '&gt;' : char === '"' ? '&quot;' : '&#39;')
+
+const csvValue = value => '"' + String(value ?? '').replace(/"/g, '""') + '"'
+
+const exportBody = (format, data) => {
+    const bookmarks = (data.bookmarks || []).map(exportBookmark)
+    const collections = (data.collections || []).map(exportCollection)
+    const collectionNames = new Map(collections.map(item => [item.id, item.title]))
+
+    if (format === 'html') return '<!doctype html><meta charset="utf-8"><title>Raindrop export</title><ul>' +
+        bookmarks.map(item => '<li><a href="' + htmlEscape(item.link) + '">' +
+            htmlEscape(item.title || item.link) + '</a>' +
+            (item.description ? '<p>' + htmlEscape(item.description) + '</p>' : '') +
+            (item.note ? '<p>' + htmlEscape(item.note) + '</p>' : '') + '</li>').join('') + '</ul>'
+
+    if (format === 'csv') return [
+        'title,url,description,note,collection,tags,highlights,created,lastUpdate',
+        ...bookmarks.map(item => [item.title, item.link, item.description, item.note,
+            collectionNames.get(item.collectionId) || '', item.tags.join(', '),
+            bookmarkHighlights(item.highlights).map(highlight => highlight.text).join('\n'),
+            item.created, item.lastUpdate].map(csvValue).join(','))
+    ].join('\n')
+
+    return bookmarks.map(item => [
+        item.title,
+        item.link,
+        item.description,
+        item.note,
+        item.tags.join(', '),
+        bookmarkHighlights(item.highlights).map(highlight => highlight.text + (highlight.note ? '\n' + highlight.note : '')).join('\n\n')
+    ].filter(Boolean).join('\n')).join('\n\n')
+}
+
+const concatBytes = chunks => {
+    const size = chunks.reduce((total, chunk) => total + chunk.length, 0)
+    const result = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) {
+        result.set(chunk, offset)
+        offset += chunk.length
+    }
+    return result
+}
+
+const numberBytes = (value, size) => {
+    const result = new Uint8Array(size)
+    let number = Number(value) >>> 0
+    for (let index = 0; index < size; index++) {
+        result[index] = number & 255
+        number >>>= 8
+    }
+    return result
+}
+
+const crc32 = bytes => {
+    let crc = 0xffffffff
+    for (const byte of bytes) {
+        crc ^= byte
+        for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? crc >>> 1 ^ 0xedb88320 : crc >>> 1
+    }
+    return (crc ^ 0xffffffff) >>> 0
+}
+
+// ponytail: store-only ZIP keeps the Worker dependency-free; add deflate when archive size requires compression.
+const zipArchive = entries => {
+    const local = []
+    const central = []
+    let offset = 0
+    for (const entry of entries) {
+        const name = encoder.encode(entry.name)
+        const body = entry.body instanceof Uint8Array ? entry.body : encoder.encode(String(entry.body || ''))
+        const checksum = crc32(body)
+        const header = concatBytes([
+            numberBytes(0x04034b50, 4), numberBytes(20, 2), numberBytes(0x800, 2), numberBytes(0, 2),
+            numberBytes(0, 2), numberBytes(0, 2), numberBytes(checksum, 4), numberBytes(body.length, 4),
+            numberBytes(body.length, 4), numberBytes(name.length, 2), numberBytes(0, 2), name
+        ])
+        local.push(header, body)
+        central.push(concatBytes([
+            numberBytes(0x02014b50, 4), numberBytes(20, 2), numberBytes(20, 2), numberBytes(0x800, 2),
+            numberBytes(0, 2), numberBytes(0, 2), numberBytes(0, 2), numberBytes(checksum, 4),
+            numberBytes(body.length, 4), numberBytes(body.length, 4), numberBytes(name.length, 2),
+            numberBytes(0, 2), numberBytes(0, 2), numberBytes(0, 2), numberBytes(0, 2), numberBytes(offset, 4), name
+        ]))
+        offset += header.length + body.length
+    }
+    const centralBytes = concatBytes(central)
+    return concatBytes([
+        ...local,
+        centralBytes,
+        concatBytes([
+            numberBytes(0x06054b50, 4), numberBytes(0, 2), numberBytes(0, 2), numberBytes(entries.length, 2),
+            numberBytes(entries.length, 2), numberBytes(centralBytes.length, 4), numberBytes(offset, 4), numberBytes(0, 2)
+        ])
+    ])
+}
+
+const exportEntries = data => {
+    const entries = [
+        { name: 'bookmarks.html', body: encoder.encode(exportBody('html', data)) },
+        { name: 'bookmarks.csv', body: encoder.encode(exportBody('csv', data)) },
+        { name: 'bookmarks.txt', body: encoder.encode(exportBody('txt', data)) },
+        { name: 'bookmarks.json', body: encoder.encode(JSON.stringify(data.bookmarks || [], null, 2)) },
+        { name: 'collections.json', body: encoder.encode(JSON.stringify(data.collections || [], null, 2)) },
+        { name: 'backup.json', body: encoder.encode(JSON.stringify({
+            ...data,
+            contents: (data.contents || []).map(content => ({
+                id: content.id,
+                bookmarkId: content.bookmarkId,
+                kind: content.kind,
+                filename: content.filename,
+                contentType: content.contentType,
+                size: content.size
+            }))
+        }, null, 2)) }
+    ]
+    const names = new Set(entries.map(entry => entry.name))
+    for (const content of data.contents || []) {
+        let name = 'attachments/' + Number(content.bookmarkId) + '/' + safeFilename(content.filename)
+        if (names.has(name)) name = 'attachments/' + Number(content.bookmarkId) + '/' + safeFilename(content.id) + '-' + safeFilename(content.filename)
+        names.add(name)
+        entries.push({ name, body: base64ToBytes(content.data) })
+    }
+    return entries
+}
+
+const exportResponse = (request, env, format, data, filename = 'raindrop-export') => {
+    const isZip = format === 'zip'
+    const body = isZip ? zipArchive(exportEntries(data)) : encoder.encode(exportBody(format, data))
+    const contentType = isZip ? 'application/zip' : format === 'html' ? 'text/html; charset=utf-8' :
+        format === 'csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8'
+    const headers = addCorsHeaders(new Headers({
+        'Content-Type': contentType,
+        'Content-Length': String(body.length),
+        'Content-Disposition': 'attachment; filename="' + filename + '.' + format + '"',
+        'Cache-Control': 'private, no-store',
+        'X-Request-ID': requestId(request)
+    }), request, env)
+    return new Response(body, { status: 200, headers })
+}
+
+const backupRetention = (env, kind) => integerEnv(env,
+    [kind === 'daily' ? 'BACKUP_RETENTION_DAILY' : 'BACKUP_RETENTION_MONTHLY'],
+    kind === 'daily' ? backupDailyRetention : backupMonthlyRetention)
+
+const selectBackup = async (env, id, userId = null) => {
+    const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
+    const values = userId === null ? [id] : [id, userId]
+    return env.DB.prepare(`SELECT id, user_id, kind, period_key, status, object_key, size_bytes,
+        error_code, error_message, created_at, updated_at, completed_at FROM backups WHERE ${where}`)
+        .bind(...values).first()
+}
+
+const publicBackup = backup => ({
+    _id: String(backup.id),
+    id: String(backup.id),
+    type: backup.kind,
+    kind: backup.kind,
+    status: backup.status,
+    created: taskDate(backup.created_at),
+    createdAt: taskDate(backup.created_at),
+    completed: taskDate(backup.completed_at),
+    completedAt: taskDate(backup.completed_at),
+    size: Number(backup.size_bytes || 0),
+    failure: backup.error_code ? { code: backup.error_code, message: backup.error_message } : null
+})
+
+const enqueueBackup = async (env, backup) => {
+    if (!env.TASK_QUEUE?.send) return true
+    try {
+        await env.TASK_QUEUE.send({ taskId: String(backup.id), type: backupTaskType })
+        return true
+    } catch {
+        const now = Date.now()
+        try {
+            await env.DB.prepare(`UPDATE backups SET status = 'failed', error_code = ?, error_message = ?,
+                updated_at = ?, completed_at = ? WHERE id = ? AND status = 'queued'`).bind(
+                'backup_enqueue_failed', 'The backup could not be queued', now, now, backup.id).run()
+        } catch {}
+        return false
+    }
+}
+
+const createBackup = async (env, userId, kind = 'manual', periodKey = null, request = null) => {
+    const id = randomToken(18)
+    const period = periodKey || 'manual:' + id
+    const now = Date.now()
+    const objectKey = 'backups/' + userId + '/' + id + '.json'
+    const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO backups
+        (id, user_id, kind, period_key, status, object_key, size_bytes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'queued', ?, 0, ?, ?)`).bind(
+        id, userId, kind, period, objectKey, now, now).run()
+    let backup = await selectBackup(env, id, userId)
+    if (!backup && kind !== 'manual')
+        backup = await env.DB.prepare(`SELECT id, user_id, kind, period_key, status, object_key, size_bytes,
+            error_code, error_message, created_at, updated_at, completed_at FROM backups
+            WHERE user_id = ? AND kind = ? AND period_key = ?`).bind(userId, kind, period).first()
+    if (!backup) return null
+    if (Number(inserted?.meta?.changes || 0) === 1 || backup.status === 'queued' || backup.status === 'failed') {
+        if (backup.status === 'failed') {
+            await env.DB.prepare(`UPDATE backups SET status = 'queued', error_code = NULL, error_message = NULL,
+                completed_at = NULL, updated_at = ? WHERE id = ? AND status = 'failed'`).bind(now, backup.id).run()
+            backup = await selectBackup(env, backup.id, userId) || backup
+        }
+        await enqueueBackup(env, backup)
+        backup = await selectBackup(env, backup.id, userId) || backup
+        if (request) await recordAudit(env, request, { userId, action: 'backup.created', resourceType: 'backup', resourceId: backup.id, outcome: backup.status === 'failed' ? 'failed' : 'success' })
+    }
+    return backup
+}
+
+const processBackupTask = async (env, backupId) => {
+    let backup = await selectBackup(env, backupId)
+    if (!backup || backup.status === 'succeeded') return { action: 'skip' }
+    const now = Date.now()
+    if (backup.status === 'processing') {
+        if (now - Number(backup.updated_at || 0) < metadataLeaseMs)
+            return { action: 'defer', delaySeconds: Math.ceil(metadataLeaseMs / 1000) }
+        await env.DB.prepare(`UPDATE backups SET status = 'queued', updated_at = ?
+            WHERE id = ? AND status = 'processing' AND updated_at = ?`).bind(now, backupId, backup.updated_at).run()
+        backup = await selectBackup(env, backupId)
+    }
+    if (backup?.status !== 'queued') return { action: 'skip' }
+    const claimed = await env.DB.prepare(`UPDATE backups SET status = 'processing', updated_at = ?
+        WHERE id = ? AND status = 'queued'`).bind(now, backupId).run()
+    if (Number(claimed?.meta?.changes || 0) !== 1) return { action: 'skip' }
+
+    try {
+        if (!env.BACKUP_BUCKET?.put)
+            throw metadataFailure('backup_storage_unavailable', 'Backup storage is not configured', true)
+        const snapshot = await createExportSnapshot(env, backup.user_id, now)
+        const bytes = encoder.encode(JSON.stringify(snapshot))
+        await env.BACKUP_BUCKET.put(backup.object_key, bytes, {
+            httpMetadata: { contentType: 'application/json' },
+            customMetadata: { userId: String(backup.user_id), backupId: String(backup.id) }
+        })
+        const completedAt = Date.now()
+        await env.DB.prepare(`UPDATE backups SET status = 'succeeded', size_bytes = ?, error_code = NULL,
+            error_message = NULL, updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`)
+            .bind(bytes.length, completedAt, completedAt, backupId).run()
+        return { action: 'ack' }
+    } catch (failure) {
+        const failedAt = Date.now()
+        const code = failure?.code || 'backup_failed'
+        const message = failure?.message || 'The backup could not be created'
+        await env.DB.prepare(`UPDATE backups SET status = 'queued', error_code = ?, error_message = ?,
+            updated_at = ?, completed_at = NULL WHERE id = ? AND status = 'processing'`)
+            .bind(code, message, failedAt, backupId).run()
+        await recordAlert(env, taskRequest(env, backupId), {
+            userId: backup.user_id,
+            kind: 'backup_failed',
+            metadata: { backupId: String(backupId), code }
+        })
+        return { action: 'retry', delaySeconds: metadataRetryDelays[0], failure: { code, message } }
+    }
+}
+
+const createExportSnapshot = async (env, userId, createdAt = Date.now()) => ({
+    version: 1,
+    createdAt: new Date(createdAt).toISOString(),
+    ...(await exportData(env, userId, { includeContent: true }))
+})
+
+const readBackupSnapshot = async (env, backup) => {
+    if (!env.BACKUP_BUCKET?.get) return null
+    const object = await env.BACKUP_BUCKET.get(backup.object_key)
+    const bytes = await readR2Object(object)
+    if (!bytes) return null
+    try {
+        const snapshot = JSON.parse(new TextDecoder().decode(bytes))
+        return snapshot && typeof snapshot === 'object' ? snapshot : null
+    } catch {
+        return null
+    }
+}
+
+const purgeBackups = async (env) => {
+    let rows
+    try {
+        rows = (await env.DB.prepare(`SELECT id, user_id, kind, status, object_key, created_at
+            FROM backups WHERE kind IN ('daily', 'monthly') AND status = 'succeeded'
+            ORDER BY user_id, kind, created_at DESC`).bind().all()).results || []
+    } catch { return }
+    const counts = new Map()
+    for (const row of rows) {
+        const key = row.user_id + ':' + row.kind
+        const count = counts.get(key) || 0
+        counts.set(key, count + 1)
+        if (count < backupRetention(env, row.kind)) continue
+        try {
+            if (env.BACKUP_BUCKET?.delete) await env.BACKUP_BUCKET.delete(row.object_key)
+            await env.DB.prepare('DELETE FROM backups WHERE id = ?').bind(row.id).run()
+        } catch {}
+    }
+}
+
+const scheduleBackups = async (env, scheduledTime = Date.now()) => {
+    const numericTime = Number(scheduledTime)
+    const now = Number.isFinite(numericTime) ? numericTime : Date.now()
+    const date = new Date(now)
+    if (Number.isNaN(date.getTime())) return
+    const day = date.toISOString().slice(0, 10)
+    const month = date.toISOString().slice(0, 7)
+    let afterId = 0
+    for (;;) {
+        let users
+        try {
+            users = (await env.DB.prepare('SELECT id FROM users WHERE id > ? ORDER BY id LIMIT ?')
+                .bind(afterId, backupUserPageSize).all()).results || []
+        } catch { return }
+        if (!users.length) break
+        for (const user of users) {
+            try { await createBackup(env, user.id, 'daily', day) } catch {}
+            if (date.getUTCDate() === 1)
+                try { await createBackup(env, user.id, 'monthly', month) } catch {}
+        }
+        afterId = Number(users[users.length - 1].id)
+        if (users.length < backupUserPageSize) break
+    }
+    await purgeBackups(env)
 }
 
 const createContentRecord = async (env, { userId, bookmarkId, kind, filename, contentType, size, status = 'quarantined', migrationKey = null }) => {
@@ -2023,7 +2485,9 @@ const auditRoute = request => {
         [/^\/v1\/collection\/-?\d+$/, '/v1/collection/:id'],
         [/^\/v1\/raindrop\/\d+\/highlights\.(txt|csv)$/, '/v1/raindrop/:id/highlights.$1'],
         [/^\/v1\/raindrop\/\d+$/, '/v1/raindrop/:id'],
+        [/^\/v1\/raindrops\/-?\d+\/export\.(html|csv|txt|zip)$/, '/v1/raindrops/:collectionId/export'],
         [/^\/v1\/raindrops\/-?\d+$/, '/v1/raindrops/:collectionId'],
+        [/^\/v1\/(?:backup|backups)\/[^/]+(?:\.(?:html|csv|txt|zip)|\/status)?$/, '/v1/backups/:id'],
         [/^\/v1\/tags\/-?\d+$/, '/v1/tags/:collectionId'],
         [/^\/v1\/filters\/-?\d+$/, '/v1/filters/:collectionId'],
         [/^\/v1\/sessions\/[^/]+$/, '/v1/sessions/:id'],
@@ -2046,6 +2510,7 @@ const auditRoute = request => {
         '/v1/sessions', '/v1/collections/all', '/v1/collections', '/v1/collections/clean',
         '/v1/collection', '/v1/tags/recent', '/v1/tags/0', '/v1/tag',
         '/v1/raindrops', '/v1/raindrops/changes', '/v1/raindrop', '/v1/user', '/v1/user/quota',
+        '/v1/backup', '/v1/backups',
         '/v1/user/connect/google', '/v1/user/connect/google/revoke', '/v1/user/deletion',
         '/v1/tasks',
         '/v1/import', '/v1/import/preflight',
@@ -2235,7 +2700,8 @@ const requiresVerification = pathname =>
     pathname.startsWith('/v1/developer/') ||
     pathname.startsWith('/v1/collaborators/') ||
     pathname.includes('/sharing') ||
-    pathname.startsWith('/v1/backups') ||
+    pathname.startsWith('/v1/backup') ||
+    pathname.includes('/export.') ||
     pathname === '/v1/import' || pathname.startsWith('/v1/import/') ||
     pathname.includes('/capture') ||
     pathname.includes('/content') ||
@@ -2327,6 +2793,17 @@ const hasSharedCollections = (env, userId) => env.DB.prepare(`SELECT 1 FROM coll
     JOIN collections c ON c.id = cc.collection_id
     WHERE c.user_id = ? AND cc.user_id != ? LIMIT 1`).bind(userId, userId).first()
 
+const deleteBackups = async (env, userId) => {
+    try {
+        const rows = await env.DB.prepare('SELECT object_key FROM backups WHERE user_id = ?').bind(userId).all()
+        if (env.BACKUP_BUCKET?.delete)
+            for (const row of rows.results || []) {
+                try { await env.BACKUP_BUCKET.delete(row.object_key) } catch {}
+            }
+        await env.DB.prepare('DELETE FROM backups WHERE user_id = ?').bind(userId).run()
+    } catch {}
+}
+
 const deleteUserData = async (env, userId) => {
     let bookmarkIds = []
     try {
@@ -2334,6 +2811,7 @@ const deleteUserData = async (env, userId) => {
         bookmarkIds = (rows.results || []).map(item => Number(item.id)).filter(Number.isSafeInteger)
     } catch {}
     await deleteContentObjects(env, userId, bookmarkIds)
+    await deleteBackups(env, userId)
     const statements = [
         env.DB.prepare('DELETE FROM email_tokens WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId),
@@ -2670,6 +3148,75 @@ export default {
                     remaining: usage.remaining,
                     resetAt: new Date(usage.resetAt).toISOString()
                 } }, 200, request, env)
+            }
+
+            const exportMatch = url.pathname.match(/^\/v1\/raindrops\/(-?\d+)\/export\.(html|csv|txt|zip)$/)
+            if (exportMatch && request.method === 'GET') {
+                const spaceId = Number(exportMatch[1])
+                if (spaceId < -1)
+                    return error('validation_failed', 400, request, env, 'Export supports active Bookmarks only')
+                if (spaceId > 0 && !await collectionRole(env, session.user_id, spaceId))
+                    return error('collection_not_found', 404, request, env)
+                const format = exportMatch[2]
+                let data
+                try {
+                    data = await exportData(env, session.user_id, {
+                        spaceId,
+                        url,
+                        includeContent: format === 'zip'
+                    })
+                } catch (failure) {
+                    const status = failure?.status === 413 ? 413 : 503
+                    return error(failure?.code || 'export_unavailable', status, request, env,
+                        status === 413 ? failure.message : 'The export could not be created')
+                }
+                await recordAudit(env, request, { userId: session.user_id, action: 'export.download', resourceType: 'export', resourceId: format, outcome: 'success' })
+                return exportResponse(request, env, format, data)
+            }
+
+            if (url.pathname === '/v1/backup' && ['GET', 'POST'].includes(request.method)) {
+                let backup
+                try { backup = await createBackup(env, session.user_id, 'manual', null, request) } catch {}
+                if (!backup)
+                    return error('backup_unavailable', 503, request, env, 'The backup could not be queued')
+                const status = backup.status === 'failed' ? 503 : 202
+                return json({
+                    result: status === 202,
+                    id: String(backup.id),
+                    status: backup.status,
+                    backup: publicBackup(backup),
+                    backupId: String(backup.id),
+                    taskId: String(backup.id)
+                }, status, request, env)
+            }
+
+            if (url.pathname === '/v1/backups' && request.method === 'GET') {
+                const rows = await env.DB.prepare(`SELECT id, user_id, kind, period_key, status, object_key, size_bytes,
+                    error_code, error_message, created_at, updated_at, completed_at
+                    FROM backups WHERE user_id = ? AND status = 'succeeded' ORDER BY created_at DESC`).bind(session.user_id).all()
+                return json({ result: true, items: (rows.results || []).map(publicBackup) }, 200, request, env)
+            }
+
+            const backupStatusMatch = url.pathname.match(/^\/v1\/(?:backups|backup)\/([^/.]+)(?:\/status)?$/)
+            if (backupStatusMatch && request.method === 'GET') {
+                const backup = await selectBackup(env, decodeURIComponent(backupStatusMatch[1]), session.user_id)
+                if (!backup) return error('backup_not_found', 404, request, env)
+                return json({ result: true, backup: publicBackup(backup) }, 200, request, env)
+            }
+
+            const backupDownloadMatch = url.pathname.match(/^\/v1\/(?:backups|backup)\/([^/]+)\.(html|csv|txt|zip)$/)
+            if (backupDownloadMatch && request.method === 'GET') {
+                const backupId = decodeURIComponent(backupDownloadMatch[1])
+                const backup = await selectBackup(env, backupId, session.user_id)
+                if (!backup) return error('backup_not_found', 404, request, env)
+                if (backup.status !== 'succeeded')
+                    return error('backup_pending', 409, request, env, 'The backup is not ready for download')
+                let snapshot
+                try { snapshot = await readBackupSnapshot(env, backup) } catch {
+                    return error('backup_unavailable', 503, request, env, 'The backup could not be read')
+                }
+                if (!snapshot) return error('backup_not_found', 404, request, env)
+                return exportResponse(request, env, backupDownloadMatch[2], snapshot, 'raindrop-backup-' + backupId)
             }
 
             if (url.pathname === '/v1/import/preflight' && request.method === 'POST') {
@@ -3726,18 +4273,20 @@ export default {
                 message.ack?.()
                 continue
             }
-            if (!body?.taskId) {
+            const taskId = body?.taskId || body?.backupId
+            if (!taskId) {
                 message.ack?.()
                 continue
             }
             try {
-                const queuedTask = body.type ? null : await selectTask(env, body.taskId)
-                const result = await processTask(env, body.taskId, body.type || queuedTask?.type)
+                const queuedTask = body.type ? null : await selectTask(env, taskId)
+                const type = body.type || (body.backupId ? backupTaskType : queuedTask?.type)
+                const result = await processTask(env, taskId, type)
                 if (result.action === 'retry') message.retry?.({ delaySeconds: result.delaySeconds })
                 else if (result.action === 'defer') message.retry?.({ delaySeconds: result.delaySeconds })
                 else if (result.action === 'dead_letter') {
                     try {
-                        await env.TASK_DLQ?.send({ taskId: body.taskId, type: body.type || queuedTask?.type || metadataTaskType, failure: result.failure })
+                        await env.TASK_DLQ?.send({ taskId, type: type || metadataTaskType, failure: result.failure })
                     } catch {}
                     message.ack?.()
                 } else message.ack?.()
@@ -3748,7 +4297,11 @@ export default {
     },
 
     async scheduled(controller, env, ctx) {
-        ctx.waitUntil(Promise.all([purgeExpiredDeletions(env), purgeAccounting(env)]))
+        ctx.waitUntil(Promise.all([
+            purgeExpiredDeletions(env),
+            purgeAccounting(env),
+            scheduleBackups(env, controller?.scheduledTime)
+        ]))
     }
 }
 
@@ -3762,5 +4315,8 @@ export {
     processCaptureTask,
     processMigrationTask,
     processMetadataTask,
+    processBackupTask,
+    purgeBackups,
+    scheduleBackups,
     validateFetchableUrl
 }

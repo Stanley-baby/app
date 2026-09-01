@@ -543,6 +543,46 @@ paths:
           description: Login required.
         '404':
           description: Collection not found for this User.
+  /v1/raindrops/{collectionId}/export.{format}:
+    parameters:
+      - in: path
+        name: collectionId
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: format
+        required: true
+        schema:
+          type: string
+          enum: [html, csv, txt, zip]
+      - in: query
+        name: ids
+        required: false
+        description: Comma-separated Bookmark IDs; unauthorized IDs are omitted.
+        schema:
+          type: string
+      - in: query
+        name: search
+        required: false
+        schema:
+          type: string
+    get:
+      responses:
+        '200':
+          description: Authorized Bookmark export in the requested format.
+        '400':
+          description: Unsupported Recycle Bin export scope.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Collection not found for this User.
+        '413':
+          description: Authorized cleared content exceeds the archive limit.
+        '503':
+          description: Export content could not be read.
   /v1/raindrops/changes:
     get:
       parameters:
@@ -560,6 +600,97 @@ paths:
           description: A non-negative Change Version is required.
         '401':
           description: Login required.
+  /v1/backup:
+    get:
+      responses:
+        '202':
+          description: Private R2 backup queued for the authenticated User.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '503':
+          description: Backup could not be queued.
+    post:
+      responses:
+        '202':
+          description: Private R2 backup queued for the authenticated User.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '503':
+          description: Backup could not be queued.
+  /v1/backups:
+    get:
+      responses:
+        '200':
+          description: The authenticated User's completed private restore points.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+  /v1/backups/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Private backup status.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Backup not found for this User.
+  /v1/backup/{id}/status:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Private backup status.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Backup not found for this User.
+  /v1/backup/{id}.{format}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: format
+        required: true
+        schema:
+          type: string
+          enum: [html, csv, txt, zip]
+    get:
+      responses:
+        '200':
+          description: Authorized private backup export.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Backup or private R2 object not found.
+        '409':
+          description: Backup is still being created.
+        '503':
+          description: Private R2 backup could not be read.
   /v1/collection/{id}/lastAction:
     get:
       parameters:

@@ -22,6 +22,16 @@ export default function SettingsBackupsFilesItem({ _id, created }) {
                     <Icon name='download' size='micro' />
                     CSV
                 </Button>
+
+                <Button href={`${API_ENDPOINT_URL}backup/${_id}.txt`} download>
+                    <Icon name='download' size='micro' />
+                    TXT
+                </Button>
+
+                <Button href={`${API_ENDPOINT_URL}backup/${_id}.zip`} download>
+                    <Icon name='download' size='micro' />
+                    ZIP
+                </Button>
             </ButtonsGroup>
         </Item>
     )
