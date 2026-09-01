@@ -4,8 +4,6 @@ import { useLocation } from 'react-router-dom'
 import t from '~t'
 import { target } from '~target'
 import config from '~config'
-import { connect } from 'react-redux'
-import { isPro } from '~data/selectors/user'
 import { API_ENDPOINT_URL } from '~data/constants/app'
 
 import { Label, Text } from '~co/common/form'
@@ -18,7 +16,7 @@ const providers = [
     { id: 'webdav', name: 'WebDAV' }
 ]
 
-function SettingsBackupsCloud({ pro }) {
+export default function SettingsBackupsCloud() {
     const { pathname } = useLocation()
     const webApp = target == 'web'
     const [connections, setConnections] = useState([])
@@ -76,7 +74,7 @@ function SettingsBackupsCloud({ pro }) {
                 </div>)}
 
                 <form className={s.form} onSubmit={save}>
-                    <select value={provider} onChange={event => { setProvider(event.target.value); setCredentials({}) }} disabled={!pro || !webApp}>
+                    <select value={provider} onChange={event => { setProvider(event.target.value); setCredentials({}) }} disabled={!webApp}>
                         {providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
                     </select>
                     {provider == 'webdav' ? <>
@@ -84,12 +82,10 @@ function SettingsBackupsCloud({ pro }) {
                         <Text required placeholder='Username' value={credentials.username || ''} onChange={event => setCredentials({ ...credentials, username: event.target.value })} />
                         <Text required type='password' placeholder='App password' value={credentials.password || ''} onChange={event => setCredentials({ ...credentials, password: event.target.value })} />
                     </> : <Text required type='password' placeholder={`${providers.find(item => item.id == provider).name} access token`} value={credentials.accessToken || ''} onChange={event => setCredentials({ accessToken: event.target.value })} />}
-                    <Button as='button' type='submit' variant='primary' disabled={!pro || !webApp}>Verify and save</Button>
+                    <Button as='button' type='submit' variant='primary' disabled={!webApp}>Verify and save</Button>
                 </form>
                 {message && <p role='status'>{message}</p>}
             </div>
         </>
     )
 }
-
-export default connect(state=>({ pro: isPro(state) }))(SettingsBackupsCloud)
