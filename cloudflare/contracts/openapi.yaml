@@ -630,6 +630,36 @@ paths:
           description: Login required.
         '403':
           description: Email verification required.
+  /v1/backup/connections:
+    get:
+      responses:
+        '200':
+          description: Verified backup destinations without readable credentials.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+    post:
+      responses:
+        '201':
+          description: Backup destination independently verified and encrypted credentials saved.
+        '400':
+          description: Provider or credentials rejected.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+  /v1/backup/connections/{id}/default:
+    post:
+      responses:
+        '200':
+          description: Default backup destination selected.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Backup destination not found.
   /v1/backups/{id}:
     get:
       parameters:

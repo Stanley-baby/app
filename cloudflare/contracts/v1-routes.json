@@ -219,6 +219,24 @@
         },
         {
             "method": "GET",
+            "path": "/v1/backup/connections",
+            "authentication": "required",
+            "responses": [200, 401, 403]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/backup/connections",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/backup/connections/:id/default",
+            "authentication": "required",
+            "responses": [200, 401, 403, 404]
+        },
+        {
+            "method": "GET",
             "path": "/v1/backups/:id",
             "authentication": "required",
             "responses": [200, 401, 403, 404]

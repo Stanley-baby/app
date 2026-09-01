@@ -21,6 +21,8 @@ class BackupDatabase {
         this.bookmarks = []
         this.contents = []
         this.backups = []
+        this.connections = []
+        this.externalCopies = []
         this.audits = []
     }
 
@@ -59,6 +61,13 @@ class BackupDatabase {
                 if (sql.includes('id = ?')) return this.backups.find(item => item.id === values[0]) || null
                 return this.backups.find(item => item.user_id === Number(values[0]) && item.kind === values[1] && item.period_key === values[2]) || null
             }
+            if (sql.includes('FROM backup_connections')) {
+                if (sql.includes('id = ? AND user_id = ?'))
+                    return this.connections.find(item => item.id === values[0] && item.user_id === Number(values[1])) || null
+                if (sql.includes('is_default = 1'))
+                    return this.connections.find(item => item.user_id === Number(values[0]) && item.is_default) || null
+                return this.connections.find(item => item.user_id === Number(values[0]) && item.provider === values[1]) || null
+            }
             return null
         }
         const all = async () => {
@@ -80,6 +89,8 @@ class BackupDatabase {
                 return { results: this.backups.filter(item => item.user_id === Number(values[0]) && (!sql.includes('status = \'succeeded\'') || item.status === 'succeeded')).sort((a, b) => b.created_at - a.created_at).map(item => ({ ...item })) }
             if (sql.includes('FROM backups WHERE kind IN'))
                 return { results: this.backups.filter(item => ['daily', 'monthly'].includes(item.kind) && item.status === 'succeeded').sort((a, b) => a.user_id - b.user_id || a.kind.localeCompare(b.kind) || b.created_at - a.created_at).map(item => ({ ...item })) }
+            if (sql.includes('FROM backup_connections'))
+                return { results: this.connections.filter(item => item.user_id === Number(values[0])).map(item => ({ ...item })) }
             return { results: [] }
         }
         const run = async () => {
@@ -89,6 +100,28 @@ class BackupDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE sessions SET last_seen_at')) return { meta: { changes: 1 } }
+            if (sql.includes('INSERT INTO backup_connections')) {
+                const existing = this.connections.find(item => item.user_id === Number(values[1]) && item.provider === values[2])
+                const connection = {
+                    id: existing?.id || values[0], user_id: Number(values[1]), provider: values[2], encrypted_credentials: values[3],
+                    is_default: Number(values[4]), verified_at: values[5], created_at: existing?.created_at || values[6], updated_at: values[7]
+                }
+                if (existing) Object.assign(existing, connection)
+                else this.connections.push(connection)
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE backup_connections SET is_default = CASE')) {
+                this.connections.filter(item => item.user_id === Number(values[1])).forEach(item => { item.is_default = item.id === values[0] ? 1 : 0 })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE backup_connections SET is_default = 0')) {
+                this.connections.filter(item => item.user_id === Number(values[0])).forEach(item => { item.is_default = 0 })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO external_backup_copies')) {
+                this.externalCopies.push({ backup_id: values[0], connection_id: values[1], status: sql.includes('\'succeeded\'') ? 'succeeded' : 'failed', remote_path: values[2] })
+                return { meta: { changes: 1 } }
+            }
             if (sql.includes('INSERT OR IGNORE INTO backups')) {
                 if (this.backups.some(item => item.user_id === Number(values[1]) && item.kind === values[2] && item.period_key === values[3]))
                     return { meta: { changes: 0 } }
@@ -164,6 +197,7 @@ const envFor = (db, bucket, queue) => ({
     CONTENT_BUCKET: bucket,
     TASK_QUEUE: queue,
     SESSION_SECRET: 'backup-test-secret',
+    BACKUP_CREDENTIAL_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY',
     API_ORIGIN: 'https://api.example.test',
     APP_ORIGIN: 'https://app.example.test',
     CORS_ORIGINS: 'https://app.example.test',
@@ -300,4 +334,48 @@ test('manual and scheduled backups complete through the Queue and retain restore
     assert.equal(db.backups.filter(item => item.kind === 'monthly').length, 12)
     assert.equal(bucket.objects.has('d0'), false)
     assert.equal(bucket.objects.has('m0'), false)
+})
+
+test('external destinations verify independently, hide credentials, and receive the default backup copy', async t => {
+    const db = new BackupDatabase()
+    db.bookmarks = [{ id: 1, user_id: 1, collection_id: -1, url: 'https://example.test', title: 'External', description: '', note: '', tags: '[]', highlights: '[]', created_at: 1, updated_at: 1, removed_at: null }]
+    const bucket = new MemoryBucket()
+    const queue = { messages: [], send: async message => queue.messages.push(message) }
+    const env = envFor(db, bucket, queue)
+    const requests = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async request => {
+        requests.push(request)
+        return new Response(null, { status: request.method === 'PROPFIND' ? 207 : 200 })
+    }
+    t.after(() => { globalThis.fetch = originalFetch })
+
+    for (const [provider, credentials] of [
+        ['gdrive', { accessToken: 'google-secret' }],
+        ['onedrive', { accessToken: 'microsoft-secret' }],
+        ['webdav', { url: 'https://dav.example.test/backups', username: 'user', password: 'app-secret' }]
+    ]) {
+        const response = await worker.fetch(request('/v1/backup/connections', {
+            method: 'POST', headers: { Cookie: 'rd_session=test', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, credentials, default: provider === 'webdav' })
+        }), env)
+        assert.equal(response.status, 201)
+    }
+
+    assert.deepEqual(requests.slice(0, 3).map(item => item.method), ['GET', 'GET', 'PROPFIND'])
+    assert.match(requests[2].headers.get('Authorization'), /^Basic /)
+    const listed = await worker.fetch(request('/v1/backup/connections', { headers: { Cookie: 'rd_session=test' } }), env)
+    const listBody = await listed.text()
+    assert.equal(listed.status, 200)
+    assert.doesNotMatch(listBody, /google-secret|microsoft-secret|app-secret|encrypted_credentials|accessToken|password/)
+    assert.equal(JSON.parse(listBody).connections.find(item => item.provider === 'webdav').default, true)
+    assert.doesNotMatch(db.connections.map(item => item.encrypted_credentials).join(' '), /google-secret|microsoft-secret|app-secret/)
+
+    const created = await worker.fetch(request('/v1/backup', { headers: { Cookie: 'rd_session=test' } }), env)
+    assert.equal(created.status, 202)
+    await worker.queue({ messages: [{ body: queue.messages[0], ack: () => {}, retry: () => assert.fail('unexpected retry') }] }, env)
+    assert.equal(db.backups[0].status, 'succeeded')
+    assert.equal(db.externalCopies[0].status, 'succeeded')
+    assert.equal(requests[3].method, 'PUT')
+    assert.match(requests[3].url, /^https:\/\/dav\.example\.test\/backups\/raindrop-backup-/)
 })

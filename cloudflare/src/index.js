@@ -31,6 +31,7 @@ const backupDailyRetention = 30
 const backupMonthlyRetention = 12
 const backupMaxBytes = 16 * 1024 * 1024
 const backupUserPageSize = 100
+const backupProviders = new Set(['gdrive', 'onedrive', 'webdav'])
 
 const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
 
@@ -126,6 +127,28 @@ const hmac = async (value, secret) => {
     const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
     const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(value))
     return bytesToBase64url(new Uint8Array(signature))
+}
+
+const credentialKey = async env => {
+    const secret = env.BACKUP_CREDENTIAL_KEY || env.SESSION_SECRET
+    if (!secret) throw new Error('Backup credential encryption is not configured')
+    const source = await crypto.subtle.importKey('raw', encoder.encode(secret), 'PBKDF2', false, ['deriveKey'])
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: encoder.encode('raindrop-backup-credentials'), iterations: passwordIterations, hash: 'SHA-256' },
+        source, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
+}
+
+const encryptCredentials = async (env, credentials) => {
+    const iv = new Uint8Array(12)
+    crypto.getRandomValues(iv)
+    const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await credentialKey(env), encoder.encode(JSON.stringify(credentials)))
+    return bytesToBase64url(iv) + '.' + bytesToBase64url(new Uint8Array(encrypted))
+}
+
+const decryptCredentials = async (env, value) => {
+    const [iv, encrypted] = String(value || '').split('.')
+    if (!iv || !encrypted) throw new Error('Invalid encrypted credentials')
+    const clear = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64urlToBytes(iv) }, await credentialKey(env), base64urlToBytes(encrypted))
+    return JSON.parse(new TextDecoder().decode(clear))
 }
 
 const passwordHash = async (password, salt) => {
@@ -1502,6 +1525,89 @@ const publicBackup = backup => ({
     failure: backup.error_code ? { code: backup.error_code, message: backup.error_message } : null
 })
 
+const publicBackupConnection = connection => ({
+    id: String(connection.id),
+    provider: connection.provider,
+    default: Boolean(connection.is_default),
+    verifiedAt: taskDate(connection.verified_at)
+})
+
+const backupConnectionCredentials = (provider, value = {}) => {
+    if (provider === 'webdav') {
+        const url = new URL(String(value.url || ''))
+        if (url.protocol !== 'https:' || !value.username || !value.password)
+            throw new Error('WebDAV requires an HTTPS URL, username, and app password')
+        return { url: url.toString().replace(/\/$/, ''), username: String(value.username), password: String(value.password) }
+    }
+    if (!value.accessToken) throw new Error('An access token is required')
+    return { accessToken: String(value.accessToken) }
+}
+
+const backupProviderRequest = (env, provider, credentials, operation, filename, bytes) => {
+    if (provider === 'webdav') {
+        const target = credentials.url + (operation === 'verify' ? '' : '/' + encodeURIComponent(filename))
+        return new Request(target, {
+            method: operation === 'verify' ? 'PROPFIND' : 'PUT',
+            headers: {
+                Authorization: 'Basic ' + btoa(credentials.username + ':' + credentials.password),
+                ...(operation === 'verify' ? { Depth: '0' } : { 'Content-Type': 'application/json' })
+            },
+            body: operation === 'verify' ? undefined : bytes
+        })
+    }
+    const authorization = { Authorization: 'Bearer ' + credentials.accessToken }
+    const boundary = 'raindrop-backup-boundary'
+    const googleBody = operation === 'verify' ? undefined : concatBytes([
+        encoder.encode('--' + boundary + '\r\nContent-Type: application/json\r\n\r\n' + JSON.stringify({ name: filename }) + '\r\n--' + boundary + '\r\nContent-Type: application/json\r\n\r\n'),
+        bytes,
+        encoder.encode('\r\n--' + boundary + '--')
+    ])
+    if (provider === 'gdrive') return new Request(operation === 'verify'
+        ? (env.GOOGLE_DRIVE_API_ORIGIN || 'https://www.googleapis.com') + '/drive/v3/about?fields=user'
+        : (env.GOOGLE_DRIVE_UPLOAD_ORIGIN || 'https://www.googleapis.com') + '/upload/drive/v3/files?uploadType=multipart', {
+        method: operation === 'verify' ? 'GET' : 'POST',
+        headers: { ...authorization, ...(operation === 'verify' ? {} : { 'Content-Type': 'multipart/related; boundary=' + boundary }) },
+        body: googleBody
+    })
+    return new Request(operation === 'verify'
+        ? (env.ONEDRIVE_API_ORIGIN || 'https://graph.microsoft.com') + '/v1.0/me/drive'
+        : (env.ONEDRIVE_API_ORIGIN || 'https://graph.microsoft.com') + '/v1.0/me/drive/root:/' + encodeURIComponent(filename) + ':/content', {
+        method: operation === 'verify' ? 'GET' : 'PUT',
+        headers: { ...authorization, ...(operation === 'verify' ? {} : { 'Content-Type': 'application/json' }) },
+        body: operation === 'verify' ? undefined : bytes
+    })
+}
+
+const verifyBackupConnection = async (env, provider, credentials) => {
+    const response = await fetch(backupProviderRequest(env, provider, credentials, 'verify'))
+    if (!response.ok) throw new Error('The backup destination rejected the credentials')
+}
+
+const copyExternalBackup = async (env, backup, bytes) => {
+    const connection = await env.DB.prepare(`SELECT id, provider, encrypted_credentials FROM backup_connections
+        WHERE user_id = ? AND is_default = 1`).bind(backup.user_id).first()
+    if (!connection) return
+    const filename = 'raindrop-backup-' + backup.id + '.json'
+    const now = Date.now()
+    try {
+        const credentials = await decryptCredentials(env, connection.encrypted_credentials)
+        const response = await fetch(backupProviderRequest(env, connection.provider, credentials, 'copy', filename, bytes))
+        if (!response.ok) throw new Error('External backup copy failed with HTTP ' + response.status)
+        await env.DB.prepare(`INSERT INTO external_backup_copies
+            (backup_id, connection_id, status, remote_path, error_message, created_at, completed_at)
+            VALUES (?, ?, 'succeeded', ?, NULL, ?, ?)
+            ON CONFLICT(backup_id, connection_id) DO UPDATE SET status = 'succeeded', remote_path = excluded.remote_path,
+            error_message = NULL, completed_at = excluded.completed_at`).bind(backup.id, connection.id, filename, now, now).run()
+    } catch (failure) {
+        await env.DB.prepare(`INSERT INTO external_backup_copies
+            (backup_id, connection_id, status, remote_path, error_message, created_at, completed_at)
+            VALUES (?, ?, 'failed', NULL, ?, ?, ?)
+            ON CONFLICT(backup_id, connection_id) DO UPDATE SET status = 'failed', error_message = excluded.error_message,
+            completed_at = excluded.completed_at`).bind(backup.id, connection.id, failure.message, now, now).run()
+        throw failure
+    }
+}
+
 const enqueueBackup = async (env, backup) => {
     if (!env.TASK_QUEUE?.send) return true
     try {
@@ -1571,6 +1677,7 @@ const processBackupTask = async (env, backupId) => {
             httpMetadata: { contentType: 'application/json' },
             customMetadata: { userId: String(backup.user_id), backupId: String(backup.id) }
         })
+        await copyExternalBackup(env, backup, bytes)
         const completedAt = Date.now()
         await env.DB.prepare(`UPDATE backups SET status = 'succeeded', size_bytes = ?, error_code = NULL,
             error_message = NULL, updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`)
@@ -2487,6 +2594,7 @@ const auditRoute = request => {
         [/^\/v1\/raindrop\/\d+$/, '/v1/raindrop/:id'],
         [/^\/v1\/raindrops\/-?\d+\/export\.(html|csv|txt|zip)$/, '/v1/raindrops/:collectionId/export'],
         [/^\/v1\/raindrops\/-?\d+$/, '/v1/raindrops/:collectionId'],
+        [/^\/v1\/backup\/connections\/[^/]+(?:\/default)?$/, '/v1/backup/connections/:id'],
         [/^\/v1\/(?:backup|backups)\/[^/]+(?:\.(?:html|csv|txt|zip)|\/status)?$/, '/v1/backups/:id'],
         [/^\/v1\/tags\/-?\d+$/, '/v1/tags/:collectionId'],
         [/^\/v1\/filters\/-?\d+$/, '/v1/filters/:collectionId'],
@@ -2510,7 +2618,7 @@ const auditRoute = request => {
         '/v1/sessions', '/v1/collections/all', '/v1/collections', '/v1/collections/clean',
         '/v1/collection', '/v1/tags/recent', '/v1/tags/0', '/v1/tag',
         '/v1/raindrops', '/v1/raindrops/changes', '/v1/raindrop', '/v1/user', '/v1/user/quota',
-        '/v1/backup', '/v1/backups',
+        '/v1/backup', '/v1/backups', '/v1/backup/connections',
         '/v1/user/connect/google', '/v1/user/connect/google/revoke', '/v1/user/deletion',
         '/v1/tasks',
         '/v1/import', '/v1/import/preflight',
@@ -3188,6 +3296,56 @@ export default {
                     backupId: String(backup.id),
                     taskId: String(backup.id)
                 }, status, request, env)
+            }
+
+            if (url.pathname === '/v1/backup/connections') {
+                if (request.method === 'GET') {
+                    const rows = await env.DB.prepare(`SELECT id, provider, is_default, verified_at
+                        FROM backup_connections WHERE user_id = ? ORDER BY provider`).bind(session.user_id).all()
+                    return json({ result: true, connections: (rows.results || []).map(publicBackupConnection) }, 200, request, env)
+                }
+                if (request.method === 'POST') {
+                    const { data } = await readBody(request)
+                    const provider = String(data.provider || '')
+                    if (!backupProviders.has(provider))
+                        return error('validation_failed', 400, request, env, 'Choose Google Drive, OneDrive, or WebDAV')
+                    let credentials
+                    try {
+                        credentials = backupConnectionCredentials(provider, data.credentials)
+                        await verifyBackupConnection(env, provider, credentials)
+                    } catch (failure) {
+                        return error('backup_connection_failed', 400, request, env, failure.message)
+                    }
+                    const existing = await env.DB.prepare(`SELECT id, is_default FROM backup_connections
+                        WHERE user_id = ? AND provider = ?`).bind(session.user_id, provider).first()
+                    const id = existing?.id || randomToken(18)
+                    const now = Date.now()
+                    const makeDefault = data.default === true || existing?.is_default ? 1 : 0
+                    if (makeDefault) await env.DB.prepare('UPDATE backup_connections SET is_default = 0 WHERE user_id = ?').bind(session.user_id).run()
+                    await env.DB.prepare(`INSERT INTO backup_connections
+                        (id, user_id, provider, encrypted_credentials, is_default, verified_at, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(user_id, provider) DO UPDATE SET encrypted_credentials = excluded.encrypted_credentials,
+                        is_default = excluded.is_default, verified_at = excluded.verified_at,
+                        updated_at = excluded.updated_at`).bind(id, session.user_id, provider,
+                            await encryptCredentials(env, credentials), makeDefault, now, now, now).run()
+                    const saved = await env.DB.prepare(`SELECT id, provider, is_default, verified_at
+                        FROM backup_connections WHERE user_id = ? AND provider = ?`).bind(session.user_id, provider).first()
+                    return json({ result: true, connection: publicBackupConnection(saved) }, 201, request, env)
+                }
+            }
+
+            const connectionMatch = url.pathname.match(/^\/v1\/backup\/connections\/([^/]+)(?:\/(default))?$/)
+            if (connectionMatch) {
+                const id = decodeURIComponent(connectionMatch[1])
+                if (request.method === 'POST' && connectionMatch[2]) {
+                    const connection = await env.DB.prepare('SELECT id FROM backup_connections WHERE id = ? AND user_id = ?')
+                        .bind(id, session.user_id).first()
+                    if (!connection) return error('backup_connection_not_found', 404, request, env)
+                    await env.DB.prepare('UPDATE backup_connections SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE user_id = ?')
+                        .bind(id, session.user_id).run()
+                    return json({ result: true }, 200, request, env)
+                }
             }
 
             if (url.pathname === '/v1/backups' && request.method === 'GET') {
