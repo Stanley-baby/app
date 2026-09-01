@@ -639,6 +639,17 @@ paths:
           description: Login required.
         '403':
           description: Email verification required.
+  /v1/backup/connections/gdrive/authorize:
+    get:
+      responses:
+        '302':
+          description: Redirect to Google consent for encrypted offline Drive access.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '503':
+          description: Google OAuth is not configured.
     post:
       responses:
         '201':

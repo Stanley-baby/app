@@ -23,6 +23,7 @@ class BackupDatabase {
         this.backups = []
         this.connections = []
         this.externalCopies = []
+        this.oauthStates = []
         this.audits = []
     }
 
@@ -46,6 +47,8 @@ class BackupDatabase {
         const first = async () => {
             if (sql.includes('FROM sessions s')) return this.session()
             if (sql.includes('FROM usage_counters')) return null
+            if (sql.includes('FROM oauth_states'))
+                return this.oauthStates.find(item => item.state_hash === values[0] && !item.used_at && item.expires_at > values[1]) || null
             if (sql.includes('FROM collection_collaborators') && sql.includes('SELECT role'))
                 return this.collections.find(collection => collection.id === Number(values[0])) &&
                     this.collaborators.find(item => item.collection_id === Number(values[0]) && item.user_id === Number(values[1])) || null
@@ -100,6 +103,15 @@ class BackupDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE sessions SET last_seen_at')) return { meta: { changes: 1 } }
+            if (sql.includes('INSERT INTO oauth_states')) {
+                this.oauthStates.push({ state_hash: values[0], purpose: values[1], user_id: values[2], redirect_path: values[3], admission_granted: values[4], expires_at: values[5], used_at: null })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE oauth_states SET used_at')) {
+                const state = this.oauthStates.find(item => item.state_hash === values[1])
+                if (state) state.used_at = values[0]
+                return { meta: { changes: state ? 1 : 0 } }
+            }
             if (sql.includes('INSERT INTO backup_connections')) {
                 const existing = this.connections.find(item => item.user_id === Number(values[1]) && item.provider === values[2])
                 const connection = {
@@ -118,6 +130,7 @@ class BackupDatabase {
                 this.connections.filter(item => item.user_id === Number(values[0])).forEach(item => { item.is_default = 0 })
                 return { meta: { changes: 1 } }
             }
+            if (sql.includes('UPDATE backup_connections SET encrypted_credentials')) return { meta: { changes: 1 } }
             if (sql.includes('INSERT INTO external_backup_copies')) {
                 this.externalCopies.push({ backup_id: values[0], connection_id: values[1], status: sql.includes('\'succeeded\'') ? 'succeeded' : 'failed', remote_path: values[2] })
                 return { meta: { changes: 1 } }
@@ -198,6 +211,8 @@ const envFor = (db, bucket, queue) => ({
     TASK_QUEUE: queue,
     SESSION_SECRET: 'backup-test-secret',
     BACKUP_CREDENTIAL_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY',
+    GOOGLE_CLIENT_ID: 'google-client-id',
+    GOOGLE_CLIENT_SECRET: 'google-client-secret',
     API_ORIGIN: 'https://api.example.test',
     APP_ORIGIN: 'https://app.example.test',
     CORS_ORIGINS: 'https://app.example.test',
@@ -351,7 +366,6 @@ test('external destinations verify independently, hide credentials, and receive 
     t.after(() => { globalThis.fetch = originalFetch })
 
     for (const [provider, credentials] of [
-        ['gdrive', { accessToken: 'google-secret' }],
         ['onedrive', { accessToken: 'microsoft-secret' }],
         ['webdav', { url: 'https://dav.example.test/backups', username: 'user', password: 'app-secret' }]
     ]) {
@@ -362,20 +376,71 @@ test('external destinations verify independently, hide credentials, and receive 
         assert.equal(response.status, 201)
     }
 
-    assert.deepEqual(requests.slice(0, 3).map(item => item.method), ['GET', 'GET', 'PROPFIND'])
-    assert.match(requests[2].headers.get('Authorization'), /^Basic /)
+    assert.deepEqual(requests.slice(0, 2).map(item => item.method), ['GET', 'PROPFIND'])
+    assert.match(requests[1].headers.get('Authorization'), /^Basic /)
     const listed = await worker.fetch(request('/v1/backup/connections', { headers: { Cookie: 'rd_session=test' } }), env)
     const listBody = await listed.text()
     assert.equal(listed.status, 200)
-    assert.doesNotMatch(listBody, /google-secret|microsoft-secret|app-secret|encrypted_credentials|accessToken|password/)
+    assert.doesNotMatch(listBody, /microsoft-secret|app-secret|encrypted_credentials|accessToken|password/)
     assert.equal(JSON.parse(listBody).connections.find(item => item.provider === 'webdav').default, true)
-    assert.doesNotMatch(db.connections.map(item => item.encrypted_credentials).join(' '), /google-secret|microsoft-secret|app-secret/)
+    assert.doesNotMatch(db.connections.map(item => item.encrypted_credentials).join(' '), /microsoft-secret|app-secret/)
 
     const created = await worker.fetch(request('/v1/backup', { headers: { Cookie: 'rd_session=test' } }), env)
     assert.equal(created.status, 202)
     await worker.queue({ messages: [{ body: queue.messages[0], ack: () => {}, retry: () => assert.fail('unexpected retry') }] }, env)
     assert.equal(db.backups[0].status, 'succeeded')
     assert.equal(db.externalCopies[0].status, 'succeeded')
-    assert.equal(requests[3].method, 'PUT')
-    assert.match(requests[3].url, /^https:\/\/dav\.example\.test\/backups\/raindrop-backup-/)
+    assert.equal(requests[2].method, 'PUT')
+    assert.match(requests[2].url, /^https:\/\/dav\.example\.test\/backups\/raindrop-backup-/)
+})
+
+test('Google Drive OAuth stores a refresh token and refreshes it before copying a backup', async t => {
+    const db = new BackupDatabase()
+    db.bookmarks = [{ id: 1, user_id: 1, collection_id: -1, url: 'https://example.test', title: 'Google Drive', description: '', note: '', tags: '[]', highlights: '[]', created_at: 1, updated_at: 1, removed_at: null }]
+    const bucket = new MemoryBucket()
+    const queue = { messages: [], send: async message => queue.messages.push(message) }
+    const env = envFor(db, bucket, queue)
+    let tokenRequests = 0
+    let uploaded = null
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options = {}) => {
+        if (url === 'https://oauth2.googleapis.com/token') {
+            tokenRequests += 1
+            return tokenRequests === 1
+                ? Response.json({ access_token: 'short-access', refresh_token: 'google-refresh-secret', expires_in: -1 })
+                : Response.json({ access_token: 'refreshed-access', expires_in: 3600 })
+        }
+        if (url === 'https://openidconnect.googleapis.com/v1/userinfo')
+            return Response.json({ sub: 'drive-user', email: 'drive@example.test', email_verified: true, name: 'Drive User' })
+        const target = typeof url === 'string' ? url : url.url
+        if (target.includes('/drive/v3/about')) return Response.json({ user: { displayName: 'Drive User' } })
+        if (target.includes('/upload/drive/v3/files')) {
+            uploaded = url
+            return Response.json({ id: 'drive-file' })
+        }
+        return originalFetch(url, options)
+    }
+    t.after(() => { globalThis.fetch = originalFetch })
+
+    const start = await worker.fetch(request('/v1/backup/connections/gdrive/authorize', { headers: { Cookie: 'rd_session=test' } }), env)
+    assert.equal(start.status, 302)
+    const authorization = new URL(start.headers.get('Location'))
+    assert.match(authorization.searchParams.get('scope'), /drive\.file/)
+    assert.equal(authorization.searchParams.get('access_type'), 'offline')
+    const callback = await worker.fetch(request('/v1/auth/google/callback?code=drive-code&state=' + authorization.searchParams.get('state')), env)
+    assert.equal(callback.status, 303)
+    assert.match(callback.headers.get('Location'), /settings\/backups\?connected=gdrive/)
+    assert.equal(db.connections.length, 1)
+    assert.equal(db.connections[0].provider, 'gdrive')
+    assert.equal(db.connections[0].is_default, 1)
+    assert.doesNotMatch(db.connections[0].encrypted_credentials, /short-access|google-refresh-secret/)
+
+    const created = await worker.fetch(request('/v1/backup', { headers: { Cookie: 'rd_session=test' } }), env)
+    assert.equal(created.status, 202)
+    await worker.queue({ messages: [{ body: queue.messages[0], ack: () => {}, retry: () => assert.fail('unexpected retry') }] }, env)
+    assert.equal(tokenRequests, 2)
+    assert.equal(db.backups[0].status, 'succeeded')
+    assert.equal(uploaded.method, 'POST')
+    assert.match(uploaded.headers.get('Authorization'), /refreshed-access/)
+    assert.match(uploaded.headers.get('Content-Type'), /multipart\/related/)
 })

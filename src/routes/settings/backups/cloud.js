@@ -73,17 +73,21 @@ export default function SettingsBackupsCloud() {
                     {!item.default && <Button size='small' onClick={() => makeDefault(item.id)}>Make default</Button>}
                 </div>)}
 
-                <form className={s.form} onSubmit={save}>
+                <div className={s.form}>
                     <select value={provider} onChange={event => { setProvider(event.target.value); setCredentials({}) }} disabled={!webApp}>
                         {providers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
                     </select>
-                    {provider == 'webdav' ? <>
-                        <Text required type='url' placeholder='HTTPS WebDAV URL' value={credentials.url || ''} onChange={event => setCredentials({ ...credentials, url: event.target.value })} />
-                        <Text required placeholder='Username' value={credentials.username || ''} onChange={event => setCredentials({ ...credentials, username: event.target.value })} />
-                        <Text required type='password' placeholder='App password' value={credentials.password || ''} onChange={event => setCredentials({ ...credentials, password: event.target.value })} />
-                    </> : <Text required type='password' placeholder={`${providers.find(item => item.id == provider).name} access token`} value={credentials.accessToken || ''} onChange={event => setCredentials({ accessToken: event.target.value })} />}
-                    <Button as='button' type='submit' variant='primary' disabled={!webApp}>Verify and save</Button>
-                </form>
+                    {provider == 'gdrive'
+                        ? <Button href={`${API_ENDPOINT_URL}backup/connections/gdrive/authorize`} variant='primary'>Connect Google Drive</Button>
+                        : <form className={s.form} onSubmit={save}>
+                            {provider == 'webdav' ? <>
+                                <Text required type='url' placeholder='HTTPS WebDAV URL' value={credentials.url || ''} onChange={event => setCredentials({ ...credentials, url: event.target.value })} />
+                                <Text required placeholder='Username' value={credentials.username || ''} onChange={event => setCredentials({ ...credentials, username: event.target.value })} />
+                                <Text required type='password' placeholder='App password' value={credentials.password || ''} onChange={event => setCredentials({ ...credentials, password: event.target.value })} />
+                            </> : <Text required type='password' placeholder='OneDrive access token' value={credentials.accessToken || ''} onChange={event => setCredentials({ accessToken: event.target.value })} />}
+                            <Button as='button' type='submit' variant='primary' disabled={!webApp}>Verify and save</Button>
+                        </form>}
+                </div>
                 {message && <p role='status'>{message}</p>}
             </div>
         </>

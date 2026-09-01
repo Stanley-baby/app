@@ -1533,6 +1533,7 @@ const publicBackupConnection = connection => ({
 })
 
 const backupConnectionCredentials = (provider, value = {}) => {
+    if (provider === 'gdrive') throw new Error('Connect Google Drive with OAuth')
     if (provider === 'webdav') {
         const url = new URL(String(value.url || ''))
         if (url.protocol !== 'https:' || !value.username || !value.password)
@@ -1583,6 +1584,49 @@ const verifyBackupConnection = async (env, provider, credentials) => {
     if (!response.ok) throw new Error('The backup destination rejected the credentials')
 }
 
+const saveBackupConnection = async (env, userId, provider, credentials, makeDefault = false) => {
+    const existing = await env.DB.prepare(`SELECT id, is_default FROM backup_connections
+        WHERE user_id = ? AND provider = ?`).bind(userId, provider).first()
+    const id = existing?.id || randomToken(18)
+    const now = Date.now()
+    const isDefault = makeDefault || existing?.is_default ? 1 : 0
+    if (isDefault) await env.DB.prepare('UPDATE backup_connections SET is_default = 0 WHERE user_id = ?').bind(userId).run()
+    await env.DB.prepare(`INSERT INTO backup_connections
+        (id, user_id, provider, encrypted_credentials, is_default, verified_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, provider) DO UPDATE SET encrypted_credentials = excluded.encrypted_credentials,
+        is_default = excluded.is_default, verified_at = excluded.verified_at, updated_at = excluded.updated_at`).bind(
+            id, userId, provider, await encryptCredentials(env, credentials), isDefault, now, now, now).run()
+    return env.DB.prepare(`SELECT id, provider, is_default, verified_at
+        FROM backup_connections WHERE user_id = ? AND provider = ?`).bind(userId, provider).first()
+}
+
+const refreshGoogleDriveCredentials = async (env, connection, credentials) => {
+    if (credentials.accessToken && Number(credentials.expiresAt || 0) > Date.now() + 60000) return credentials
+    if (!credentials.refreshToken) throw new Error('Google Drive authorization has expired')
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+            refresh_token: credentials.refreshToken,
+            client_id: env.GOOGLE_CLIENT_ID,
+            client_secret: env.GOOGLE_CLIENT_SECRET,
+            grant_type: 'refresh_token'
+        })
+    })
+    if (!response.ok) throw new Error('Google Drive authorization could not be refreshed')
+    const token = await response.json()
+    const refreshed = {
+        accessToken: String(token.access_token || ''),
+        refreshToken: credentials.refreshToken,
+        expiresAt: Date.now() + Number(token.expires_in || 3600) * 1000
+    }
+    if (!refreshed.accessToken) throw new Error('Google Drive authorization could not be refreshed')
+    await env.DB.prepare('UPDATE backup_connections SET encrypted_credentials = ?, updated_at = ? WHERE id = ?')
+        .bind(await encryptCredentials(env, refreshed), Date.now(), connection.id).run()
+    return refreshed
+}
+
 const copyExternalBackup = async (env, backup, bytes) => {
     const connection = await env.DB.prepare(`SELECT id, provider, encrypted_credentials FROM backup_connections
         WHERE user_id = ? AND is_default = 1`).bind(backup.user_id).first()
@@ -1590,7 +1634,8 @@ const copyExternalBackup = async (env, backup, bytes) => {
     const filename = 'raindrop-backup-' + backup.id + '.json'
     const now = Date.now()
     try {
-        const credentials = await decryptCredentials(env, connection.encrypted_credentials)
+        let credentials = await decryptCredentials(env, connection.encrypted_credentials)
+        if (connection.provider === 'gdrive') credentials = await refreshGoogleDriveCredentials(env, connection, credentials)
         const response = await fetch(backupProviderRequest(env, connection.provider, credentials, 'copy', filename, bytes))
         if (!response.ok) throw new Error('External backup copy failed with HTTP ' + response.status)
         await env.DB.prepare(`INSERT INTO external_backup_copies
@@ -2594,6 +2639,7 @@ const auditRoute = request => {
         [/^\/v1\/raindrop\/\d+$/, '/v1/raindrop/:id'],
         [/^\/v1\/raindrops\/-?\d+\/export\.(html|csv|txt|zip)$/, '/v1/raindrops/:collectionId/export'],
         [/^\/v1\/raindrops\/-?\d+$/, '/v1/raindrops/:collectionId'],
+        [/^\/v1\/backup\/connections\/gdrive\/authorize$/, '/v1/backup/connections/gdrive/authorize'],
         [/^\/v1\/backup\/connections\/[^/]+(?:\/default)?$/, '/v1/backup/connections/:id'],
         [/^\/v1\/(?:backup|backups)\/[^/]+(?:\.(?:html|csv|txt|zip)|\/status)?$/, '/v1/backups/:id'],
         [/^\/v1\/tags\/-?\d+$/, '/v1/tags/:collectionId'],
@@ -2855,15 +2901,16 @@ const createGoogleState = async (env, purpose, userId, redirectPath = '/', admis
     return state
 }
 
-const googleAuthorization = (env, state) => {
+const googleAuthorization = (env, state, drive = false) => {
     const url = new URL('https://accounts.google.com/o/oauth2/v2/auth')
     url.search = new URLSearchParams({
         client_id: env.GOOGLE_CLIENT_ID,
         redirect_uri: googleCallbackUrl(env),
         response_type: 'code',
-        scope: 'openid email profile',
+        scope: 'openid email profile' + (drive ? ' https://www.googleapis.com/auth/drive.file' : ''),
         state,
-        prompt: 'select_account'
+        prompt: drive ? 'consent select_account' : 'select_account',
+        ...(drive ? { access_type: 'offline', include_granted_scopes: 'true' } : {})
     }).toString()
     return url.toString()
 }
@@ -2891,7 +2938,14 @@ const googleProfile = async (env, code) => {
         if (!profile.ok) return null
         const data = await profile.json()
         if (!data.sub || !validEmail(String(data.email || '')) || data.email_verified !== true) return null
-        return { subject: String(data.sub), email: String(data.email).toLowerCase(), name: String(data.name || data.email).slice(0, 100) }
+        return {
+            subject: String(data.sub),
+            email: String(data.email).toLowerCase(),
+            name: String(data.name || data.email).slice(0, 100),
+            accessToken: String(token.access_token),
+            refreshToken: token.refresh_token ? String(token.refresh_token) : null,
+            expiresAt: Date.now() + Number(token.expires_in || 3600) * 1000
+        }
     } catch {
         return null
     }
@@ -3044,7 +3098,24 @@ export default {
             await env.DB.prepare('UPDATE oauth_states SET used_at = ? WHERE state_hash = ?').bind(Date.now(), stateHash).run()
             const profile = await googleProfile(env, url.searchParams.get('code'))
             if (!profile)
-                return appRedirect(request, env, state.purpose === 'connect' ? '/settings/account?connect_error=google_sign_in_failed' : '/account/login?error=google_sign_in_failed')
+                return appRedirect(request, env, state.purpose === 'backup_gdrive'
+                    ? '/settings/backups?connect_error=google_drive_authorization_failed'
+                    : state.purpose === 'connect' ? '/settings/account?connect_error=google_sign_in_failed' : '/account/login?error=google_sign_in_failed')
+
+            if (state.purpose === 'backup_gdrive') {
+                if (!state.user_id || !profile.refreshToken)
+                    return appRedirect(request, env, '/settings/backups?connect_error=google_drive_authorization_failed')
+                const credentials = { accessToken: profile.accessToken, refreshToken: profile.refreshToken, expiresAt: profile.expiresAt }
+                try {
+                    await verifyBackupConnection(env, 'gdrive', credentials)
+                    const currentDefault = await env.DB.prepare('SELECT id FROM backup_connections WHERE user_id = ? AND is_default = 1')
+                        .bind(state.user_id).first()
+                    await saveBackupConnection(env, state.user_id, 'gdrive', credentials, !currentDefault)
+                } catch {
+                    return appRedirect(request, env, '/settings/backups?connect_error=google_drive_authorization_failed')
+                }
+                return appRedirect(request, env, '/settings/backups?connected=gdrive')
+            }
 
             let identity = await env.DB.prepare('SELECT user_id FROM connected_identities WHERE provider = ? AND provider_subject = ?')
                 .bind('google', profile.subject).first()
@@ -3316,23 +3387,18 @@ export default {
                     } catch (failure) {
                         return error('backup_connection_failed', 400, request, env, failure.message)
                     }
-                    const existing = await env.DB.prepare(`SELECT id, is_default FROM backup_connections
-                        WHERE user_id = ? AND provider = ?`).bind(session.user_id, provider).first()
-                    const id = existing?.id || randomToken(18)
-                    const now = Date.now()
-                    const makeDefault = data.default === true || existing?.is_default ? 1 : 0
-                    if (makeDefault) await env.DB.prepare('UPDATE backup_connections SET is_default = 0 WHERE user_id = ?').bind(session.user_id).run()
-                    await env.DB.prepare(`INSERT INTO backup_connections
-                        (id, user_id, provider, encrypted_credentials, is_default, verified_at, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(user_id, provider) DO UPDATE SET encrypted_credentials = excluded.encrypted_credentials,
-                        is_default = excluded.is_default, verified_at = excluded.verified_at,
-                        updated_at = excluded.updated_at`).bind(id, session.user_id, provider,
-                            await encryptCredentials(env, credentials), makeDefault, now, now, now).run()
-                    const saved = await env.DB.prepare(`SELECT id, provider, is_default, verified_at
-                        FROM backup_connections WHERE user_id = ? AND provider = ?`).bind(session.user_id, provider).first()
+                    const saved = await saveBackupConnection(env, session.user_id, provider, credentials, data.default === true)
                     return json({ result: true, connection: publicBackupConnection(saved) }, 201, request, env)
                 }
+            }
+
+            if (url.pathname === '/v1/backup/connections/gdrive/authorize' && request.method === 'GET') {
+                if (!googleReady(env)) return configurationError(request, env)
+                const state = await createGoogleState(env, 'backup_gdrive', session.user_id, '/settings/backups')
+                return new Response(null, { status: 302, headers: {
+                    Location: googleAuthorization(env, state, true),
+                    'X-Request-ID': requestId(request)
+                } })
             }
 
             const connectionMatch = url.pathname.match(/^\/v1\/backup\/connections\/([^/]+)(?:\/(default))?$/)
