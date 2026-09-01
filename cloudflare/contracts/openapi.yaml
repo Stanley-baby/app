@@ -74,6 +74,25 @@ paths:
         '401':
           description: Login required.
   /v1/collections:
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [view]
+              properties:
+                view:
+                  type: string
+                  enum: [list, grid, masonry, simple]
+      responses:
+        '200':
+          description: View updated for all active Collections owned by the signed-in User.
+        '400':
+          description: Invalid Collection view.
+        '401':
+          description: Login required.
     delete:
       requestBody:
         required: true
@@ -169,9 +188,12 @@ paths:
                   nullable: true
                 removed:
                   type: boolean
+                view:
+                  type: string
+                  enum: [list, grid, masonry, simple]
       responses:
         '200':
-          description: Collection title or parent updated.
+          description: Collection title, parent, or view updated.
         '400':
           description: Invalid Collection update.
         '401':

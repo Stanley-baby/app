@@ -50,6 +50,12 @@
             "responses": [200, 401]
         },
         {
+            "method": "PUT",
+            "path": "/v1/collections",
+            "authentication": "required",
+            "responses": [200, 400, 401]
+        },
+        {
             "method": "DELETE",
             "path": "/v1/collections",
             "authentication": "required",

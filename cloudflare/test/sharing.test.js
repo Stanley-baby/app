@@ -115,8 +115,13 @@ class SharingDatabase {
                 return { meta: { changes: 1 } }
             if (sql.includes('UPDATE sessions SET last_seen_at')) return { meta: { changes: 1 } }
             if (sql.includes('UPDATE collections SET slug')) return { meta: { changes: 1 } }
+            if (sql.includes('UPDATE collections SET view')) {
+                const matches = this.collections.filter(item => item.user_id === Number(values[2]) && !item.removed_at)
+                for (const item of matches) item.view = values[0]
+                return { meta: { changes: matches.length } }
+            }
             if (sql.includes('INSERT INTO collections')) {
-                const collection = { id: this.nextCollectionId++, user_id: Number(values[0]), title: values[1], parent_id: values[2], created_at: values[3], updated_at: values[4], slug: values[5], is_public: 0, removed_at: null }
+                const collection = { id: this.nextCollectionId++, user_id: Number(values[0]), title: values[1], parent_id: values[2], created_at: values[3], updated_at: values[4], slug: values[5], is_public: 0, view: 'list', removed_at: null }
                 this.collections.push(collection)
                 return { meta: { last_row_id: collection.id, changes: 1 } }
             }
@@ -152,8 +157,8 @@ class SharingDatabase {
                 return { meta: { changes: item ? 1 : 0 } }
             }
             if (sql.includes('UPDATE collections SET title')) {
-                const item = this.collections.find(collection => collection.id === Number(values[5]) && collection.user_id === Number(values[6]))
-                if (item) Object.assign(item, { title: values[0], parent_id: values[1], slug: values[2], is_public: Number(values[3]), updated_at: values[4] })
+                const item = this.collections.find(collection => collection.id === Number(values[6]) && collection.user_id === Number(values[7]))
+                if (item) Object.assign(item, { title: values[0], parent_id: values[1], slug: values[2], is_public: Number(values[3]), view: values[4], updated_at: values[5] })
                 return { meta: { changes: item ? 1 : 0 } }
             }
             if (sql.includes('INSERT INTO published_snapshots')) {
@@ -235,17 +240,39 @@ test('public links keep the numeric ID, hide private snapshots, and expose only 
     const collectionId = (await created.json()).item._id
     db.bookmarks.push({ id: 1, user_id: 1, collection_id: collectionId, url: 'https://example.test/public', title: 'Public bookmark', description: 'metadata', tags: '["tag"]', created_at: 1, updated_at: 1, removed_at: null })
     db.contents.push({ id: 'snapshot-1', user_id: 1, bookmark_id: 1, kind: 'snapshot', status: 'cleared', object_key: 'content/1/snapshot-1', filename: 'page.html', content_type: 'text/html', size_bytes: 14 })
+    db.collections.push(
+        { id: 2, user_id: 1, title: 'Second', parent_id: null, view: 'list', is_public: 0, removed_at: null },
+        { id: 3, user_id: 1, title: 'Removed', parent_id: null, view: 'grid', is_public: 0, removed_at: 1 },
+        { id: 4, user_id: 2, title: 'Foreign', parent_id: null, view: 'grid', is_public: 0, removed_at: null }
+    )
 
-    const enabled = await worker.fetch(jsonRequest('/v1/collection/' + collectionId, 'PUT', { public: true, slug: 'public-root' }), env)
+    const enabled = await worker.fetch(jsonRequest('/v1/collection/' + collectionId, 'PUT', { public: true, slug: 'public-root', view: 'grid' }), env)
     assert.equal(enabled.status, 200)
-    const publicLink = (await enabled.json()).item.publicLink
+    const enabledBody = await enabled.json()
+    const publicLink = enabledBody.item.publicLink
+    assert.equal(enabledBody.item.view, 'grid')
     assert.match(publicLink, /\/public\/public-root-\d+$/)
 
     const before = await worker.fetch(request(`/v1/public/collections/${collectionId}/public-root`), env)
     assert.equal(before.status, 200)
     const beforeBody = await before.json()
+    assert.equal(beforeBody.collection.view, 'grid')
     assert.equal(beforeBody.items[0].publishedSnapshots.length, 0)
     assert.equal(beforeBody.items[0].note, undefined)
+
+    const invalidView = await worker.fetch(jsonRequest('/v1/collection/' + collectionId, 'PUT', { view: 'cards' }), env)
+    assert.equal(invalidView.status, 400)
+    assert.equal((await invalidView.json()).error, 'validation_failed')
+
+    const allViews = await worker.fetch(jsonRequest('/v1/collections', 'PUT', { view: 'masonry' }), env)
+    assert.equal(allViews.status, 200)
+    assert.equal((await allViews.json()).view, 'masonry')
+    assert.equal(db.collections.find(item => item.id === 1).view, 'masonry')
+    assert.equal(db.collections.find(item => item.id === 2).view, 'masonry')
+    assert.equal(db.collections.find(item => item.id === 3).view, 'grid')
+    assert.equal(db.collections.find(item => item.id === 4).view, 'grid')
+    const bulkView = await worker.fetch(request(`/public/public-root-${collectionId}`), env)
+    assert.equal((await bulkView.json()).collection.view, 'masonry')
 
     const published = await worker.fetch(jsonRequest(`/v1/collection/${collectionId}/published-snapshots`, 'POST', { contentId: 'snapshot-1' }), env)
     assert.equal(published.status, 200)
