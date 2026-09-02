@@ -536,6 +536,9 @@ test('AI chat returns authorized tool results to the model for a continuation ro
     const continuation = calls[1][1]
     const toolMessages = continuation.messages.filter(item => item.role === 'tool')
     assert.equal(toolMessages.length, 2)
+    const toolAssistants = continuation.messages.filter(item => item.role === 'assistant').slice(-2)
+    assert.match(toolAssistants[0].content, /"name":"bookmark_read"/)
+    assert.doesNotMatch(toolAssistants[0].content, /tool_calls|tool_call_id/)
     assert.match(toolMessages[0].content, /Owned bookmark/)
     assert.match(toolMessages[1].content, /bookmark_not_found/)
     assert.doesNotMatch(toolMessages[1].content, /Private bookmark/)

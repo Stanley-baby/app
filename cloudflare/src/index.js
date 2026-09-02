@@ -2768,7 +2768,7 @@ const usageWindow = now => {
 
 const usageLimit = env => integerEnv(env, ['USAGE_QUOTA_DAILY', 'USAGE_QUOTA', 'DAILY_USAGE_QUOTA'], 1000)
 
-const aiDefaultModel = '@cf/meta/llama-3.1-8b-instruct-fp8'
+const aiDefaultModel = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
 const aiMessageLimit = 8000
 const aiHistoryLimit = 50
 const aiDailyLimit = env => integerEnv(env, ['AI_DAILY_QUOTA'], 20)
@@ -3973,7 +3973,6 @@ const aiChat = async (request, env, userId) => {
                     let conversationMessages = messages.slice()
                     try {
                         for (;;) {
-                            let roundAssistant = ''
                             const roundExecutions = []
                             for await (const event of aiResultChunks(pendingResult)) {
                                 const toolCalls = [...(event.toolCalls || []), ...(event.toolCalled ? [event.toolCalled] : [])]
@@ -4003,23 +4002,18 @@ const aiChat = async (request, env, userId) => {
                                 }
                                 if (event.delta) {
                                     assistant += event.delta
-                                    roundAssistant += event.delta
                                     enqueue(aiEvent({ chatId: chat.id, delta: event.delta }))
                                 }
                             }
                             if (!roundExecutions.length || toolRound >= 2) break
-                            const providerCalls = roundExecutions.map(({ call }) => ({
-                                id: call.id || aiActionId(), name: call.name, arguments: call.args
-                            }))
-                            const toolMessages = roundExecutions.map(({ call, executed }, index) => ({
-                                    role: 'tool',
-                                    name: call.name,
-                                    tool_call_id: providerCalls[index].id,
-                                    content: JSON.stringify(executed || { name: call.name, status: 'rejected', error: 'ai_tool_not_available' })
-                                }))
-                            conversationMessages = [...conversationMessages,
-                                { role: 'assistant', content: roundAssistant, tool_calls: providerCalls },
-                                ...toolMessages]
+                            const toolMessages = []
+                            for (const { call, executed } of roundExecutions) {
+                                toolMessages.push(
+                                    { role: 'assistant', content: JSON.stringify({ name: call.name, arguments: call.args }) },
+                                    { role: 'tool', content: JSON.stringify(executed || { name: call.name, status: 'rejected', error: 'ai_tool_not_available' }) }
+                                )
+                            }
+                            conversationMessages = [...conversationMessages, ...toolMessages]
                             pendingResult = await runWorkersAi(env, conversationMessages, { tools: aiModelTools })
                             toolRound++
                         }
