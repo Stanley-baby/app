@@ -27,9 +27,11 @@ The contract test skeleton runs with `npm run test:contract`.
 The AI page is served at `/ai` and is embedded by the existing Stella iframe.
 Authenticated clients use `/v2/ai/config`, `/v2/ai/chat` (SSE), and
 `/v2/ai/history`; Workers AI is the only provider in this phase. Set
-`AI_MODEL` and `AI_DAILY_QUOTA` per environment. Quota responses include an
-ISO `resetAt`; exhausted requests return `429` with `retryAt` and never fall
-back to another provider.
+`AI_MODEL`, `AI_DAILY_QUOTA`, and `AI_GLOBAL_DAILY_QUOTA` per environment.
+Quota responses include an ISO `resetAt`; exhausted requests return `429` with
+`retryAt` and never fall back to another provider. The AI page uses the same
+environment's Pages origin (`/ai`) so the Stella iframe and session cookie stay
+on the deployed Beta app.
 
 Each profile also sets `USAGE_QUOTA_DAILY` (default `1000`) and
 `RATE_LIMIT_PER_MINUTE` (default `60`). Authenticated write requests consume

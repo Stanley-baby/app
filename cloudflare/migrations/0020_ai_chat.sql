@@ -27,6 +27,12 @@ CREATE TABLE ai_usage_counters (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE ai_global_usage_counters (
+    window_start INTEGER PRIMARY KEY,
+    units INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE INDEX ai_chats_user_updated ON ai_chats(user_id, updated_at DESC);
 CREATE INDEX ai_messages_chat_created ON ai_messages(chat_id, created_at ASC);
 CREATE INDEX ai_messages_user_created ON ai_messages(user_id, created_at ASC);

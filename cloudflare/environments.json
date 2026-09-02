@@ -3,17 +3,17 @@
         "workerName": "raindrop-api-local",
         "apiOrigin": "http://localhost:8787",
         "appOrigin": "http://localhost:2000",
-        "aiPageOrigin": "http://localhost:5173/ai",
+        "aiPageOrigin": "http://localhost:2000/ai",
         "turnstileSiteKey": "1x00000000000000000000AA",
         "turnstileEnabled": false,
         "usageQuotaDaily": 1000,
         "aiDailyQuota": 20,
+        "aiGlobalDailyQuota": 10000,
         "rateLimitPerMinute": 60,
         "corsOrigins": [
             "http://localhost:2000",
             "http://127.0.0.1:2000",
             "http://localhost:3000",
-            "http://localhost:5173",
             "chrome-extension://*"
         ],
         "resourceNames": {
@@ -44,15 +44,15 @@
         "workerName": "raindrop-api-preview",
         "apiOrigin": "https://raindrop-api-preview.shenyuan.workers.dev",
         "appOrigin": "https://preview.raindrop.io",
-        "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
+        "aiPageOrigin": "https://preview.raindrop.io/ai",
         "turnstileSiteKey": "",
         "turnstileEnabled": false,
         "usageQuotaDaily": 1000,
         "aiDailyQuota": 20,
+        "aiGlobalDailyQuota": 10000,
         "rateLimitPerMinute": 60,
         "corsOrigins": [
             "https://preview.raindrop.io",
-            "https://ai-preview.raindrop.io",
             "chrome-extension://*"
         ],
         "resourceNames": {
@@ -83,15 +83,15 @@
         "workerName": "raindrop-api-beta",
         "apiOrigin": "https://raindrop-api-beta.shenyuan.workers.dev",
         "appOrigin": "https://raindrop-beta.pages.dev",
-        "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
+        "aiPageOrigin": "https://raindrop-beta.pages.dev/ai",
         "turnstileSiteKey": "0x4AAAAAAEgrWY2vz8wLYW8D",
         "turnstileEnabled": false,
         "usageQuotaDaily": 1000,
         "aiDailyQuota": 20,
+        "aiGlobalDailyQuota": 10000,
         "rateLimitPerMinute": 60,
         "corsOrigins": [
             "https://raindrop-beta.pages.dev",
-            "https://beta-ai.raindrop.io",
             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
         ],
         "resourceNames": {
@@ -122,15 +122,15 @@
         "workerName": "raindrop-api-production",
         "apiOrigin": "https://api.raindrop.io",
         "appOrigin": "https://app.raindrop.io",
-        "aiPageOrigin": "https://ai.raindrop.io/ai",
+        "aiPageOrigin": "https://app.raindrop.io/ai",
         "turnstileSiteKey": "",
         "turnstileEnabled": false,
         "usageQuotaDaily": 1000,
         "aiDailyQuota": 20,
+        "aiGlobalDailyQuota": 10000,
         "rateLimitPerMinute": 60,
         "corsOrigins": [
             "https://app.raindrop.io",
-            "https://ai.raindrop.io",
             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
         ],
         "resourceNames": {

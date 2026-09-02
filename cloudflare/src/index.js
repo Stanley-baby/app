@@ -2766,6 +2766,7 @@ const aiDefaultModel = '@cf/meta/llama-3.1-8b-instruct'
 const aiMessageLimit = 8000
 const aiHistoryLimit = 50
 const aiDailyLimit = env => integerEnv(env, ['AI_DAILY_QUOTA', 'AI_QUOTA_DAILY'], 20)
+const aiGlobalDailyLimit = env => integerEnv(env, ['AI_GLOBAL_DAILY_QUOTA'], 10000)
 const aiModel = env => String(env.AI_MODEL || aiDefaultModel)
 
 const aiWindow = now => {
@@ -2775,46 +2776,98 @@ const aiWindow = now => {
 
 const readAiQuota = async (env, userId) => {
     const limit = aiDailyLimit(env)
+    const globalLimit = aiGlobalDailyLimit(env)
     const { windowStart, resetAt } = aiWindow(Date.now())
     try {
-        const row = await env.DB.prepare('SELECT units FROM ai_usage_counters WHERE user_id = ? AND window_start = ?')
-            .bind(userId, windowStart).first()
+        const [row, global] = await Promise.all([
+            env.DB.prepare('SELECT units FROM ai_usage_counters WHERE user_id = ? AND window_start = ?').bind(userId, windowStart).first(),
+            env.DB.prepare('SELECT units FROM ai_global_usage_counters WHERE window_start = ?').bind(windowStart).first()
+        ])
         const used = Number(row?.units || 0)
-        return { used, limit, remaining: Math.max(0, limit - used), resetAt }
+        const globalUsed = Number(global?.units || 0)
+        return {
+            used,
+            limit,
+            remaining: Math.max(0, limit - used),
+            resetAt,
+            global: {
+                used: globalUsed,
+                limit: globalLimit,
+                remaining: Math.max(0, globalLimit - globalUsed)
+            }
+        }
     } catch {
-        return { used: 0, limit, remaining: limit, resetAt }
+        return { error: 'ai_quota_unavailable', resetAt }
     }
 }
 
 const consumeAiQuota = async (env, request, userId) => {
     const limit = aiDailyLimit(env)
+    const globalLimit = aiGlobalDailyLimit(env)
     const now = Date.now()
     const { windowStart, resetAt } = aiWindow(now)
     try {
-        const current = await env.DB.prepare('SELECT units FROM ai_usage_counters WHERE user_id = ? AND window_start = ?')
-            .bind(userId, windowStart).first()
+        const [current, globalCurrent] = await Promise.all([
+            env.DB.prepare('SELECT units FROM ai_usage_counters WHERE user_id = ? AND window_start = ?').bind(userId, windowStart).first(),
+            env.DB.prepare('SELECT units FROM ai_global_usage_counters WHERE window_start = ?').bind(windowStart).first()
+        ])
         const previous = Number(current?.units || 0)
-        const statement = env.DB.prepare(`INSERT INTO ai_usage_counters (user_id, window_start, units, updated_at)
-            VALUES (?, ?, 1, ?)
-            ON CONFLICT(user_id, window_start) DO UPDATE SET units = units + 1, updated_at = excluded.updated_at
-            WHERE ai_usage_counters.units + 1 <= ?`).bind(userId, windowStart, now, limit)
-        const result = env.DB.batch ? (await env.DB.batch([statement]))[0] : await statement.run()
-        if (Number(result?.meta?.changes || 0) !== 1) {
+        const globalPrevious = Number(globalCurrent?.units || 0)
+        const blockedScope = previous >= limit ? 'user' : globalPrevious >= globalLimit ? 'global' : null
+        if (blockedScope) {
             const retryAfterMs = resetAt - now
             await recordAudit(env, request, { userId, action: 'ai.quota_exceeded', resourceType: 'ai_quota', outcome: 'blocked' })
             await recordAlert(env, request, {
                 userId,
                 kind: 'ai_quota_exceeded',
                 severity: 'warning',
-                metadata: { limit, used: previous, retryAfter: Math.ceil(retryAfterMs / 1000) }
+                metadata: { scope: blockedScope, limit: blockedScope === 'user' ? limit : globalLimit, used: blockedScope === 'user' ? previous : globalPrevious, retryAfter: Math.ceil(retryAfterMs / 1000) }
             })
-            return { allowed: false, used: previous, limit, remaining: 0, resetAt, retryAfterMs }
+            return {
+                allowed: false,
+                scope: blockedScope,
+                used: previous,
+                limit,
+                remaining: 0,
+                resetAt,
+                retryAfterMs,
+                global: { used: globalPrevious, limit: globalLimit, remaining: 0 }
+            }
         }
 
-        return { allowed: true, used: previous + 1, limit, remaining: Math.max(0, limit - previous - 1), resetAt }
+        const userStatement = env.DB.prepare(`INSERT INTO ai_usage_counters (user_id, window_start, units, updated_at)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(user_id, window_start) DO UPDATE SET units = units + 1, updated_at = excluded.updated_at
+            WHERE ai_usage_counters.units + 1 <= ?`).bind(userId, windowStart, now, limit)
+        const globalStatement = env.DB.prepare(`INSERT INTO ai_global_usage_counters (window_start, units, updated_at)
+            VALUES (?, 1, ?)
+            ON CONFLICT(window_start) DO UPDATE SET units = units + 1, updated_at = excluded.updated_at
+            WHERE ai_global_usage_counters.units + 1 <= ?`).bind(windowStart, now, globalLimit)
+        const results = env.DB.batch
+            ? await env.DB.batch([userStatement, globalStatement])
+            : [await userStatement.run(), await globalStatement.run()]
+        if (results.some(result => Number(result?.meta?.changes || 0) !== 1)) {
+            const retryAfterMs = resetAt - now
+            await recordAudit(env, request, { userId, action: 'ai.quota_exceeded', resourceType: 'ai_quota', outcome: 'blocked' })
+            await recordAlert(env, request, {
+                userId,
+                kind: 'ai_quota_exceeded',
+                severity: 'warning',
+                metadata: { scope: 'concurrent', limit, used: previous, retryAfter: Math.ceil(retryAfterMs / 1000) }
+            })
+            return { allowed: false, scope: 'concurrent', used: previous, limit, remaining: 0, resetAt, retryAfterMs, global: { used: globalPrevious, limit: globalLimit, remaining: 0 } }
+        }
+
+        return {
+            allowed: true,
+            used: previous + 1,
+            limit,
+            remaining: Math.max(0, limit - previous - 1),
+            resetAt,
+            global: { used: globalPrevious + 1, limit: globalLimit, remaining: Math.max(0, globalLimit - globalPrevious - 1) }
+        }
     } catch {
-        // ponytail: fail open only while an environment is applying the AI migration; restore the D1 guard after it lands.
-        return { allowed: true, used: 0, limit, remaining: limit, resetAt }
+        return { error: 'ai_quota_unavailable', resetAt }
     }
 }
 
@@ -2878,26 +2931,55 @@ const deleteAiHistory = async (env, userId) => {
     return chats.length
 }
 
-const aiBookmarkContext = async (env, userId, value) => {
-    if (value === undefined || value === null || value === '') return { text: '', sources: [] }
-    const bookmarkId = Number(value)
-    if (!Number.isSafeInteger(bookmarkId) || bookmarkId <= 0) return { error: 'bookmark_not_found' }
-    const bookmark = await env.DB.prepare(`SELECT id, url, title, description, note, highlights
-        FROM bookmarks WHERE id = ? AND user_id = ? AND removed_at IS NULL`).bind(bookmarkId, userId).first()
-    if (!bookmark) return { error: 'bookmark_not_found' }
-    let highlights = []
-    try { highlights = JSON.parse(bookmark.highlights || '[]') } catch {}
-    const text = [
-        'Authorized Bookmark context:',
-        'Title: ' + String(bookmark.title || ''),
-        'URL: ' + String(bookmark.url || ''),
-        'Description: ' + String(bookmark.description || ''),
-        'Notes: ' + String(bookmark.note || ''),
-        'Highlights: ' + highlights.map(item => String(item.text || item)).join(' | ')
-    ].join('\n').slice(0, Number(env.AI_CONTEXT_MAX_CHARS) || 12000)
-    return {
-        text,
-        sources: [{ raindropId: bookmark.id, title: String(bookmark.title || bookmark.url || ''), url: String(bookmark.url || '') }]
+const aiBookmarkContext = async (env, userId, value, query = '') => {
+    try {
+        let bookmarks
+        if (value !== undefined && value !== null && value !== '') {
+            const bookmarkId = Number(value)
+            if (!Number.isSafeInteger(bookmarkId) || bookmarkId <= 0) return { error: 'bookmark_not_found' }
+            const bookmark = await bookmarkAccessible(env, bookmarkId, userId)
+            bookmarks = bookmark && !bookmark.removed_at ? [bookmark] : []
+            if (!bookmarks.length) return { error: 'bookmark_not_found' }
+        } else if (query.trim()) {
+            const pattern = `%${query.trim().slice(0, 160)}%`
+            bookmarks = (await env.DB.prepare(`WITH RECURSIVE accessible(id) AS (
+                    SELECT c.id FROM collections c
+                    LEFT JOIN collection_collaborators cc ON cc.collection_id = c.id AND cc.user_id = ?
+                    WHERE c.removed_at IS NULL AND (c.user_id = ? OR cc.user_id IS NOT NULL)
+                    UNION
+                    SELECT c.id FROM collections c JOIN accessible parent ON c.parent_id = parent.id
+                    WHERE c.removed_at IS NULL
+                )
+                SELECT b.id, b.user_id, b.url, b.title, b.description, b.note, b.highlights
+                FROM bookmarks b
+                WHERE b.removed_at IS NULL AND (b.user_id = ? OR b.collection_id IN (SELECT id FROM accessible))
+                    AND (b.title LIKE ? OR b.url LIKE ? OR b.description LIKE ? OR b.note LIKE ? OR b.tags LIKE ? OR b.highlights LIKE ?)
+                ORDER BY b.updated_at DESC LIMIT 5`).bind(userId, userId, userId, ...Array(6).fill(pattern)).all()).results || []
+        } else return { text: '', sources: [] }
+
+        const contextLimit = Number(env.AI_CONTEXT_MAX_CHARS) || 12000
+        let used = 0
+        const parts = []
+        const sources = []
+        for (const bookmark of bookmarks) {
+            let highlights = []
+            try { highlights = JSON.parse(bookmark.highlights || '[]') } catch {}
+            const part = [
+                'Authorized Bookmark context:',
+                'Title: ' + String(bookmark.title || ''),
+                'URL: ' + String(bookmark.url || ''),
+                'Description: ' + String(bookmark.description || ''),
+                'Notes: ' + String(bookmark.note || ''),
+                'Highlights: ' + highlights.map(item => String(item.text || item)).join(' | ')
+            ].join('\n')
+            if (used + part.length > contextLimit) break
+            parts.push(part)
+            used += part.length
+            sources.push({ raindropId: bookmark.id, title: String(bookmark.title || bookmark.url || ''), url: String(bookmark.url || '') })
+        }
+        return { text: parts.join('\n\n'), sources }
+    } catch {
+        return { text: '', sources: [] }
     }
 }
 
@@ -2910,12 +2992,22 @@ const aiMessageText = value => {
         ?? choice?.delta?.content ?? choice?.message?.content ?? '')
 }
 
+const aiResultEvent = value => {
+    if (typeof value === 'string' || typeof value === 'number') return { delta: String(value) }
+    if (!value || typeof value !== 'object') return { delta: '' }
+    const tool = value.toolCalled || value.tool_called
+    return {
+        delta: aiMessageText(value),
+        ...(tool ? { toolCalled: true, tool } : {})
+    }
+}
+
 const parseAiLine = line => {
     let value = String(line || '').trim()
     if (!value || value === '[DONE]' || value.startsWith(':') || value.startsWith('event:')) return null
     if (value.startsWith('data:')) value = value.slice(5).trim()
     if (!value || value === '[DONE]') return null
-    try { return aiMessageText(JSON.parse(value)) } catch { return value }
+    try { return aiResultEvent(JSON.parse(value)) } catch { return { delta: value } }
 }
 
 async function* aiResultChunks(result) {
@@ -2929,25 +3021,25 @@ async function* aiResultChunks(result) {
             const lines = buffer.split(/\r?\n/)
             buffer = lines.pop() || ''
             for (const line of lines) {
-                const delta = parseAiLine(line)
-                if (delta) yield delta
+                const event = parseAiLine(line)
+                if (event?.delta || event?.toolCalled) yield event
             }
             next = await reader.read()
         }
         buffer += decoder.decode()
-        const delta = parseAiLine(buffer)
-        if (delta) yield delta
+        const event = parseAiLine(buffer)
+        if (event?.delta || event?.toolCalled) yield event
         return
     }
     if (result && typeof result[Symbol.asyncIterator] === 'function') {
         for await (const chunk of result) {
-            const delta = aiMessageText(chunk)
-            if (delta) yield delta
+            const event = aiResultEvent(chunk)
+            if (event.delta || event.toolCalled) yield event
         }
         return
     }
-    const delta = aiMessageText(result)
-    if (delta) yield delta
+    const event = aiResultEvent(result)
+    if (event.delta || event.toolCalled) yield event
 }
 
 const runWorkersAi = async (env, messages) => {
@@ -2981,6 +3073,8 @@ const aiRoute = async (request, env, url) => {
 
     if (url.pathname === '/v2/ai/config' && request.method === 'GET') {
         const quota = await readAiQuota(env, userId)
+        if (quota.error)
+            return error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.')
         return json({
             result: true,
             provider: 'workers_ai',
@@ -2993,6 +3087,8 @@ const aiRoute = async (request, env, url) => {
 
     if (url.pathname === '/v2/ai/quota' && request.method === 'GET') {
         const quota = await readAiQuota(env, userId)
+        if (quota.error)
+            return error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.')
         return json({ result: true, quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } }, 200, request, env)
     }
 
@@ -3040,13 +3136,10 @@ const aiRoute = async (request, env, url) => {
                 return error('ai_history_unavailable', 503, request, env, 'AI history is temporarily unavailable')
             }
         }
-        if (request.method === 'POST') {
-            // `/chats` is accepted as a compatibility alias for the streaming `/chat` endpoint.
-            return aiChat(request, env, userId)
-        }
+        if (request.method === 'POST') return aiChat(request, env, userId)
     }
 
-    if ((url.pathname === '/v2/ai/chat' || url.pathname === '/v2/ai/chats') && request.method === 'POST')
+    if (url.pathname === '/v2/ai/chat' && request.method === 'POST')
         return aiChat(request, env, userId)
 
     return error('route_not_implemented', 404, request, env)
@@ -3067,15 +3160,17 @@ const aiChat = async (request, env, userId) => {
         chat = requestedChatId ? await selectAiChat(env, userId, requestedChatId) : null
         if (requestedChatId && !chat)
             return error('ai_chat_not_found', 404, request, env, 'AI chat was not found')
-        const context = await aiBookmarkContext(env, userId, data.raindropId ?? data.bookmarkId)
+        const context = await aiBookmarkContext(env, userId, data.raindropId ?? data.bookmarkId, message)
         if (context.error)
             return error(context.error, 404, request, env, 'Bookmark was not found')
         if (!env.AI || typeof env.AI.run !== 'function')
             return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
         const quota = await consumeAiQuota(env, request, userId)
+        if (quota.error)
+            return error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.')
         if (!quota.allowed)
             return retryableError('ai_quota_exceeded', request, env, 'Daily AI quota reached. Retry after the quota resets.', quota.retryAfterMs, {
-                quota: { used: quota.used, limit: quota.limit, remaining: quota.remaining, resetAt: new Date(quota.resetAt).toISOString() },
+                quota: { used: quota.used, limit: quota.limit, remaining: quota.remaining, resetAt: new Date(quota.resetAt).toISOString(), global: quota.global, scope: quota.scope },
                 resetAt: new Date(quota.resetAt).toISOString(),
                 retryAt: new Date(quota.resetAt).toISOString()
             })
@@ -3111,9 +3206,13 @@ const aiChat = async (request, env, userId) => {
                 ;(async () => {
                     let assistant = ''
                     try {
-                        for await (const delta of aiResultChunks(result)) {
-                            assistant += delta
-                            enqueue(aiEvent({ chatId: chat.id, delta }))
+                        for await (const event of aiResultChunks(result)) {
+                            if (event.toolCalled)
+                                enqueue(aiEvent({ chatId: chat.id, toolCalled: event.tool }))
+                            if (event.delta) {
+                                assistant += event.delta
+                                enqueue(aiEvent({ chatId: chat.id, delta: event.delta }))
+                            }
                         }
                         if (assistant)
                             await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')

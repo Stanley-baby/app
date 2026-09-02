@@ -24,6 +24,8 @@ class AiDatabase {
         this.chats = []
         this.messages = []
         this.usage = []
+        this.globalUsage = []
+        this.quotaFailure = false
         this.nextMessageId = 1
     }
 
@@ -39,12 +41,15 @@ class AiDatabase {
                 const user = this.users.find(item => item.id === session?.user_id)
                 return session && user ? { ...session, session_id: session.id, ...user, federated_only: 0, google_enabled: false } : null
             }
+            if (this.quotaFailure && sql.includes('ai_usage')) throw new Error('quota storage unavailable')
             if (sql.includes('FROM ai_usage_counters')) return this.usage.find(item => item.user_id === values[0] && item.window_start === values[1]) || null
+            if (sql.includes('FROM ai_global_usage_counters')) return this.globalUsage.find(item => item.window_start === values[0]) || null
             if (sql.includes('FROM ai_chats WHERE id')) return this.chats.find(item => item.id === values[0] && item.user_id === values[1]) || null
             if (sql.includes('FROM bookmarks')) return null
             return null
         }
         const all = async () => {
+            if (sql.includes('FROM bookmarks b')) return { results: [] }
             if (sql.includes('FROM ai_chats WHERE user_id')) return { results: this.chats.filter(item => item.user_id === values[0]).map(item => ({ ...item })) }
             if (sql.includes('FROM ai_messages WHERE chat_id')) return { results: this.messages.filter(item => item.chat_id === values[0] && item.user_id === values[1]).sort((a, b) => b.created_at - a.created_at).slice(0, values[2]).map(item => ({ ...item })) }
             if (sql.includes('FROM ai_messages') && sql.includes('user_id = ?')) return { results: this.messages.filter(item => item.user_id === values[0]).map(item => ({ ...item })) }
@@ -60,6 +65,17 @@ class AiDatabase {
                     row.units++
                     row.updated_at = updatedAt
                 } else this.usage.push({ user_id: userId, window_start: windowStart, units: 1, updated_at: updatedAt })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO ai_global_usage_counters')) {
+                if (this.quotaFailure) throw new Error('quota storage unavailable')
+                const [windowStart, updatedAt, limit] = values
+                const row = this.globalUsage.find(item => item.window_start === windowStart)
+                if (row) {
+                    if (row.units + 1 > limit) return { meta: { changes: 0 } }
+                    row.units++
+                    row.updated_at = updatedAt
+                } else this.globalUsage.push({ window_start: windowStart, units: 1, updated_at: updatedAt })
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('INSERT INTO ai_chats')) {
@@ -117,6 +133,7 @@ const environment = async () => {
             AI_PAGE_ORIGIN: 'https://ai.example.test/ai',
             CORS_ORIGINS: 'https://app.example.test',
             AI_DAILY_QUOTA: '1',
+            AI_GLOBAL_DAILY_QUOTA: '2',
             AI_MODEL: '@cf/test-model',
             AI: {
                 run: async (...args) => {
@@ -165,12 +182,23 @@ test('AI config, streaming chat, private history, deletion, and quota recovery',
     const forbiddenDelete = await worker.fetch(request('/v2/ai/chats/' + encodeURIComponent(chat.id), { method: 'DELETE', headers: { Cookie: 'rd_session=two' } }), env)
     assert.equal(forbiddenDelete.status, 404)
 
+    const deletedChat = await worker.fetch(request('/v2/ai/chats/' + encodeURIComponent(chat.id), { method: 'DELETE' }), env)
+    assert.equal(deletedChat.status, 200)
+
     const deleted = await worker.fetch(request('/v2/ai/history', { method: 'DELETE' }), env)
     assert.equal(deleted.status, 200)
     const afterDelete = await worker.fetch(request('/v2/ai/history'), env)
     assert.deepEqual((await afterDelete.json()).items, [])
     assert.equal(db.chats.length, 0)
     assert.equal(db.messages.length, 0)
+})
+
+test('AI quota storage failures fail closed', async () => {
+    const { env } = await environment()
+    env.DB.quotaFailure = true
+    const response = await worker.fetch(request('/v2/ai/config'), env)
+    assert.equal(response.status, 503)
+    assert.equal((await response.json()).error, 'ai_quota_unavailable')
 })
 
 test('AI provider failures are explicit and do not invoke a fallback', async () => {
@@ -193,4 +221,14 @@ test('AI accepts a Workers AI ReadableStream binding result', async () => {
     const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Stream this' }) }), env)
     assert.equal(response.status, 200)
     assert.match(await response.text(), /"delta":"streamed"/)
+})
+
+test('AI forwards confirmed tool-called events without changing the provider', async () => {
+    const { env } = await environment()
+    env.AI.run = async () => new Response('data: {"toolCalled":{"name":"bookmark_refresh"}}\n\n', {
+        headers: { 'Content-Type': 'text/event-stream' }
+    })
+    const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Use the bookmark tool' }) }), env)
+    assert.equal(response.status, 200)
+    assert.match(await response.text(), /"toolCalled":\{"name":"bookmark_refresh"\}/)
 })

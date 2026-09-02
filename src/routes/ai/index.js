@@ -105,6 +105,8 @@ export default function AiPage() {
             await readEvents(response, eventData => {
                 if (eventData.chatId && !chatId) setChatId(eventData.chatId)
                 if (eventData.sources) setSources(eventData.sources)
+                if (eventData.toolCalled)
+                    postToHost({ type: 'ai:tool-called', tool: eventData.toolCalled })
                 if (eventData.delta) {
                     setMessages(current => assistantStarted
                         ? current.map((item, index) => index === current.length - 1 && item.role === 'assistant'
@@ -137,6 +139,22 @@ export default function AiPage() {
         setSources([])
     }, [])
 
+    const deleteChat = useCallback(async (event, id) => {
+        event.stopPropagation()
+        const response = await fetch(API_ORIGIN + '/v2/ai/chats/' + encodeURIComponent(id), { method: 'DELETE', credentials: 'include' })
+        if (!response.ok) {
+            const body = await readJson(response)
+            setError(body.errorMessage || 'AI chat could not be deleted')
+            return
+        }
+        setChats(current => current.filter(chat => chat.id !== id))
+        if (chatId === id) {
+            setChatId(null)
+            setMessages([])
+            setSources([])
+        }
+    }, [chatId])
+
     const openSource = useCallback((event, source) => {
         if (window.parent === window) return
         event.preventDefault()
@@ -156,13 +174,15 @@ export default function AiPage() {
             <div className={s.body}>
                 <aside className={s.history} aria-label='AI history'>
                     {chats.map(chat => (
-                        <button
-                            type='button'
-                            key={chat.id}
-                            className={chat.id === chatId ? s.selected : ''}
-                            onClick={() => selectChat(chat)}>
-                            {chat.title || 'New chat'}
-                        </button>
+                        <div className={s.historyItem} key={chat.id}>
+                            <button
+                                type='button'
+                                className={chat.id === chatId ? s.selected : ''}
+                                onClick={() => selectChat(chat)}>
+                                {chat.title || 'New chat'}
+                            </button>
+                            <button type='button' aria-label={'Delete ' + (chat.title || 'chat')} onClick={event => deleteChat(event, chat.id)}>×</button>
+                        </div>
                     ))}
                 </aside>
                 <main className={s.chat}>

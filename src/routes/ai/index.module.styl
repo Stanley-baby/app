@@ -35,13 +35,26 @@
     width: 12rem
     gap: .25rem
 }
-.history button {
+.historyItem {
+    display: flex
+    gap: .25rem
+}
+.historyItem button:first-child {
     overflow: hidden
+    flex: 1
     padding: .5rem
     border: 0
     text-align: left
     white-space: nowrap
     text-overflow: ellipsis
+    color: inherit
+    background: transparent
+    cursor: pointer
+}
+.historyItem button:last-child {
+    width: 2rem
+    padding: .25rem
+    border: 0
     color: inherit
     background: transparent
     cursor: pointer
