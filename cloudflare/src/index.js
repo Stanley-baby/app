@@ -2762,7 +2762,7 @@ const usageWindow = now => {
 
 const usageLimit = env => integerEnv(env, ['USAGE_QUOTA_DAILY', 'USAGE_QUOTA', 'DAILY_USAGE_QUOTA'], 1000)
 
-const aiDefaultModel = '@cf/meta/llama-3.1-8b-instruct'
+const aiDefaultModel = '@cf/meta/llama-3.1-8b-instruct-fp8'
 const aiMessageLimit = 8000
 const aiHistoryLimit = 50
 const aiDailyLimit = env => integerEnv(env, ['AI_DAILY_QUOTA'], 20)
