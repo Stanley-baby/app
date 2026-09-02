@@ -66,10 +66,7 @@ module.exports = (env={}, args={}) => {
             },
 
             plugins: [
-                ...[
-                    'sidepanel.html',
-                    ...(env.vendor == 'chrome' ? ['newtab.html'] : [])
-                ].map(filename=>new HtmlWebpackPlugin({
+                new HtmlWebpackPlugin({
                     title: 'Raindrop.io',
                     template: './index.ejs',
                     templateParameters: {
@@ -79,11 +76,11 @@ module.exports = (env={}, args={}) => {
 						turnstileSiteKey: buildEnvironment.turnstileSiteKey,
 						turnstileEnabled: buildEnvironment.turnstileEnabled
                     },
-                    filename,
+                    filename: 'sidepanel.html',
                     scriptLoading: 'blocking',
                     inject: 'body',
                     excludeChunks: ['manifest', 'background']
-                })),
+                }),
 
                 new webpack.DefinePlugin({
                     'process.env.APP_TARGET': JSON.stringify('extension'),
