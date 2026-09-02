@@ -50,6 +50,11 @@ test('Pages serves client-side routes through the Web entry point', () => {
     assert.match(fs.readFileSync(new URL('../../src/assets/_redirects', import.meta.url), 'utf8'), /^\/\*\s+\/index\.html\s+200$/m)
 })
 
+test('Pages framing stays limited to the same origin for the AI host UI', () => {
+    const headers = fs.readFileSync(new URL('../../src/assets/_headers', import.meta.url), 'utf8')
+    assert.match(headers, /\/\*\s+X-Frame-Options: SAMEORIGIN/m)
+})
+
 test('Chrome extension development and Beta builds stay isolated', () => {
     assert.equal(extension({ vendor: 'chrome' }).devServer.port, 2001)
     assert.equal(extension({ vendor: 'edge' }).devServer.port, 2000)
