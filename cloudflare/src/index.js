@@ -2765,7 +2765,7 @@ const usageLimit = env => integerEnv(env, ['USAGE_QUOTA_DAILY', 'USAGE_QUOTA', '
 const aiDefaultModel = '@cf/meta/llama-3.1-8b-instruct'
 const aiMessageLimit = 8000
 const aiHistoryLimit = 50
-const aiDailyLimit = env => integerEnv(env, ['AI_DAILY_QUOTA', 'AI_QUOTA_DAILY'], 20)
+const aiDailyLimit = env => integerEnv(env, ['AI_DAILY_QUOTA'], 20)
 const aiGlobalDailyLimit = env => integerEnv(env, ['AI_GLOBAL_DAILY_QUOTA'], 10000)
 const aiModel = env => String(env.AI_MODEL || aiDefaultModel)
 
@@ -3014,7 +3014,7 @@ const aiResultEvent = value => {
     const tool = value.toolCalled || value.tool_called
     return {
         delta: aiMessageText(value),
-        ...(tool ? { toolCalled: true, tool } : {})
+        ...(tool ? { toolCalled: tool } : {})
     }
 }
 
@@ -3066,6 +3066,14 @@ const runWorkersAi = async (env, messages) => {
 }
 
 const aiEvent = value => 'data: ' + JSON.stringify(value) + '\n\n'
+
+const confirmedAiTool = (value, context) => {
+    if (!value || typeof value !== 'object' || value.name !== 'bookmark_refresh') return null
+    const raindropId = Number(value.raindropId)
+    return context.sources.some(source => Number(source.raindropId) === raindropId)
+        ? { name: value.name, raindropId }
+        : null
+}
 
 const aiAuth = async (request, env) => {
     if (!authReady(env)) return { response: configurationError(request, env) }
@@ -3132,9 +3140,9 @@ const aiRoute = async (request, env, url) => {
 
     if ((url.pathname === '/v2/ai/history' || url.pathname === '/v2/ai/chats') && request.method === 'GET') {
         try {
-            const chatId = url.searchParams.get('chatId') || url.searchParams.get('chat_id')
+            const chatId = url.searchParams.get('chatId')
             const items = await listAiHistory(env, userId, chatId)
-            return json({ result: true, items, chats: items, history: items }, 200, request, env)
+            return json({ result: true, items }, 200, request, env)
         } catch {
             return error('ai_history_unavailable', 503, request, env, 'AI history is temporarily unavailable')
         }
@@ -3143,7 +3151,7 @@ const aiRoute = async (request, env, url) => {
     if (url.pathname === '/v2/ai/history' || url.pathname === '/v2/ai/chats') {
         if (request.method === 'DELETE') {
             try {
-                const chatId = url.searchParams.get('chatId') || url.searchParams.get('chat_id')
+                const chatId = url.searchParams.get('chatId')
                 const deleted = chatId ? Number(await deleteAiChat(env, userId, chatId)) : await deleteAiHistory(env, userId)
                 if (chatId && !deleted) return error('ai_chat_not_found', 404, request, env, 'AI chat was not found')
                 await recordAudit(env, request, { userId, action: 'ai.history_deleted', resourceType: 'ai_chat', outcome: 'success' })
@@ -3152,7 +3160,7 @@ const aiRoute = async (request, env, url) => {
                 return error('ai_history_unavailable', 503, request, env, 'AI history is temporarily unavailable')
             }
         }
-        if (request.method === 'POST') return aiChat(request, env, userId)
+        if (url.pathname === '/v2/ai/chats' && request.method === 'POST') return aiChat(request, env, userId)
     }
 
     if (url.pathname === '/v2/ai/chat' && request.method === 'POST')
@@ -3169,7 +3177,7 @@ const aiChat = async (request, env, userId) => {
     if (!message || message.length > aiMessageLimit)
         return error('validation_failed', 400, request, env, 'Enter a message up to 8,000 characters')
 
-    const requestedChatId = String(data.chatId || data.chat_id || '').trim()
+    const requestedChatId = String(data.chatId || '').trim()
     const now = Date.now()
     let chat
     try {
@@ -3223,8 +3231,9 @@ const aiChat = async (request, env, userId) => {
                     let assistant = ''
                     try {
                         for await (const event of aiResultChunks(result)) {
-                            if (event.toolCalled)
-                                enqueue(aiEvent({ chatId: chat.id, toolCalled: event.tool }))
+                            const toolCalled = confirmedAiTool(event.toolCalled, context)
+                            if (toolCalled)
+                                enqueue(aiEvent({ chatId: chat.id, toolCalled }))
                             if (event.delta) {
                                 assistant += event.delta
                                 enqueue(aiEvent({ chatId: chat.id, delta: event.delta }))

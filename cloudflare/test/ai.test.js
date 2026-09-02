@@ -277,11 +277,20 @@ test('AI accepts a Workers AI ReadableStream binding result', async () => {
 })
 
 test('AI forwards confirmed tool-called events without changing the provider', async () => {
-    const { env } = await environment()
-    env.AI.run = async () => new Response('data: {"toolCalled":{"name":"bookmark_refresh"}}\n\n', {
+    const { env, db } = await environment()
+    db.bookmarks.push({
+        id: 7,
+        user_id: 1,
+        url: 'https://example.test/tool',
+        title: 'Tool bookmark',
+        description: '',
+        note: '',
+        highlights: '[]'
+    })
+    env.AI.run = async () => new Response('data: {"toolCalled":{"name":"bookmark_refresh","raindropId":7}}\n\n', {
         headers: { 'Content-Type': 'text/event-stream' }
     })
-    const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Use the bookmark tool' }) }), env)
+    const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Find Tool bookmark' }) }), env)
     assert.equal(response.status, 200)
-    assert.match(await response.text(), /"toolCalled":\{"name":"bookmark_refresh"\}/)
+    assert.match(await response.text(), /"toolCalled":\{"name":"bookmark_refresh","raindropId":7\}/)
 })
