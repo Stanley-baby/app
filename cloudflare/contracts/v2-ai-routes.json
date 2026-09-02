@@ -14,6 +14,24 @@
             "responses": [200, 401]
         },
         {
+            "method": "GET",
+            "path": "/v2/ai/context",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v2/ai/suggestions",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404, 429, 503]
+        },
+        {
+            "method": "POST",
+            "path": "/v2/ai/description-draft",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404, 429, 503]
+        },
+        {
             "method": "POST",
             "path": "/v2/ai/chat",
             "authentication": "required",

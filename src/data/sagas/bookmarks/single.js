@@ -386,7 +386,7 @@ function* suggestFields({ obj, ignore }) {
 	try{
 		const state = yield select()
 		const pro = isPro(state)
-		if (!pro) return
+		if (!pro && !independentService) return
 
 		const { item } = obj._id ?
 			yield call(Api.get, `raindrop/${obj._id}/suggest`) :

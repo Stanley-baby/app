@@ -2,6 +2,7 @@ import s from './index.module.styl'
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Helmet } from 'react-helmet'
 import { API_ORIGIN } from '~data/constants/app'
+import t from '~t'
 
 const postToHost = message => {
     if (window.parent !== window) window.parent.postMessage(message, '*')
@@ -42,10 +43,15 @@ export default function AiPage() {
     const [chatId, setChatId] = useState(null)
     const [messages, setMessages] = useState([])
     const [sources, setSources] = useState([])
+    const [suggestions, setSuggestions] = useState(null)
+    const [draft, setDraft] = useState(null)
     const [input, setInput] = useState('')
     const [error, setError] = useState('')
     const [loading, setLoading] = useState(true)
     const [sending, setSending] = useState(false)
+    const [suggesting, setSuggesting] = useState(false)
+    const [drafting, setDrafting] = useState(false)
+    const [applyingDraft, setApplyingDraft] = useState(false)
 
     const load = useCallback(async () => {
         setLoading(true)
@@ -95,7 +101,7 @@ export default function AiPage() {
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chatId, message, raindropId })
+                body: JSON.stringify({ chatId, message, raindropId, language: t.currentLang })
             })
             if (!response.ok) {
                 const body = await readJson(response)
@@ -104,7 +110,7 @@ export default function AiPage() {
             }
             await readEvents(response, eventData => {
                 if (eventData.chatId && !chatId) setChatId(eventData.chatId)
-                if (eventData.sources) setSources(eventData.sources)
+                if (eventData.sources || eventData.citations) setSources(eventData.sources || eventData.citations)
                 if (eventData.toolCalled)
                     postToHost({ type: 'ai:tool-called', tool: eventData.toolCalled })
                 if (eventData.delta) {
@@ -125,6 +131,72 @@ export default function AiPage() {
             setSending(false)
         }
     }, [chatId, input, load, raindropId, sending])
+
+    const generateSuggestions = useCallback(async () => {
+        if (!raindropId || suggesting) return
+        setSuggesting(true)
+        setError('')
+        try {
+            const response = await fetch(API_ORIGIN + '/v2/ai/suggestions', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ raindropId, language: t.currentLang })
+            })
+            const body = await readJson(response)
+            if (!response.ok) throw new Error(body.errorMessage || 'Suggestions are unavailable')
+            setSuggestions(body.suggestions || body.item || null)
+            if (body.quota) setConfig(current => ({ ...current, quota: body.quota }))
+        } catch (suggestionError) {
+            setError(suggestionError.message)
+        } finally {
+            setSuggesting(false)
+        }
+    }, [raindropId, suggesting])
+
+    const generateDraft = useCallback(async () => {
+        if (!raindropId || drafting) return
+        setDrafting(true)
+        setError('')
+        try {
+            const response = await fetch(API_ORIGIN + '/v2/ai/description-draft', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ raindropId, language: t.currentLang })
+            })
+            const body = await readJson(response)
+            if (!response.ok) throw new Error(body.errorMessage || 'Description draft is unavailable')
+            setDraft(String(body.draft || body.descriptionDraft || ''))
+            if (body.quota) setConfig(current => ({ ...current, quota: body.quota }))
+        } catch (draftError) {
+            setError(draftError.message)
+        } finally {
+            setDrafting(false)
+        }
+    }, [drafting, raindropId])
+
+    const applyDraft = useCallback(async () => {
+        if (!raindropId || draft === null || applyingDraft) return
+        setApplyingDraft(true)
+        setError('')
+        try {
+            const response = await fetch(API_ORIGIN + '/v1/raindrop/' + encodeURIComponent(raindropId), {
+                method: 'PUT',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ description: draft })
+            })
+            const body = await readJson(response)
+            if (!response.ok) throw new Error(body.errorMessage || 'Description could not be saved')
+            postToHost({ type: 'ai:tool-called', tool: { name: 'bookmark_update', raindropId } })
+            setDraft(null)
+        } catch (draftError) {
+            setError(draftError.message)
+        } finally {
+            setApplyingDraft(false)
+        }
+    }, [applyingDraft, draft, raindropId])
 
     const deleteHistory = useCallback(async () => {
         const response = await fetch(API_ORIGIN + '/v2/ai/history', { method: 'DELETE', credentials: 'include' })
@@ -188,9 +260,34 @@ export default function AiPage() {
                 <main className={s.chat}>
                     {loading && <p>Loading…</p>}
                     {!loading && !config?.available && <p>Workers AI is temporarily unavailable.</p>}
+                    {raindropId && <section className={s.assist} aria-label='Bookmark AI tools'>
+                        <button type='button' onClick={generateSuggestions} disabled={suggesting || !config?.available}>
+                            {suggesting ? 'Suggesting…' : t.s('suggestedCollectionsAndTags')}
+                        </button>
+                        {suggestions && <div className={s.suggestions}>
+                            {(suggestions.collections || []).map(collection => <button
+                                type='button'
+                                key={collection.id || collection._id}
+                                onClick={() => postToHost({ type: 'ai:link-click', collectionId: collection.id || collection._id })}>
+                                {collection.title || collection.id || collection._id}
+                            </button>)}
+                            {(suggestions.tags || []).map(tag => <span key={tag}>#{tag}</span>)}
+                            {(suggestions.newTags || suggestions.new_tags || []).map(tag => <span key={tag}>#{tag}</span>)}
+                        </div>}
+                        <button type='button' onClick={generateDraft} disabled={drafting || !config?.available}>
+                            {drafting ? 'Drafting…' : t.s('addDescription')}
+                        </button>
+                        {draft !== null && <div className={s.draft}>
+                            <textarea value={draft} onChange={event => setDraft(event.target.value)} aria-label={t.s('description')} />
+                            <div className={s.draftActions}>
+                                <button type='button' onClick={applyDraft} disabled={applyingDraft}>{t.s('save')}</button>
+                                <button type='button' onClick={() => setDraft(null)} disabled={applyingDraft}>{t.s('cancel')}</button>
+                            </div>
+                        </div>}
+                    </section>}
                     <div className={s.messages} aria-live='polite'>
                         {messages.map((message, index) => <p className={message.role === 'user' ? s.user : s.assistant} key={message.id || index}>{message.content}</p>)}
-                        {sources.map(source => <a key={source.raindropId} href={source.url} onClick={event => openSource(event, source)}>{source.title || source.url}</a>)}
+                        {sources.map(source => <a key={source.raindropId} data-raindrop-id={source.raindropId} href={source.url} onClick={event => openSource(event, source)}>{source.title || source.url} — {source.url}</a>)}
                     </div>
                     {error && <p className={s.error}>{error}</p>}
                     {config?.quota && <small>AI quota: {config.quota.remaining}/{config.quota.limit} remaining; resets {new Date(config.quota.resetAt).toLocaleString()}.</small>}

@@ -26,6 +26,7 @@ class AiDatabase {
         this.usage = []
         this.globalUsage = []
         this.bookmarks = []
+        this.collections = []
         this.quotaFailure = false
         this.nextMessageId = 1
     }
@@ -46,11 +47,17 @@ class AiDatabase {
             if (sql.includes('FROM ai_usage_counters')) return this.usage.find(item => item.user_id === values[0] && item.window_start === values[1]) || null
             if (sql.includes('FROM ai_global_usage_counters')) return this.globalUsage.find(item => item.window_start === values[0]) || null
             if (sql.includes('FROM ai_chats WHERE id')) return this.chats.find(item => item.id === values[0] && item.user_id === values[1]) || null
+            if (sql.includes('FROM bookmarks WHERE id'))
+                return this.bookmarks.find(item => item.id === values[0] && item.user_id === values[1] && !item.removed_at) || null
+            if (sql.includes('FROM collections WHERE id'))
+                return this.collections.find(item => item.id === values[0] && item.user_id === values[1] && !item.removed_at) || null
             if (sql.includes('FROM bookmarks')) return null
             return null
         }
         const all = async () => {
             if (sql.includes('FROM bookmarks b')) return { results: this.bookmarks }
+            if (sql.includes('FROM bookmarks WHERE user_id')) return { results: this.bookmarks.filter(item => item.user_id === values[0] && !item.removed_at) }
+            if (sql.includes('FROM collections WHERE user_id')) return { results: this.collections.filter(item => item.user_id === values[0] && !item.removed_at) }
             if (sql.includes('FROM ai_chats WHERE user_id')) return { results: this.chats.filter(item => item.user_id === values[0]).map(item => ({ ...item })) }
             if (sql.includes('FROM ai_messages WHERE chat_id')) return { results: this.messages.filter(item => item.chat_id === values[0] && item.user_id === values[1]).sort((a, b) => b.created_at - a.created_at).slice(0, values[2]).map(item => ({ ...item })) }
             if (sql.includes('FROM ai_messages') && sql.includes('user_id = ?')) return { results: this.messages.filter(item => item.user_id === values[0]).map(item => ({ ...item })) }
@@ -242,7 +249,8 @@ test('AI grounds natural-language prompts in authorized bookmark search results'
         title: 'Cloudflare Workers AI',
         description: 'AI documentation',
         note: '',
-        highlights: '[]'
+        highlights: '[]',
+        tags: '["cloudflare"]'
     })
     const response = await worker.fetch(request('/v2/ai/chat', {
         method: 'POST',
@@ -252,6 +260,7 @@ test('AI grounds natural-language prompts in authorized bookmark search results'
     const body = await response.text()
     assert.match(body, /"raindropId":7/)
     assert.match(calls[0][1].messages.at(-1).content, /Cloudflare Workers AI/)
+    assert.match(calls[0][1].messages.at(-1).content, /Tags: cloudflare/)
 })
 
 test('AI provider failures are explicit and do not invoke a fallback', async () => {
@@ -293,4 +302,103 @@ test('AI forwards confirmed tool-called events without changing the provider', a
     const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Find Tool bookmark' }) }), env)
     assert.equal(response.status, 200)
     assert.match(await response.text(), /"toolCalled":\{"name":"bookmark_refresh","raindropId":7\}/)
+})
+
+test('AI suggestions stay authorized, language-aware, and metadata-only', async () => {
+    const { env, db, calls } = await environment()
+    db.bookmarks.push({
+        id: 7,
+        user_id: 1,
+        url: 'https://developers.cloudflare.com/workers-ai/',
+        title: 'Cloudflare Workers AI',
+        description: 'AI documentation',
+        note: 'Keep this note',
+        highlights: '[]',
+        tags: '["existing"]'
+    })
+    db.bookmarks.push({ id: 8, user_id: 1, url: 'https://example.test/other', title: 'Other bookmark', description: '', note: '', highlights: '[]', tags: '["cloudflare"]' })
+    db.collections.push({ id: 3, user_id: 1, title: 'Engineering', parent_id: null })
+    db.collections.push({ id: 4, user_id: 2, title: 'Other user collection', parent_id: null })
+    env.AI.run = async (...args) => {
+        calls.push(args)
+        return new Response('data: {"response":"{\\"collections\\":[{\\"$id\\":3}],\\"tags\\":[\\"cloudflare\\"],\\"new_tags\\":[\\"workers\\"]}"}\n\n', {
+            headers: { 'Content-Type': 'text/event-stream' }
+        })
+    }
+
+    const response = await worker.fetch(request('/v2/ai/suggestions', {
+        method: 'POST',
+        body: JSON.stringify({ raindropId: 7, language: 'zh-Hans' })
+    }), env)
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.deepEqual(body.suggestions.collections.map(item => item.id), [3])
+    assert.deepEqual(body.suggestions.tags, ['cloudflare'])
+    assert.deepEqual(body.suggestions.newTags, ['workers'])
+    assert.equal(body.language, 'zh-Hans')
+    assert.match(calls[0][1].messages[0].content, /zh-Hans/)
+    assert.match(calls[0][1].messages.at(-1).content, /Cloudflare Workers AI/)
+    assert.match(calls[0][1].messages.at(-1).content, /"tags":\["existing"\]/)
+    assert.doesNotMatch(calls[0][1].messages.at(-1).content, /Other user collection/)
+    assert.doesNotMatch(calls[0][1].messages.at(-1).content, /attachment-body|snapshot-body/)
+})
+
+test('AI description draft is editable output and never writes the Bookmark', async () => {
+    const { env, db } = await environment()
+    db.bookmarks.push({
+        id: 7,
+        user_id: 1,
+        url: 'https://example.test/article',
+        title: 'Article',
+        description: 'Original description',
+        note: '',
+        highlights: '[]'
+    })
+    env.AI.run = async () => new Response('data: {"response":"A proposed description."}\n\n', {
+        headers: { 'Content-Type': 'text/event-stream' }
+    })
+
+    const response = await worker.fetch(request('/v2/ai/description-draft', {
+        method: 'POST',
+        body: JSON.stringify({ raindropId: 7, language: 'en' })
+    }), env)
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.draft, 'A proposed description.')
+    assert.equal(body.descriptionDraft, 'A proposed description.')
+    assert.equal(db.bookmarks[0].description, 'Original description')
+})
+
+test('AI context endpoint exposes only authorized Bookmark metadata', async () => {
+    const { env, db } = await environment()
+    db.bookmarks.push({
+        id: 7,
+        user_id: 1,
+        url: 'https://example.test/article',
+        title: 'Article',
+        description: 'Metadata only',
+        note: '',
+        highlights: '[]'
+    })
+    db.bookmarks.push({ id: 8, user_id: 2, url: 'https://example.test/private', title: 'Private', description: '', note: '', highlights: '[]' })
+
+    const response = await worker.fetch(request('/v2/ai/context?raindropId=7'), env)
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.deepEqual(body.package.bookmarks.map(item => item.title), ['Article'])
+    assert.deepEqual(body.sources, [{ raindropId: 7, title: 'Article', url: 'https://example.test/article' }])
+    assert.doesNotMatch(JSON.stringify(body), /Private/)
+    const missing = await worker.fetch(request('/v2/ai/context'), env)
+    assert.equal(missing.status, 404)
+})
+
+test('legacy Bookmark suggestion endpoints return the client-compatible item shape', async () => {
+    const { env, db } = await environment()
+    db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/article', title: 'Article', description: '', note: '', highlights: '[]', tags: '[]' })
+    const response = await worker.fetch(request('/v1/raindrop/7/suggest'), env)
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.ok(Array.isArray(body.item.collections))
+    assert.ok(Array.isArray(body.item.tags))
+    assert.ok(Array.isArray(body.item.new_tags))
 })

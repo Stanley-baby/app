@@ -2658,6 +2658,7 @@ const auditRoute = request => {
         [/^\/v1\/collection\/\d+\/(?:transfer|ownership|published-snapshots|snapshots)(?:\/[^/]+)?$/, '/v1/collection/:id/sharing'],
         [/^\/v1\/content\/[^/]+\/publish$/, '/v1/content/:id/publish'],
         [/^\/v1\/import\/[^/]+(?:\/(?:review|commit|status|retry|mappings))?$/, '/v1/import/:id'],
+        [/^\/v1\/raindrop\/\d+\/suggest$/, '/v1/raindrop/:id/suggest'],
         [/^\/v2\/ai\/(?:chats|history)\/[^/]+$/, '/v2/ai/chats/:id']
     ]
     const match = patterns.find(([pattern]) => pattern.test(pathname))
@@ -2674,8 +2675,9 @@ const auditRoute = request => {
         '/v1/tasks',
         '/v1/import', '/v1/import/preflight',
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
-        '/v1/raindrop/file', '/v1/content/upload', '/v1/collaborators/join',
-        '/v2/ai/config', '/v2/ai/quota', '/v2/ai/chat', '/v2/ai/history', '/v2/ai/chats'
+        '/v1/raindrop/file', '/v1/raindrop/suggest', '/v1/content/upload', '/v1/collaborators/join',
+        '/v2/ai/config', '/v2/ai/quota', '/v2/ai/chat', '/v2/ai/history', '/v2/ai/chats',
+        '/v2/ai/context', '/v2/ai/suggestions', '/v2/ai/description-draft', '/v2/ai/draft'
     ])
     return known.has(pathname) ? pathname : '/v1/unknown'
 }
@@ -2939,6 +2941,42 @@ const deleteAiHistory = async (env, userId) => {
     return chats.length
 }
 
+const aiContextItem = bookmark => {
+    const highlights = arrayValue(bookmark.highlights)
+    return {
+        id: Number(bookmark.id),
+        title: String(bookmark.title || ''),
+        url: String(bookmark.url || ''),
+        description: String(bookmark.description || ''),
+        note: String(bookmark.note || ''),
+        tags: bookmarkTags(bookmark.tags),
+        highlights: highlights.map(item => String(item?.text || item || '')).filter(Boolean)
+    }
+}
+
+const aiContextText = (bookmarks, contextLimit) => {
+    let used = 0
+    const parts = []
+    const items = []
+    for (const bookmark of bookmarks) {
+        const item = aiContextItem(bookmark)
+        const part = [
+            'Authorized Bookmark context:',
+            'Title: ' + item.title,
+            'URL: ' + item.url,
+            'Description: ' + item.description,
+            'Notes: ' + item.note,
+            'Tags: ' + item.tags.join(', '),
+            'Highlights: ' + item.highlights.join(' | ')
+        ].join('\n')
+        if (used + part.length > contextLimit) break
+        parts.push(part)
+        items.push(item)
+        used += part.length
+    }
+    return { text: parts.join('\n\n'), items }
+}
+
 const aiBookmarkContext = async (env, userId, value, query = '') => {
     try {
         let bookmarks
@@ -2966,36 +3004,171 @@ const aiBookmarkContext = async (env, userId, value, query = '') => {
                     SELECT c.id FROM collections c JOIN accessible parent ON c.parent_id = parent.id
                     WHERE c.removed_at IS NULL
                 )
-                SELECT b.id, b.user_id, b.url, b.title, b.description, b.note, b.highlights
+                SELECT b.id, b.user_id, b.url, b.title, b.description, b.note, b.tags, b.highlights
                 FROM bookmarks b
                 WHERE b.removed_at IS NULL AND (b.user_id = ? OR b.collection_id IN (SELECT id FROM accessible))
                     AND (${clauses})
                 ORDER BY b.updated_at DESC LIMIT 5`).bind(userId, userId, userId, ...values).all()).results || []
-        } else return { text: '', sources: [] }
+        } else return { text: '', items: [], sources: [] }
 
         const contextLimit = Number(env.AI_CONTEXT_MAX_CHARS) || 12000
-        let used = 0
-        const parts = []
+        const context = aiContextText(bookmarks, contextLimit)
         const sources = []
         for (const bookmark of bookmarks) {
-            let highlights = []
-            try { highlights = JSON.parse(bookmark.highlights || '[]') } catch {}
-            const part = [
-                'Authorized Bookmark context:',
-                'Title: ' + String(bookmark.title || ''),
-                'URL: ' + String(bookmark.url || ''),
-                'Description: ' + String(bookmark.description || ''),
-                'Notes: ' + String(bookmark.note || ''),
-                'Highlights: ' + highlights.map(item => String(item.text || item)).join(' | ')
-            ].join('\n')
-            if (used + part.length > contextLimit) break
-            parts.push(part)
-            used += part.length
+            if (!context.items.some(item => item.id === Number(bookmark.id))) continue
             sources.push({ raindropId: bookmark.id, title: String(bookmark.title || bookmark.url || ''), url: String(bookmark.url || '') })
         }
-        return { text: parts.join('\n\n'), sources }
+        return { ...context, sources }
     } catch {
-        return { text: '', sources: [] }
+        return { text: '', items: [], sources: [] }
+    }
+}
+
+const aiLanguage = (value, request) => String(value || request.headers.get('Accept-Language') || 'en')
+    .split(',')[0].trim().slice(0, 32) || 'en'
+
+const aiSuggestionCandidates = async (env, userId) => {
+    const collections = (await env.DB.prepare('SELECT id, title, parent_id FROM collections WHERE user_id = ? AND removed_at IS NULL ORDER BY title LIMIT 100').bind(userId).all()).results || []
+    const tags = await tagItems(env, userId, 0, '', '-count')
+    return {
+        collections: collections.map(item => ({ id: Number(item.id), title: String(item.title || '') })).filter(item => item.id > 0 && item.title),
+        tags: tags.map(item => String(item._id || '')).filter(Boolean).slice(0, 100)
+    }
+}
+
+const aiJson = value => {
+    const text = String(value || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+    const start = text.indexOf('{')
+    const end = text.lastIndexOf('}')
+    if (start < 0 || end <= start) return null
+    try { return JSON.parse(text.slice(start, end + 1)) } catch { return null }
+}
+
+const aiSuggestionResult = (value, candidates, bookmark) => {
+    const parsed = aiJson(value) || {}
+    const collectionsById = new Map(candidates.collections.map(item => [String(item.id), item]))
+    const collectionsByTitle = new Map(candidates.collections.map(item => [item.title.toLowerCase(), item]))
+    const selectedCollections = []
+    for (const item of Array.isArray(parsed.collections) ? parsed.collections : []) {
+        const key = typeof item === 'object' ? item.id ?? item._id ?? item.$id ?? item.collectionId : item
+        const title = typeof item === 'object' ? item.title : ''
+        const candidate = collectionsById.get(String(key)) || collectionsByTitle.get(String(title || '').toLowerCase())
+        if (candidate && !selectedCollections.some(current => current.id === candidate.id)) selectedCollections.push(candidate)
+    }
+    const existingTags = new Set(candidates.tags.map(tag => tag.toLowerCase()))
+    const currentTags = new Set((bookmark.tags || []).map(tag => String(tag).toLowerCase()))
+    const normalizeTags = value => [...new Set((Array.isArray(value) ? value : []).map(tagValue).filter(Boolean))]
+        .filter(tag => !currentTags.has(tag.toLowerCase())).slice(0, 10)
+    const tags = normalizeTags(parsed.tags).filter(tag => existingTags.has(tag.toLowerCase()))
+    const newTags = normalizeTags(parsed.new_tags ?? parsed.newTags).filter(tag => !existingTags.has(tag.toLowerCase()))
+    return {
+        collections: selectedCollections.slice(0, 5),
+        tags,
+        newTags
+    }
+}
+
+const aiFallbackSuggestions = (candidates, bookmark) => {
+    const haystack = [bookmark.title, bookmark.description, bookmark.url].join(' ').toLowerCase()
+    const collections = candidates.collections.filter(item => item.title.toLowerCase().split(/\s+/).some(term => term.length > 2 && haystack.includes(term)))
+    const currentTags = new Set((bookmark.tags || []).map(tag => String(tag).toLowerCase()))
+    const tags = candidates.tags.filter(tag => !currentTags.has(tag.toLowerCase())).slice(0, 5)
+    const newTags = String(bookmark.title || '').split(/\s+/).map(tagValue)
+        .filter(tag => tag && tag.length > 2 && !currentTags.has(tag.toLowerCase()) && !candidates.tags.some(item => item.toLowerCase() === tag.toLowerCase()))
+        .slice(0, 5)
+    return { collections: collections.slice(0, 5), tags, newTags }
+}
+
+const aiQuota = async (request, env, userId) => {
+    const quota = await consumeAiQuota(env, request, userId)
+    if (quota.error)
+        return { response: error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.') }
+    if (!quota.allowed)
+        return { response: retryableError('ai_quota_exceeded', request, env, 'Daily AI quota reached. Retry after the quota resets.', quota.retryAfterMs, {
+            quota: { used: quota.used, limit: quota.limit, remaining: quota.remaining, resetAt: new Date(quota.resetAt).toISOString(), global: quota.global, scope: quota.scope },
+            resetAt: new Date(quota.resetAt).toISOString(),
+            retryAt: new Date(quota.resetAt).toISOString()
+        }) }
+    return { quota }
+}
+
+const aiCollectText = async result => {
+    let text = ''
+    for await (const event of aiResultChunks(result)) text += event.delta || ''
+    return text.trim()
+}
+
+const aiSuggestions = async (request, env, userId, { legacy = false, bookmarkId } = {}) => {
+    const { data: rawData } = await readBody(request)
+    const data = rawData && typeof rawData === 'object' ? rawData : {}
+    const value = bookmarkId ?? data.raindropId ?? data.bookmarkId ?? data._id
+    let context
+    let bookmark
+    if (value !== undefined && value !== null && value !== '') {
+        context = await aiBookmarkContext(env, userId, value)
+        if (context.error) return error(context.error, 404, request, env, 'Bookmark was not found')
+        bookmark = context.items[0]
+        bookmark.tags = context.items[0].tags || []
+    } else {
+        const link = String(data.link || data.url || '').trim()
+        const title = String(data.title || '').trim()
+        if (!link || !title) return error('validation_failed', 400, request, env, 'Provide a Bookmark URL and title')
+        bookmark = { id: 0, title, url: link, description: String(data.description || data.excerpt || ''), note: String(data.note || ''), highlights: [], tags: Array.isArray(data.tags) ? data.tags : [] }
+        const contextText = aiContextText([bookmark], Number(env.AI_CONTEXT_MAX_CHARS) || 12000)
+        context = { ...contextText, sources: [] }
+    }
+    let candidates
+    try { candidates = await aiSuggestionCandidates(env, userId) } catch {
+        return error('ai_context_unavailable', 503, request, env, 'AI context is temporarily unavailable')
+    }
+    const language = aiLanguage(data.language || data.lang, request)
+    let output = ''
+    let quota
+    if (env.AI?.run) {
+        const charged = await aiQuota(request, env, userId)
+        if (charged.response) return charged.response
+        quota = charged.quota
+        try {
+            const result = await runWorkersAi(env, [
+                { role: 'system', content: `Return JSON only in ${language}. Use only the supplied authorized Bookmark and candidate IDs/tags.` },
+                { role: 'user', content: JSON.stringify({ task: 'suggest_collection_and_tags', bookmark: context.items?.[0] || bookmark, candidates }) }
+            ])
+            output = await aiCollectText(result)
+        } catch {
+            if (!legacy) return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
+        }
+    } else if (!legacy) {
+        return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
+    }
+    const suggestions = output ? aiSuggestionResult(output, candidates, bookmark) : aiFallbackSuggestions(candidates, bookmark)
+    const item = {
+        collections: suggestions.collections.map(collection => ({ $id: collection.id })),
+        tags: suggestions.tags,
+        new_tags: suggestions.newTags
+    }
+    return json({ result: true, language, suggestions, item, sources: context.sources || [], ...(quota ? { quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } } : {}) }, 200, request, env)
+}
+
+const aiDescriptionDraft = async (request, env, userId) => {
+    const { data: rawData } = await readBody(request)
+    const data = rawData && typeof rawData === 'object' ? rawData : {}
+    const value = data.raindropId ?? data.bookmarkId
+    const context = await aiBookmarkContext(env, userId, value)
+    if (context.error || !context.items.length) return error('bookmark_not_found', 404, request, env, 'Bookmark was not found')
+    if (!env.AI?.run) return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
+    const charged = await aiQuota(request, env, userId)
+    if (charged.response) return charged.response
+    const language = aiLanguage(data.language || data.lang, request)
+    try {
+        const result = await runWorkersAi(env, [
+            { role: 'system', content: `Write one concise Bookmark description in ${language}. Return only the proposed description text. Do not change any Bookmark.` },
+            { role: 'user', content: context.text }
+        ])
+        const draft = (await aiCollectText(result)).slice(0, 10000).trim()
+        if (!draft) return error('ai_provider_unavailable', 503, request, env, 'Workers AI returned an empty description')
+        return json({ result: true, language, draft, descriptionDraft: draft, sources: context.sources, quota: { ...charged.quota, resetAt: new Date(charged.quota.resetAt).toISOString() } }, 200, request, env)
+    } catch {
+        return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
     }
 }
 
@@ -3116,6 +3289,20 @@ const aiRoute = async (request, env, url) => {
         return json({ result: true, quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } }, 200, request, env)
     }
 
+    if (url.pathname === '/v2/ai/context' && request.method === 'GET') {
+        const value = url.searchParams.get('raindropId') || url.searchParams.get('bookmarkId')
+        const context = await aiBookmarkContext(env, userId, value)
+        if (context.error || !context.items.length) return error('bookmark_not_found', 404, request, env, 'Bookmark was not found')
+        const aiPackage = { bookmarks: context.items, sources: context.sources }
+        return json({ result: true, package: aiPackage, context: aiPackage, items: context.items, sources: context.sources }, 200, request, env)
+    }
+
+    if (url.pathname === '/v2/ai/suggestions' && request.method === 'POST')
+        return aiSuggestions(request, env, userId)
+
+    if (['/v2/ai/description-draft', '/v2/ai/draft'].includes(url.pathname) && request.method === 'POST')
+        return aiDescriptionDraft(request, env, userId)
+
     const chatMatch = url.pathname.match(/^\/v2\/ai\/(?:chats|history)\/([^/]+)$/)
     if (chatMatch && request.method === 'GET') {
         try {
@@ -3170,7 +3357,8 @@ const aiRoute = async (request, env, url) => {
 }
 
 const aiChat = async (request, env, userId) => {
-    const { data } = await readBody(request)
+    const { data: rawData } = await readBody(request)
+    const data = rawData && typeof rawData === 'object' ? rawData : {}
     const suppliedMessages = Array.isArray(data.messages) ? data.messages : []
     const lastSuppliedMessage = suppliedMessages.filter(item => item?.role === 'user').at(-1)?.content
     const message = String(data.message || data.prompt || lastSuppliedMessage || '').trim()
@@ -3215,8 +3403,9 @@ const aiChat = async (request, env, userId) => {
             history.unshift({ role: item.role, content })
             historyChars += content.length
         }
+        const language = aiLanguage(data.language || data.lang, request)
         const prompt = context.text ? message + '\n\n' + context.text : message
-        const messages = [{ role: 'system', content: 'You are Raindrop AI. Answer in the user\'s language and use only the authorized context provided.' }, ...history, { role: 'user', content: prompt }]
+        const messages = [{ role: 'system', content: `You are Raindrop AI. Answer in ${language}. Use only the authorized context provided. When context supports an answer, cite the matching Bookmark as [Title](URL).` }, ...history, { role: 'user', content: prompt }]
         await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
             .bind(chat.id, userId, 'user', message, now).run()
         const result = await runWorkersAi(env, messages)
@@ -3226,7 +3415,7 @@ const aiChat = async (request, env, userId) => {
                 const enqueue = value => {
                     try { controller.enqueue(encoderStream.encode(value)) } catch {}
                 }
-                enqueue(aiEvent({ chatId: chat.id, sources: context.sources }))
+                enqueue(aiEvent({ chatId: chat.id, sources: context.sources, citations: context.sources }))
                 ;(async () => {
                     let assistant = ''
                     try {
@@ -3245,7 +3434,7 @@ const aiChat = async (request, env, userId) => {
                         await env.DB.prepare('UPDATE ai_chats SET updated_at = ? WHERE id = ? AND user_id = ?')
                             .bind(Date.now(), chat.id, userId).run()
                         await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'success' })
-                        enqueue(aiEvent({ chatId: chat.id, done: true, sources: context.sources, quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } }))
+                        enqueue(aiEvent({ chatId: chat.id, done: true, sources: context.sources, citations: context.sources, quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } }))
                     } catch {
                         await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'failed' })
                         enqueue(aiEvent({ chatId: chat.id, error: 'ai_provider_unavailable', errorMessage: 'Workers AI is temporarily unavailable. Retry the request.' }))
@@ -3787,6 +3976,10 @@ export default {
                         retryAt: new Date(usage.resetAt).toISOString()
                     })
             }
+
+            const legacySuggestions = url.pathname.match(/^\/v1\/raindrop(?:\/(\d+))?\/suggest$/)
+            if (legacySuggestions && ['GET', 'POST'].includes(request.method))
+                return aiSuggestions(request, env, session.user_id, { legacy: true, bookmarkId: legacySuggestions[1] })
 
             if (url.pathname === '/v1/user/connect/google' && request.method === 'GET') {
                 if (!googleReady(env)) return configurationError(request, env)

@@ -4,6 +4,7 @@ import { useSelector } from 'react-redux'
 import { makeSuggestedFields } from '~data/selectors/bookmarks'
 import { makeCollectionPath } from '~data/selectors/collections'
 import { isPro } from '~data/selectors/user'
+import { independentService } from '~config/environment'
 
 import Button from '~co/common/button'
 
@@ -53,7 +54,7 @@ export default function BookmarkEditFormCollectionSuggested({ item, events: { on
         onItemClick({ _id })
     }, [onItemClick])
 
-    if (!enabled || !pro)
+    if (!enabled || !pro && !independentService)
         return null
 
     return (

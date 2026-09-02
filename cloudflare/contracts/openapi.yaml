@@ -1357,6 +1357,55 @@ paths:
       responses:
         '200': {description: Authenticated user's current AI quota and reset time.}
         '401': {description: Login required.}
+  /v2/ai/context:
+    get:
+      parameters:
+        - in: query
+          name: raindropId
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '200': {description: Minimal authorized Bookmark context and matching source links.}
+        '401': {description: Login required.}
+        '404': {description: Bookmark is not owned by or shared with the User.}
+  /v2/ai/suggestions:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [raindropId]
+              properties:
+                raindropId: {type: integer, minimum: 1}
+                language: {type: string, maxLength: 32}
+      responses:
+        '200': {description: Authorized Collection and Tag suggestions.}
+        '400': {description: Invalid Bookmark input.}
+        '401': {description: Login required.}
+        '404': {description: Bookmark is not owned by or shared with the User.}
+        '429': {description: Daily AI quota exhausted.}
+        '503': {description: Workers AI is unavailable.}
+  /v2/ai/description-draft:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [raindropId]
+              properties:
+                raindropId: {type: integer, minimum: 1}
+                language: {type: string, maxLength: 32}
+      responses:
+        '200': {description: Editable Description Draft with matching source links; no Bookmark is written.}
+        '400': {description: Invalid Bookmark input.}
+        '401': {description: Login required.}
+        '404': {description: Bookmark is not owned by or shared with the User.}
+        '429': {description: Daily AI quota exhausted.}
+        '503': {description: Workers AI is unavailable.}
   /v2/ai/chat:
     post:
       requestBody:
@@ -1370,6 +1419,7 @@ paths:
                 message: {type: string, maxLength: 8000}
                 chatId: {type: string}
                 raindropId: {type: integer, minimum: 1}
+                language: {type: string, maxLength: 32}
       responses:
         '200': {description: SSE stream of Workers AI deltas; provider is never silently changed.}
         '400': {description: Invalid message.}

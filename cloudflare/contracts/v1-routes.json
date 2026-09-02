@@ -122,6 +122,18 @@
             "responses": [201, 400, 401]
         },
         {
+            "method": "POST",
+            "path": "/v1/raindrop/suggest",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404, 429]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/raindrop/:id/suggest",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
             "method": "GET",
             "path": "/v1/raindrop/:id",
             "authentication": "required",
