@@ -3957,7 +3957,7 @@ const aiChat = async (request, env, userId) => {
         const messages = [{ role: 'system', content: `You are Raindrop AI. Answer in ${language}. Use only the authorized context provided. When context supports an answer, cite the matching Bookmark as [Title](URL). Read tools are permission-checked. Every write tool call creates an AI Action Proposal and waits for User approval.` }, ...history, { role: 'user', content: prompt }]
         await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
             .bind(chat.id, userId, 'user', message, now).run()
-        const result = await runWorkersAi(env, messages, { tools: aiModelTools })
+        let result = await runWorkersAi(env, messages, { tools: aiModelTools })
         const encoderStream = new TextEncoder()
         const stream = new ReadableStream({
             start(controller) {
@@ -3968,34 +3968,60 @@ const aiChat = async (request, env, userId) => {
                 ;(async () => {
                     let assistant = ''
                     const handledTools = new Set()
+                    let toolRound = 0
+                    let pendingResult = result
+                    let conversationMessages = messages.slice()
                     try {
-                        for await (const event of aiResultChunks(result)) {
-                            const toolCalls = [...(event.toolCalls || []), ...(event.toolCalled ? [event.toolCalled] : [])]
-                            for (const rawTool of toolCalls) {
-                                const key = String(rawTool?.id || JSON.stringify(rawTool))
-                                if (handledTools.has(key)) continue
-                                handledTools.add(key)
-                                const toolCalled = confirmedAiTool(rawTool, context)
-                                if (toolCalled) {
-                                    enqueue(aiEvent({ chatId: chat.id, toolCalled }))
-                                    continue
-                                }
-                                const executed = await aiExecuteToolCall(request, env, userId, rawTool)
-                                if (executed) {
-                                    const eventValue = {
-                                        name: executed.name,
-                                        status: executed.status,
-                                        ...(executed.error ? { error: executed.error } : {}),
-                                        ...(executed.raindropId ? { raindropId: executed.raindropId } : {}),
-                                        ...(executed.proposal ? { proposal: executed.proposal } : {})
+                        for (;;) {
+                            let roundAssistant = ''
+                            const roundExecutions = []
+                            for await (const event of aiResultChunks(pendingResult)) {
+                                const toolCalls = [...(event.toolCalls || []), ...(event.toolCalled ? [event.toolCalled] : [])]
+                                for (const rawTool of toolCalls) {
+                                    const key = String(rawTool?.id || JSON.stringify(rawTool))
+                                    if (handledTools.has(key)) continue
+                                    handledTools.add(key)
+                                    const toolCalled = confirmedAiTool(rawTool, context)
+                                    if (toolCalled) {
+                                        enqueue(aiEvent({ chatId: chat.id, toolCalled }))
+                                        continue
                                     }
-                                    enqueue(aiEvent({ chatId: chat.id, toolCalled: eventValue, ...(executed.proposal ? { proposal: executed.proposal } : {}) }))
+                                    const call = aiToolCall(rawTool)
+                                    if (!call) continue
+                                    const executed = await aiExecuteToolCall(request, env, userId, rawTool)
+                                    roundExecutions.push({ call, executed })
+                                    if (executed) {
+                                        const eventValue = {
+                                            name: executed.name,
+                                            status: executed.status,
+                                            ...(executed.error ? { error: executed.error } : {}),
+                                            ...(executed.raindropId ? { raindropId: executed.raindropId } : {}),
+                                            ...(executed.proposal ? { proposal: executed.proposal } : {})
+                                        }
+                                        enqueue(aiEvent({ chatId: chat.id, toolCalled: eventValue, ...(executed.proposal ? { proposal: executed.proposal } : {}) }))
+                                    }
+                                }
+                                if (event.delta) {
+                                    assistant += event.delta
+                                    roundAssistant += event.delta
+                                    enqueue(aiEvent({ chatId: chat.id, delta: event.delta }))
                                 }
                             }
-                            if (event.delta) {
-                                assistant += event.delta
-                                enqueue(aiEvent({ chatId: chat.id, delta: event.delta }))
-                            }
+                            if (!roundExecutions.length || toolRound >= 2) break
+                            const providerCalls = roundExecutions.map(({ call }) => ({
+                                id: call.id || aiActionId(), name: call.name, arguments: call.args
+                            }))
+                            const toolMessages = roundExecutions.map(({ call, executed }, index) => ({
+                                    role: 'tool',
+                                    name: call.name,
+                                    tool_call_id: providerCalls[index].id,
+                                    content: JSON.stringify(executed || { name: call.name, status: 'rejected', error: 'ai_tool_not_available' })
+                                }))
+                            conversationMessages = [...conversationMessages,
+                                { role: 'assistant', content: roundAssistant, tool_calls: providerCalls },
+                                ...toolMessages]
+                            pendingResult = await runWorkersAi(env, conversationMessages, { tools: aiModelTools })
+                            toolRound++
                         }
                         if (assistant)
                             await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')

@@ -512,6 +512,36 @@ test('AI chat tool calls execute authorized reads and create pending write propo
     assert.deepEqual(calls[0][1].tools.map(item => item.name), ['bookmark_read', 'bookmark_update', 'bookmark_delete'])
 })
 
+test('AI chat returns authorized tool results to the model for a continuation round', async () => {
+    const { env, db, calls } = await environment()
+    db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/owned', title: 'Owned bookmark', description: 'Visible', note: '', highlights: '[]', tags: [] })
+    db.bookmarks.push({ id: 8, user_id: 2, url: 'https://example.test/private', title: 'Private bookmark', description: 'Hidden', note: '', highlights: '[]', tags: [] })
+    env.AI.run = async (...args) => {
+        calls.push(args)
+        if (calls.length === 1) return {
+            tool_calls: [
+                { id: 'read-owned', name: 'bookmark_read', arguments: { bookmarkId: 7 } },
+                { id: 'read-private', name: 'bookmark_read', arguments: { bookmarkId: 8 } }
+            ]
+        }
+        return new Response('data: {"response":"Authorized answer"}\n\n', {
+            headers: { 'Content-Type': 'text/event-stream' }
+        })
+    }
+
+    const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Read my bookmark' }) }), env)
+    assert.equal(response.status, 200)
+    assert.match(await response.text(), /Authorized answer/)
+    assert.equal(calls.length, 2)
+    const continuation = calls[1][1]
+    const toolMessages = continuation.messages.filter(item => item.role === 'tool')
+    assert.equal(toolMessages.length, 2)
+    assert.match(toolMessages[0].content, /Owned bookmark/)
+    assert.match(toolMessages[1].content, /bookmark_not_found/)
+    assert.doesNotMatch(toolMessages[1].content, /Private bookmark/)
+    assert.deepEqual(continuation.tools.map(item => item.name), ['bookmark_read', 'bookmark_update', 'bookmark_delete'])
+})
+
 test('AI writes remain pending until approved or rejected', async () => {
     const { env, db } = await environment()
     db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/action', title: 'Action bookmark', description: 'Original', note: '', highlights: '[]', tags: '[]', collection_id: -1, created_at: Date.now(), updated_at: Date.now() })
