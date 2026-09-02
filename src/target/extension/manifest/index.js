@@ -39,6 +39,12 @@ module.exports = ({ vendor, production=false, apiOrigin='https://api.raindrop.io
 			},
 		} : {}),
 
+		...(vendor == 'chrome' ? {
+			chrome_url_overrides: {
+				newtab: 'newtab.html'
+			}
+		} : {}),
+
 		icons: {
 			16: file(l, '../../../assets/brand/icon_16.png'),
 			32: file(l, '../../../assets/brand/icon_32.png'),

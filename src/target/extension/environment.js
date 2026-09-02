@@ -5,4 +5,5 @@ export const environment = [
     process.env.EXTENSION_VENDOR,
     ...(location.search.includes('action') ? ['action'] : []),
     ...(location.pathname.includes('sidepanel.html') ? ['sidepanel'] : []),
+    ...(location.pathname.includes('newtab.html') ? ['newtab'] : []),
 ]
