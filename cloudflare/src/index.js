@@ -3212,6 +3212,41 @@ const aiToolCatalog = [
     }
 ]
 
+const aiModelTools = [
+    {
+        name: 'bookmark_read',
+        description: 'Read authorized Bookmark metadata or search Highlights',
+        parameters: {
+            type: 'object',
+            properties: {
+                bookmarkId: { type: 'integer', minimum: 1 },
+                query: { type: 'string', maxLength: aiMessageLimit }
+            }
+        }
+    },
+    {
+        name: 'bookmark_update',
+        description: 'Propose an update to an authorized Bookmark; never apply it directly',
+        parameters: {
+            type: 'object',
+            required: ['bookmarkId', 'changes'],
+            properties: {
+                bookmarkId: { type: 'integer', minimum: 1 },
+                changes: { type: 'object' }
+            }
+        }
+    },
+    {
+        name: 'bookmark_delete',
+        description: 'Propose moving an authorized Bookmark to the Recycle Bin; never apply it directly',
+        parameters: {
+            type: 'object',
+            required: ['bookmarkId'],
+            properties: { bookmarkId: { type: 'integer', minimum: 1 } }
+        }
+    }
+]
+
 const aiWriteTools = new Map(aiToolCatalog.filter(tool => tool.kind === 'write').map(tool => [tool.name, tool]))
 
 const aiCanonicalTool = value => {
@@ -3411,6 +3446,18 @@ const aiApplyProposal = async (request, env, userId, proposal) => {
     return aiApplyBookmarkUpdate(request, env, userId, Number(proposal.bookmark_id), changes)
 }
 
+const claimAiProposal = async (env, userId, proposalId) => {
+    const result = await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'processing', updated_at = ?
+        WHERE id = ? AND user_id = ? AND status = 'pending'`).bind(Date.now(), proposalId, userId).run()
+    return Number(result?.meta?.changes || 0) === 1
+}
+
+const failAiProposal = async (env, userId, proposalId, code = 'ai_action_failed') => {
+    await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'failed', error_code = ?, error_message = ?,
+        updated_at = ?, decided_at = ? WHERE id = ? AND user_id = ? AND status = 'processing'`).bind(
+        code, 'AI Action Proposal could not be applied', Date.now(), Date.now(), proposalId, userId).run()
+}
+
 const aiCreateActionProposal = async (request, env, userId) => {
     const { data: rawData } = await readBody(request)
     const data = rawData && typeof rawData === 'object' ? rawData : {}
@@ -3446,13 +3493,17 @@ const aiCreateActionProposal = async (request, env, userId) => {
     const requestedCollection = changes?.collectionId === undefined ? target.collectionId : parseBookmarkCollectionId(changes.collectionId)
     const canAutoApprove = Boolean(standing && requestedCollection === target.collectionId)
     if (canAutoApprove) {
-        const applied = await aiApplyProposal(request, env, userId, proposal)
-        if (!applied.response) {
-            await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'applied', result = ?, updated_at = ?, decided_at = ?
-                WHERE id = ? AND user_id = ? AND status = 'pending'`).bind(JSON.stringify(applied.item || {}), Date.now(), Date.now(), id, userId).run()
+        if (await claimAiProposal(env, userId, id)) {
             proposal = await selectAiProposal(env, id, userId) || proposal
-            await recordAudit(env, request, { userId, action: 'ai.action.applied', resourceType: 'ai_action_proposal', resourceId: id, outcome: 'standing_approval' })
-            return json({ result: true, autoApproved: true, approval: 'standing', proposal: aiPublicProposal(proposal), item: applied.item, ...(applied.task ? { task: publicTask(applied.task), taskId: String(applied.task.id) } : {}) }, 200, request, env)
+            const applied = await aiApplyProposal(request, env, userId, proposal)
+            if (!applied.response) {
+                await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'applied', result = ?, updated_at = ?, decided_at = ?
+                    WHERE id = ? AND user_id = ? AND status = 'processing'`).bind(JSON.stringify(applied.item || {}), Date.now(), Date.now(), id, userId).run()
+                proposal = await selectAiProposal(env, id, userId) || proposal
+                await recordAudit(env, request, { userId, action: 'ai.action.applied', resourceType: 'ai_action_proposal', resourceId: id, outcome: 'standing_approval' })
+                return json({ result: true, autoApproved: true, approval: 'standing', proposal: aiPublicProposal(proposal), item: applied.item, ...(applied.task ? { task: publicTask(applied.task), taskId: String(applied.task.id) } : {}) }, 200, request, env)
+            }
+            await failAiProposal(env, userId, id, 'ai_action_failed')
         }
     }
     await recordAudit(env, request, { userId, action: 'ai.action.proposed', resourceType: 'ai_action_proposal', resourceId: id, outcome: 'pending' })
@@ -3475,11 +3526,20 @@ const aiApproveProposal = async (request, env, userId, proposalId, forcedAlwaysA
     const destination = changes.collectionId === undefined ? Number(proposal.collection_id) : parseBookmarkCollectionId(changes.collectionId)
     if (alwaysApprove && destination !== Number(proposal.collection_id))
         return error('ai_approval_scope_invalid', 400, request, env, 'Always approve must stay within one Collection')
+    if (!await claimAiProposal(env, userId, proposalId)) {
+        proposal = await selectAiProposal(env, proposalId, userId) || proposal
+        if (proposal.status === 'applied') return json({ result: true, proposal: aiPublicProposal(proposal) }, 200, request, env)
+        return error('ai_proposal_not_pending', 409, request, env, 'This AI Action Proposal is no longer pending')
+    }
+    proposal = await selectAiProposal(env, proposalId, userId) || proposal
     const applied = await aiApplyProposal(request, env, userId, proposal)
-    if (applied.response) return applied.response
+    if (applied.response) {
+        await failAiProposal(env, userId, proposalId, 'ai_action_failed')
+        return applied.response
+    }
     const now = Date.now()
     await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'applied', result = ?, error_code = NULL,
-        error_message = NULL, updated_at = ?, decided_at = ? WHERE id = ? AND user_id = ? AND status = 'pending'`)
+        error_message = NULL, updated_at = ?, decided_at = ? WHERE id = ? AND user_id = ? AND status = 'processing'`)
         .bind(JSON.stringify(applied.item || {}), now, now, proposalId, userId).run()
     let approval = null
     if (alwaysApprove) {
@@ -3498,8 +3558,10 @@ const aiRejectProposal = async (request, env, userId, proposalId) => {
     if (!proposal) return error('ai_proposal_not_found', 404, request, env, 'AI Action Proposal was not found')
     if (proposal.status !== 'pending') return error('ai_proposal_not_pending', 409, request, env, 'This AI Action Proposal is no longer pending')
     const now = Date.now()
-    await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'rejected', updated_at = ?, decided_at = ?
+    const changed = await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'rejected', updated_at = ?, decided_at = ?
         WHERE id = ? AND user_id = ? AND status = 'pending'`).bind(now, now, proposalId, userId).run()
+    if (Number(changed?.meta?.changes || 0) !== 1)
+        return error('ai_proposal_not_pending', 409, request, env, 'This AI Action Proposal is no longer pending')
     const updated = await selectAiProposal(env, proposalId, userId) || proposal
     await recordAudit(env, request, { userId, action: 'ai.action.rejected', resourceType: 'ai_action_proposal', resourceId: proposalId, outcome: 'rejected' })
     return json({ result: true, proposal: aiPublicProposal(updated) }, 200, request, env)
@@ -3603,6 +3665,57 @@ const aiActionsRoute = async (request, env, userId, url) => {
     return null
 }
 
+const aiToolCall = value => {
+    if (!value || typeof value !== 'object') return null
+    const fn = value.function && typeof value.function === 'object' ? value.function : value
+    const name = aiCanonicalTool(fn.name || value.name)
+    if (!name) return null
+    let args = fn.arguments ?? value.arguments ?? value.input ?? value.parameters
+    if (args === undefined) {
+        args = { ...value }
+        delete args.id
+        delete args.name
+        delete args.tool
+        delete args.toolCalled
+    }
+    if (typeof args === 'string') {
+        try { args = JSON.parse(args) } catch { args = {} }
+    }
+    return { id: String(value.id || ''), name, args: args && typeof args === 'object' ? args : {} }
+}
+
+const aiExecuteToolCall = async (request, env, userId, value) => {
+    const call = aiToolCall(value)
+    if (!call) return null
+    const args = call.args
+    if (call.name === 'bookmark_read') {
+        const bookmarkId = args.bookmarkId ?? args.raindropId
+        const query = String(args.query || args.message || '').trim()
+        if (bookmarkId === undefined && !query) return { name: call.name, status: 'rejected', error: 'validation_failed' }
+        const context = await aiBookmarkContext(env, userId, bookmarkId, query)
+        if (context.error) return { name: call.name, status: 'rejected', error: context.error }
+        return { name: call.name, status: 'completed', bookmarks: context.items || [], sources: context.sources || [] }
+    }
+
+    const bookmarkId = args.bookmarkId ?? args.raindropId ?? args.resourceId
+    const body = { tool: call.name, bookmarkId }
+    if (call.name === 'bookmark_update') body.changes = args.changes ?? args.input ?? args.patch ?? {}
+    const actionRequest = new Request(request.url, {
+        method: 'POST',
+        headers: { Cookie: request.headers.get('Cookie') || '', 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    })
+    const response = await aiCreateActionProposal(actionRequest, env, userId)
+    const result = await response.json().catch(() => ({}))
+    return {
+        name: call.name,
+        status: result.proposal?.status || (response.ok ? 'pending' : 'rejected'),
+        ...(result.proposal ? { proposal: result.proposal } : {}),
+        ...(result.error ? { error: result.error } : {}),
+        ...(bookmarkId === undefined ? {} : { raindropId: Number(bookmarkId) })
+    }
+}
+
 const aiMessageText = value => {
     if (value === null || value === undefined) return ''
     if (typeof value === 'string' || typeof value === 'number') return String(value)
@@ -3616,9 +3729,11 @@ const aiResultEvent = value => {
     if (typeof value === 'string' || typeof value === 'number') return { delta: String(value) }
     if (!value || typeof value !== 'object') return { delta: '' }
     const tool = value.toolCalled || value.tool_called
+    const toolCalls = value.toolCalls || value.tool_calls
     return {
         delta: aiMessageText(value),
-        ...(tool ? { toolCalled: tool } : {})
+        ...(tool ? { toolCalled: tool } : {}),
+        ...(toolCalls ? { toolCalls: Array.isArray(toolCalls) ? toolCalls : [toolCalls] } : {})
     }
 }
 
@@ -3642,29 +3757,29 @@ async function* aiResultChunks(result) {
             buffer = lines.pop() || ''
             for (const line of lines) {
                 const event = parseAiLine(line)
-                if (event?.delta || event?.toolCalled) yield event
+                if (event?.delta || event?.toolCalled || event?.toolCalls?.length) yield event
             }
             next = await reader.read()
         }
         buffer += decoder.decode()
         const event = parseAiLine(buffer)
-        if (event?.delta || event?.toolCalled) yield event
+        if (event?.delta || event?.toolCalled || event?.toolCalls?.length) yield event
         return
     }
     if (result && typeof result[Symbol.asyncIterator] === 'function') {
         for await (const chunk of result) {
             const event = aiResultEvent(chunk)
-            if (event.delta || event.toolCalled) yield event
+            if (event.delta || event.toolCalled || event.toolCalls?.length) yield event
         }
         return
     }
     const event = aiResultEvent(result)
-    if (event.delta || event.toolCalled) yield event
+    if (event.delta || event.toolCalled || event.toolCalls?.length) yield event
 }
 
-const runWorkersAi = async (env, messages) => {
+const runWorkersAi = async (env, messages, options = {}) => {
     if (!env.AI || typeof env.AI.run !== 'function') throw new Error('Workers AI binding is unavailable')
-    const result = await env.AI.run(aiModel(env), { messages, stream: true })
+    const result = await env.AI.run(aiModel(env), { messages, stream: true, ...options })
     if (!result || result.ok === false || result.error || result.errors?.length) throw new Error('Workers AI provider failed')
     return result
 }
@@ -3839,10 +3954,10 @@ const aiChat = async (request, env, userId) => {
         }
         const language = aiLanguage(data.language || data.lang, request)
         const prompt = context.text ? message + '\n\n' + context.text : message
-        const messages = [{ role: 'system', content: `You are Raindrop AI. Answer in ${language}. Use only the authorized context provided. When context supports an answer, cite the matching Bookmark as [Title](URL).` }, ...history, { role: 'user', content: prompt }]
+        const messages = [{ role: 'system', content: `You are Raindrop AI. Answer in ${language}. Use only the authorized context provided. When context supports an answer, cite the matching Bookmark as [Title](URL). Read tools are permission-checked. Every write tool call creates an AI Action Proposal and waits for User approval.` }, ...history, { role: 'user', content: prompt }]
         await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
             .bind(chat.id, userId, 'user', message, now).run()
-        const result = await runWorkersAi(env, messages)
+        const result = await runWorkersAi(env, messages, { tools: aiModelTools })
         const encoderStream = new TextEncoder()
         const stream = new ReadableStream({
             start(controller) {
@@ -3852,11 +3967,31 @@ const aiChat = async (request, env, userId) => {
                 enqueue(aiEvent({ chatId: chat.id, sources: context.sources, citations: context.sources }))
                 ;(async () => {
                     let assistant = ''
+                    const handledTools = new Set()
                     try {
                         for await (const event of aiResultChunks(result)) {
-                            const toolCalled = confirmedAiTool(event.toolCalled, context)
-                            if (toolCalled)
-                                enqueue(aiEvent({ chatId: chat.id, toolCalled }))
+                            const toolCalls = [...(event.toolCalls || []), ...(event.toolCalled ? [event.toolCalled] : [])]
+                            for (const rawTool of toolCalls) {
+                                const key = String(rawTool?.id || JSON.stringify(rawTool))
+                                if (handledTools.has(key)) continue
+                                handledTools.add(key)
+                                const toolCalled = confirmedAiTool(rawTool, context)
+                                if (toolCalled) {
+                                    enqueue(aiEvent({ chatId: chat.id, toolCalled }))
+                                    continue
+                                }
+                                const executed = await aiExecuteToolCall(request, env, userId, rawTool)
+                                if (executed) {
+                                    const eventValue = {
+                                        name: executed.name,
+                                        status: executed.status,
+                                        ...(executed.error ? { error: executed.error } : {}),
+                                        ...(executed.raindropId ? { raindropId: executed.raindropId } : {}),
+                                        ...(executed.proposal ? { proposal: executed.proposal } : {})
+                                    }
+                                    enqueue(aiEvent({ chatId: chat.id, toolCalled: eventValue, ...(executed.proposal ? { proposal: executed.proposal } : {}) }))
+                                }
+                            }
                             if (event.delta) {
                                 assistant += event.delta
                                 enqueue(aiEvent({ chatId: chat.id, delta: event.delta }))

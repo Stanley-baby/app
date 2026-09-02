@@ -6,7 +6,7 @@ CREATE TABLE ai_action_proposals (
     bookmark_id INTEGER NOT NULL,
     collection_id INTEGER NOT NULL,
     payload TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'applied', 'rejected', 'failed')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'applied', 'rejected', 'failed')),
     result TEXT,
     error_code TEXT,
     error_message TEXT,

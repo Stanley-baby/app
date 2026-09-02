@@ -46,6 +46,7 @@ export default function AiPage() {
     const [suggestions, setSuggestions] = useState(null)
     const [draft, setDraft] = useState(null)
     const [proposals, setProposals] = useState([])
+    const [approvals, setApprovals] = useState([])
     const [input, setInput] = useState('')
     const [error, setError] = useState('')
     const [loading, setLoading] = useState(true)
@@ -73,6 +74,13 @@ export default function AiPage() {
                 if (proposalsResponse.ok) {
                     const proposalsBody = await readJson(proposalsResponse)
                     setProposals(proposalsBody.items || proposalsBody.proposals || [])
+                }
+            } catch {}
+            try {
+                const approvalsResponse = await fetch(API_ORIGIN + '/v2/ai/approvals', { credentials: 'include' })
+                if (approvalsResponse.ok) {
+                    const approvalsBody = await readJson(approvalsResponse)
+                    setApprovals(approvalsBody.items || approvalsBody.approvals || [])
                 }
             } catch {}
             if (!raindropId && items[0]) {
@@ -121,6 +129,8 @@ export default function AiPage() {
                 if (eventData.sources || eventData.citations) setSources(eventData.sources || eventData.citations)
                 if (eventData.toolCalled)
                     postToHost({ type: 'ai:tool-called', tool: eventData.toolCalled })
+                if (eventData.proposal?.status === 'pending')
+                    setProposals(current => current.some(item => item.id === eventData.proposal.id) ? current : [eventData.proposal, ...current])
                 if (eventData.delta) {
                     setMessages(current => assistantStarted
                         ? current.map((item, index) => index === current.length - 1 && item.role === 'assistant'
@@ -198,6 +208,7 @@ export default function AiPage() {
             const body = await readJson(response)
             if (!response.ok) throw new Error(body.errorMessage || 'Description proposal could not be created')
             if (body.proposal?.status === 'pending') setProposals(current => [body.proposal, ...current])
+            if (body.approval) setApprovals(current => [body.approval, ...current.filter(item => item.id !== body.approval.id)])
             if (body.item) postToHost({ type: 'ai:tool-called', tool: { name: 'bookmark_update', raindropId } })
             setDraft(null)
         } catch (draftError) {
@@ -220,9 +231,24 @@ export default function AiPage() {
             if (!response.ok) throw new Error(body.errorMessage || 'AI Action Proposal could not be decided')
             if (body.proposal?.status === 'pending') setProposals(current => current.map(item => item.id === proposalId ? body.proposal : item))
             else setProposals(current => current.filter(item => item.id !== proposalId))
+            if (body.approval) setApprovals(current => [body.approval, ...current.filter(item => item.id !== body.approval.id)])
             if (body.item) postToHost({ type: 'ai:tool-called', tool: { name: body.proposal?.tool || 'bookmark_update', raindropId: body.proposal?.bookmarkId } })
         } catch (proposalError) {
             setError(proposalError.message)
+        }
+    }, [])
+
+    const revokeApproval = useCallback(async approvalId => {
+        setError('')
+        try {
+            const response = await fetch(API_ORIGIN + '/v2/ai/approvals/' + encodeURIComponent(approvalId), {
+                method: 'DELETE', credentials: 'include'
+            })
+            const body = await readJson(response)
+            if (!response.ok) throw new Error(body.errorMessage || 'Standing approval could not be revoked')
+            setApprovals(current => current.filter(item => item.id !== approvalId))
+        } catch (approvalError) {
+            setError(approvalError.message)
         }
     }, [])
 
@@ -323,6 +349,13 @@ export default function AiPage() {
                                 {proposal.collectionId > 0 && <button type='button' onClick={() => decideProposal(proposal.id, 'always_approve')}>Always approve for Collection</button>}
                                 <button type='button' onClick={() => decideProposal(proposal.id, 'reject')}>Reject</button>
                             </div>
+                        </div>)}
+                    </section>}
+                    {approvals.length > 0 && <section className={s.proposals} aria-label='Standing AI Approvals'>
+                        <strong>Standing AI Approvals</strong>
+                        {approvals.map(approval => <div className={s.proposal} key={approval.id}>
+                            <span>{approval.tool} · Collection {approval.collectionId}</span>
+                            <button type='button' onClick={() => revokeApproval(approval.id)}>Revoke</button>
                         </div>)}
                     </section>}
                     <div className={s.messages} aria-live='polite'>

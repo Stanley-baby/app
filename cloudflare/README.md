@@ -43,7 +43,9 @@ remain pending until `POST /v2/ai/action-proposals/:id/decision` receives
 `approve`, `reject`, or `always_approve`. Standing approvals are stored per User,
 write Tool, and Collection through `/v2/ai/approvals`; deleting an approval
 revokes it. Every application rechecks the current Bookmark and Collection role,
-so a standing approval never bypasses normal permissions.
+so a standing approval never bypasses normal permissions. Workers AI chat
+requests pass the same read/write tool catalog; read calls return authorized
+context, while write calls create proposals without applying mutations.
 
 Each profile also sets `USAGE_QUOTA_DAILY` (default `1000`) and
 `RATE_LIMIT_PER_MINUTE` (default `60`). Authenticated write requests consume

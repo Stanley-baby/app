@@ -122,9 +122,19 @@ class AiDatabase {
                 this.standingApprovals.push({ id: values[0], user_id: values[1], tool_name: values[2], collection_id: values[3], created_at: values[4], updated_at: values[5], revoked_at: null })
                 return { meta: { changes: 1 } }
             }
+            if (sql.includes('UPDATE ai_action_proposals SET status = \'processing\'')) {
+                const row = this.proposals.find(item => item.id === values[1] && item.user_id === values[2] && item.status === 'pending')
+                if (row) { row.status = 'processing'; row.updated_at = values[0] }
+                return { meta: { changes: row ? 1 : 0 } }
+            }
             if (sql.includes('UPDATE ai_action_proposals SET status = \'applied\'')) {
                 const row = this.proposals.find(item => item.id === values[3] && item.user_id === values[4])
                 if (row) { row.status = 'applied'; row.result = values[0]; row.updated_at = values[1]; row.decided_at = values[2] }
+                return { meta: { changes: row ? 1 : 0 } }
+            }
+            if (sql.includes('UPDATE ai_action_proposals SET status = \'failed\'')) {
+                const row = this.proposals.find(item => item.id === values[4] && item.user_id === values[5])
+                if (row) { row.status = 'failed'; row.error_code = values[0]; row.error_message = values[1]; row.updated_at = values[2]; row.decided_at = values[3] }
                 return { meta: { changes: row ? 1 : 0 } }
             }
             if (sql.includes('UPDATE ai_action_proposals SET status = \'rejected\'')) {
@@ -482,6 +492,26 @@ test('AI read tools return only authorized context and catalog writes as proposa
     assert.equal(privateRead.status, 404)
 })
 
+test('AI chat tool calls execute authorized reads and create pending write proposals', async () => {
+    const { env, db, calls } = await environment()
+    env.AI_DAILY_QUOTA = '5'
+    env.AI_GLOBAL_DAILY_QUOTA = '5'
+    db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/tool', title: 'Tool bookmark', description: 'Original', note: '', highlights: '[]', tags: '[]', collection_id: -1, created_at: Date.now(), updated_at: Date.now() })
+    env.AI.run = async (...args) => {
+        calls.push(args)
+        return new Response('data: {"toolCalled":{"name":"bookmark_update","raindropId":7,"changes":{"title":"Proposed title"}}}\n\n', {
+            headers: { 'Content-Type': 'text/event-stream' }
+        })
+    }
+    const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Rename this bookmark' }) }), env)
+    assert.equal(response.status, 200)
+    const stream = await response.text()
+    assert.match(stream, /"status":"pending"/)
+    assert.match(stream, /"proposal"/)
+    assert.equal(db.bookmarks[0].title, 'Tool bookmark')
+    assert.deepEqual(calls[0][1].tools.map(item => item.name), ['bookmark_read', 'bookmark_update', 'bookmark_delete'])
+})
+
 test('AI writes remain pending until approved or rejected', async () => {
     const { env, db } = await environment()
     db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/action', title: 'Action bookmark', description: 'Original', note: '', highlights: '[]', tags: '[]', collection_id: -1, created_at: Date.now(), updated_at: Date.now() })
@@ -522,6 +552,22 @@ test('AI writes remain pending until approved or rejected', async () => {
     const deleted = await worker.fetch(request('/v2/ai/action-proposals/' + deleteProposal.id + '/approve', { method: 'POST' }), env)
     assert.equal(deleted.status, 200)
     assert.equal(db.bookmarks[0].removed_at > 0, true)
+})
+
+test('AI proposal decisions claim the pending row before applying a write', async () => {
+    const { env, db } = await environment()
+    db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/action', title: 'Action bookmark', description: 'Original', note: '', highlights: '[]', tags: '[]', collection_id: -1, created_at: Date.now(), updated_at: Date.now() })
+    const created = await worker.fetch(request('/v2/ai/action-proposals', {
+        method: 'POST', body: JSON.stringify({ tool: 'bookmark_update', bookmarkId: 7, changes: { title: 'Claimed once' } })
+    }), env)
+    const proposal = (await created.json()).proposal
+    const [approved, rejected] = await Promise.all([
+        worker.fetch(request('/v2/ai/action-proposals/' + proposal.id + '/approve', { method: 'POST' }), env),
+        worker.fetch(request('/v2/ai/action-proposals/' + proposal.id + '/reject', { method: 'POST' }), env)
+    ])
+    assert.deepEqual([approved.status, rejected.status].sort(), [200, 409])
+    assert.equal(db.bookmarks[0].title, 'Claimed once')
+    assert.equal(db.proposals[0].status, 'applied')
 })
 
 test('standing AI approval is scoped to one tool and Collection and can be revoked', async () => {
