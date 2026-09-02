@@ -167,7 +167,7 @@ export default function AiPage() {
             })
             const body = await readJson(response)
             if (!response.ok) throw new Error(body.errorMessage || 'Description draft is unavailable')
-            setDraft(String(body.draft || body.descriptionDraft || ''))
+            setDraft(String(body.draft || ''))
             if (body.quota) setConfig(current => ({ ...current, quota: body.quota }))
         } catch (draftError) {
             setError(draftError.message)

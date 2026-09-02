@@ -2677,7 +2677,7 @@ const auditRoute = request => {
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
         '/v1/raindrop/file', '/v1/raindrop/suggest', '/v1/content/upload', '/v1/collaborators/join',
         '/v2/ai/config', '/v2/ai/quota', '/v2/ai/chat', '/v2/ai/history', '/v2/ai/chats',
-        '/v2/ai/context', '/v2/ai/suggestions', '/v2/ai/description-draft', '/v2/ai/draft'
+        '/v2/ai/context', '/v2/ai/suggestions', '/v2/ai/description-draft'
     ])
     return known.has(pathname) ? pathname : '/v1/unknown'
 }
@@ -3101,7 +3101,7 @@ const aiCollectText = async result => {
 const aiSuggestions = async (request, env, userId, { legacy = false, bookmarkId } = {}) => {
     const { data: rawData } = await readBody(request)
     const data = rawData && typeof rawData === 'object' ? rawData : {}
-    const value = bookmarkId ?? data.raindropId ?? data.bookmarkId ?? data._id
+    const value = bookmarkId ?? (legacy ? data.raindropId ?? data.bookmarkId ?? data._id : data.raindropId)
     let context
     let bookmark
     if (value !== undefined && value !== null && value !== '') {
@@ -3146,13 +3146,20 @@ const aiSuggestions = async (request, env, userId, { legacy = false, bookmarkId 
         tags: suggestions.tags,
         new_tags: suggestions.newTags
     }
-    return json({ result: true, language, suggestions, item, sources: context.sources || [], ...(quota ? { quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } } : {}) }, 200, request, env)
+    return json({
+        result: true,
+        language,
+        suggestions,
+        ...(legacy ? { item } : {}),
+        sources: context.sources || [],
+        ...(quota ? { quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } } : {})
+    }, 200, request, env)
 }
 
 const aiDescriptionDraft = async (request, env, userId) => {
     const { data: rawData } = await readBody(request)
     const data = rawData && typeof rawData === 'object' ? rawData : {}
-    const value = data.raindropId ?? data.bookmarkId
+    const value = data.raindropId
     const context = await aiBookmarkContext(env, userId, value)
     if (context.error || !context.items.length) return error('bookmark_not_found', 404, request, env, 'Bookmark was not found')
     if (!env.AI?.run) return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
@@ -3166,7 +3173,7 @@ const aiDescriptionDraft = async (request, env, userId) => {
         ])
         const draft = (await aiCollectText(result)).slice(0, 10000).trim()
         if (!draft) return error('ai_provider_unavailable', 503, request, env, 'Workers AI returned an empty description')
-        return json({ result: true, language, draft, descriptionDraft: draft, sources: context.sources, quota: { ...charged.quota, resetAt: new Date(charged.quota.resetAt).toISOString() } }, 200, request, env)
+        return json({ result: true, language, draft, sources: context.sources, quota: { ...charged.quota, resetAt: new Date(charged.quota.resetAt).toISOString() } }, 200, request, env)
     } catch {
         return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
     }
@@ -3290,17 +3297,17 @@ const aiRoute = async (request, env, url) => {
     }
 
     if (url.pathname === '/v2/ai/context' && request.method === 'GET') {
-        const value = url.searchParams.get('raindropId') || url.searchParams.get('bookmarkId')
+        const value = url.searchParams.get('raindropId')
         const context = await aiBookmarkContext(env, userId, value)
         if (context.error || !context.items.length) return error('bookmark_not_found', 404, request, env, 'Bookmark was not found')
         const aiPackage = { bookmarks: context.items, sources: context.sources }
-        return json({ result: true, package: aiPackage, context: aiPackage, items: context.items, sources: context.sources }, 200, request, env)
+        return json({ result: true, package: aiPackage, sources: context.sources }, 200, request, env)
     }
 
     if (url.pathname === '/v2/ai/suggestions' && request.method === 'POST')
         return aiSuggestions(request, env, userId)
 
-    if (['/v2/ai/description-draft', '/v2/ai/draft'].includes(url.pathname) && request.method === 'POST')
+    if (url.pathname === '/v2/ai/description-draft' && request.method === 'POST')
         return aiDescriptionDraft(request, env, userId)
 
     const chatMatch = url.pathname.match(/^\/v2\/ai\/(?:chats|history)\/([^/]+)$/)

@@ -323,6 +323,46 @@ paths:
           description: Basic Bookmark created for the signed-in User.
         '401':
           description: Login required.
+  /v1/raindrop/suggest:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [link, title]
+              properties:
+                link: {type: string, format: uri}
+                title: {type: string, maxLength: 500}
+                description: {type: string, maxLength: 10000}
+                note: {type: string, maxLength: 10000}
+                tags:
+                  type: array
+                  items: {type: string, maxLength: 100}
+      responses:
+        '200':
+          description: Collection and Tag suggestions for a new Bookmark.
+        '400':
+          description: Bookmark URL or title is invalid.
+        '401':
+          description: Login required.
+        '429':
+          description: Daily AI quota exhausted.
+  /v1/raindrop/{id}/suggest:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: integer, minimum: 1}
+    get:
+      responses:
+        '200':
+          description: Collection and Tag suggestions for an authorized Bookmark.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
   /v1/raindrop/{id}:
     parameters:
       - in: path

@@ -335,6 +335,7 @@ test('AI suggestions stay authorized, language-aware, and metadata-only', async 
     assert.deepEqual(body.suggestions.collections.map(item => item.id), [3])
     assert.deepEqual(body.suggestions.tags, ['cloudflare'])
     assert.deepEqual(body.suggestions.newTags, ['workers'])
+    assert.equal(Object.hasOwn(body, 'item'), false)
     assert.equal(body.language, 'zh-Hans')
     assert.match(calls[0][1].messages[0].content, /zh-Hans/)
     assert.match(calls[0][1].messages.at(-1).content, /Cloudflare Workers AI/)
@@ -365,7 +366,7 @@ test('AI description draft is editable output and never writes the Bookmark', as
     assert.equal(response.status, 200)
     const body = await response.json()
     assert.equal(body.draft, 'A proposed description.')
-    assert.equal(body.descriptionDraft, 'A proposed description.')
+    assert.equal(Object.hasOwn(body, 'descriptionDraft'), false)
     assert.equal(db.bookmarks[0].description, 'Original description')
 })
 
@@ -394,6 +395,8 @@ test('AI context endpoint exposes only authorized Bookmark metadata', async () =
 
 test('legacy Bookmark suggestion endpoints return the client-compatible item shape', async () => {
     const { env, db } = await environment()
+    env.AI_DAILY_QUOTA = '5'
+    env.AI_GLOBAL_DAILY_QUOTA = '5'
     db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/article', title: 'Article', description: '', note: '', highlights: '[]', tags: '[]' })
     const response = await worker.fetch(request('/v1/raindrop/7/suggest'), env)
     assert.equal(response.status, 200)
@@ -401,4 +404,12 @@ test('legacy Bookmark suggestion endpoints return the client-compatible item sha
     assert.ok(Array.isArray(body.item.collections))
     assert.ok(Array.isArray(body.item.tags))
     assert.ok(Array.isArray(body.item.new_tags))
+
+    const created = await worker.fetch(request('/v1/raindrop/suggest', {
+        method: 'POST',
+        body: JSON.stringify({ link: 'https://example.test/new', title: 'New bookmark' })
+    }), env)
+    assert.equal(created.status, 200)
+    const createdBody = await created.json()
+    assert.ok(Array.isArray(createdBody.item.collections))
 })
