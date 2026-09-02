@@ -1,0 +1,53 @@
+{
+    "version": "2.0.0",
+    "routes": [
+        {
+            "method": "GET",
+            "path": "/v2/ai/config",
+            "authentication": "required",
+            "responses": [200, 401, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v2/ai/quota",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "POST",
+            "path": "/v2/ai/chat",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404, 429, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v2/ai/history",
+            "authentication": "required",
+            "responses": [200, 401, 503]
+        },
+        {
+            "method": "POST",
+            "path": "/v2/ai/chats",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404, 429, 503]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v2/ai/history",
+            "authentication": "required",
+            "responses": [200, 401, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v2/ai/chats/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404, 503]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v2/ai/chats/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404, 503]
+        }
+    ]
+}

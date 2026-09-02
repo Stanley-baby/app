@@ -24,6 +24,13 @@ the Web build. Apply the D1 migrations before deploying the Worker.
 The client build selects the same profiles with `--env environment=preview`.
 The contract test skeleton runs with `npm run test:contract`.
 
+The AI page is served at `/ai` and is embedded by the existing Stella iframe.
+Authenticated clients use `/v2/ai/config`, `/v2/ai/chat` (SSE), and
+`/v2/ai/history`; Workers AI is the only provider in this phase. Set
+`AI_MODEL` and `AI_DAILY_QUOTA` per environment. Quota responses include an
+ISO `resetAt`; exhausted requests return `429` with `retryAt` and never fall
+back to another provider.
+
 Each profile also sets `USAGE_QUOTA_DAILY` (default `1000`) and
 `RATE_LIMIT_PER_MINUTE` (default `60`). Authenticated write requests consume
 one daily usage unit; every `/v1` route uses a per-user or privacy-preserving

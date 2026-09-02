@@ -1,0 +1,102 @@
+.page {
+    display: flex
+    flex-direction: column
+    min-height: 100vh
+    padding: 1rem
+    box-sizing: border-box
+    color: var(--primary-text-color)
+    background: var(--background-color)
+}
+.header {
+    display: flex
+    align-items: center
+    justify-content: space-between
+    gap: 1rem
+    margin-bottom: 1rem
+}
+.header h1 {
+    margin: 0
+    font-size: 1.25rem
+}
+.actions,
+.form {
+    display: flex
+    gap: .5rem
+}
+.body {
+    display: flex
+    flex: 1
+    min-height: 0
+    gap: 1rem
+}
+.history {
+    display: flex
+    flex-direction: column
+    width: 12rem
+    gap: .25rem
+}
+.history button {
+    overflow: hidden
+    padding: .5rem
+    border: 0
+    text-align: left
+    white-space: nowrap
+    text-overflow: ellipsis
+    color: inherit
+    background: transparent
+    cursor: pointer
+}
+.history .selected {
+    border-radius: .25rem
+    background: var(--hover-background-color)
+}
+.chat {
+    display: flex
+    flex: 1
+    flex-direction: column
+    min-width: 0
+}
+.messages {
+    display: flex
+    flex: 1
+    flex-direction: column
+    gap: .75rem
+    overflow: auto
+    padding: .5rem 0 1rem
+}
+.messages p {
+    max-width: 46rem
+    margin: 0
+    padding: .6rem .75rem
+    white-space: pre-wrap
+    border-radius: .5rem
+}
+.user {
+    align-self: flex-end
+    background: var(--hover-background-color)
+}
+.assistant {
+    align-self: flex-start
+}
+.messages a {
+    font-size: .9rem
+}
+.error {
+    color: var(--danger-color)
+}
+.form {
+    margin-top: 1rem
+}
+.form input {
+    flex: 1
+    min-width: 0
+    padding: .65rem .75rem
+}
+.form button,
+.actions button {
+    padding: .5rem .75rem
+}
+@media (max-width: 36rem) {
+    .body { flex-direction: column }
+    .history { width: auto; max-height: 8rem; overflow: auto }
+}

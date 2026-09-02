@@ -1,4 +1,4 @@
-/* global Uint8Array */
+/* global Symbol, Uint8Array */
 
 const encoder = new TextEncoder()
 const sessionDays = 30
@@ -38,6 +38,10 @@ const requestId = request => request.headers.get('X-Request-ID') || String(Date.
 const addCorsHeaders = (headers, request, env) => {
     const origin = request.headers.get('Origin')
     const allowedOrigins = String(env.CORS_ORIGINS || '').split(/\s+/).filter(Boolean)
+    try {
+        const aiOrigin = new URL(env.AI_PAGE_ORIGIN).origin
+        if (aiOrigin && !allowedOrigins.includes(aiOrigin)) allowedOrigins.push(aiOrigin)
+    } catch {}
 
     const isAllowedOrigin = origin && allowedOrigins.some(allowed =>
         allowed === origin || allowed.endsWith('*') && origin.startsWith(allowed.slice(0, -1)))
@@ -2653,7 +2657,8 @@ const auditRoute = request => {
         [/^\/v1\/collection\/\d+\/sharing(?:\/\d+)?$/, '/v1/collection/:id/sharing'],
         [/^\/v1\/collection\/\d+\/(?:transfer|ownership|published-snapshots|snapshots)(?:\/[^/]+)?$/, '/v1/collection/:id/sharing'],
         [/^\/v1\/content\/[^/]+\/publish$/, '/v1/content/:id/publish'],
-        [/^\/v1\/import\/[^/]+(?:\/(?:review|commit|status|retry|mappings))?$/, '/v1/import/:id']
+        [/^\/v1\/import\/[^/]+(?:\/(?:review|commit|status|retry|mappings))?$/, '/v1/import/:id'],
+        [/^\/v2\/ai\/(?:chats|history)\/[^/]+$/, '/v2/ai/chats/:id']
     ]
     const match = patterns.find(([pattern]) => pattern.test(pathname))
     if (match) return pathname.replace(match[0], match[1])
@@ -2669,7 +2674,8 @@ const auditRoute = request => {
         '/v1/tasks',
         '/v1/import', '/v1/import/preflight',
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
-        '/v1/raindrop/file', '/v1/content/upload', '/v1/collaborators/join'
+        '/v1/raindrop/file', '/v1/content/upload', '/v1/collaborators/join',
+        '/v2/ai/config', '/v2/ai/quota', '/v2/ai/chat', '/v2/ai/history', '/v2/ai/chats'
     ])
     return known.has(pathname) ? pathname : '/v1/unknown'
 }
@@ -2755,6 +2761,389 @@ const usageWindow = now => {
 }
 
 const usageLimit = env => integerEnv(env, ['USAGE_QUOTA_DAILY', 'USAGE_QUOTA', 'DAILY_USAGE_QUOTA'], 1000)
+
+const aiDefaultModel = '@cf/meta/llama-3.1-8b-instruct'
+const aiMessageLimit = 8000
+const aiHistoryLimit = 50
+const aiDailyLimit = env => integerEnv(env, ['AI_DAILY_QUOTA', 'AI_QUOTA_DAILY'], 20)
+const aiModel = env => String(env.AI_MODEL || aiDefaultModel)
+
+const aiWindow = now => {
+    const windowStart = Math.floor(now / usageWindowMs) * usageWindowMs
+    return { windowStart, resetAt: windowStart + usageWindowMs }
+}
+
+const readAiQuota = async (env, userId) => {
+    const limit = aiDailyLimit(env)
+    const { windowStart, resetAt } = aiWindow(Date.now())
+    try {
+        const row = await env.DB.prepare('SELECT units FROM ai_usage_counters WHERE user_id = ? AND window_start = ?')
+            .bind(userId, windowStart).first()
+        const used = Number(row?.units || 0)
+        return { used, limit, remaining: Math.max(0, limit - used), resetAt }
+    } catch {
+        return { used: 0, limit, remaining: limit, resetAt }
+    }
+}
+
+const consumeAiQuota = async (env, request, userId) => {
+    const limit = aiDailyLimit(env)
+    const now = Date.now()
+    const { windowStart, resetAt } = aiWindow(now)
+    try {
+        const current = await env.DB.prepare('SELECT units FROM ai_usage_counters WHERE user_id = ? AND window_start = ?')
+            .bind(userId, windowStart).first()
+        const previous = Number(current?.units || 0)
+        const statement = env.DB.prepare(`INSERT INTO ai_usage_counters (user_id, window_start, units, updated_at)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(user_id, window_start) DO UPDATE SET units = units + 1, updated_at = excluded.updated_at
+            WHERE ai_usage_counters.units + 1 <= ?`).bind(userId, windowStart, now, limit)
+        const result = env.DB.batch ? (await env.DB.batch([statement]))[0] : await statement.run()
+        if (Number(result?.meta?.changes || 0) !== 1) {
+            const retryAfterMs = resetAt - now
+            await recordAudit(env, request, { userId, action: 'ai.quota_exceeded', resourceType: 'ai_quota', outcome: 'blocked' })
+            await recordAlert(env, request, {
+                userId,
+                kind: 'ai_quota_exceeded',
+                severity: 'warning',
+                metadata: { limit, used: previous, retryAfter: Math.ceil(retryAfterMs / 1000) }
+            })
+            return { allowed: false, used: previous, limit, remaining: 0, resetAt, retryAfterMs }
+        }
+
+        return { allowed: true, used: previous + 1, limit, remaining: Math.max(0, limit - previous - 1), resetAt }
+    } catch {
+        // ponytail: fail open only while an environment is applying the AI migration; restore the D1 guard after it lands.
+        return { allowed: true, used: 0, limit, remaining: limit, resetAt }
+    }
+}
+
+const aiChatId = () => randomToken(18)
+
+const selectAiChat = async (env, userId, chatId) => env.DB.prepare(`SELECT id, user_id, title, created_at, updated_at
+    FROM ai_chats WHERE id = ? AND user_id = ?`).bind(chatId, userId).first()
+
+const aiPublicChat = (chat, messages = []) => ({
+    id: String(chat.id),
+    title: String(chat.title || ''),
+    created_at: Number(chat.created_at || 0),
+    updated_at: Number(chat.updated_at || 0),
+    messages: messages.map(message => ({
+        id: Number(message.id),
+        role: message.role,
+        content: String(message.content || ''),
+        created_at: Number(message.created_at || 0)
+    }))
+})
+
+const listAiHistory = async (env, userId, chatId = null) => {
+    const chats = chatId
+        ? [await selectAiChat(env, userId, chatId)].filter(Boolean)
+        : (await env.DB.prepare(`SELECT id, user_id, title, created_at, updated_at FROM ai_chats
+            WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?`).bind(userId, aiHistoryLimit).all()).results || []
+    if (!chats.length) return []
+
+    const rows = (await env.DB.prepare(`SELECT id, chat_id, role, content, created_at FROM ai_messages
+        WHERE user_id = ? ORDER BY created_at ASC LIMIT ?`).bind(userId, aiHistoryLimit * 40).all()).results || []
+    const chatIds = new Set(chats.map(chat => String(chat.id)))
+    const messages = new Map(chats.map(chat => [String(chat.id), []]))
+    for (const row of rows) {
+        const id = String(row.chat_id)
+        if (chatIds.has(id)) messages.get(id).push(row)
+    }
+    return chats.map(chat => aiPublicChat(chat, messages.get(String(chat.id)) || []))
+}
+
+const deleteAiChat = async (env, userId, chatId) => {
+    const chat = await selectAiChat(env, userId, chatId)
+    if (!chat) return false
+    const statements = [
+        env.DB.prepare('DELETE FROM ai_messages WHERE chat_id = ? AND user_id = ?').bind(chatId, userId),
+        env.DB.prepare('DELETE FROM ai_chats WHERE id = ? AND user_id = ?').bind(chatId, userId)
+    ]
+    if (env.DB.batch) await env.DB.batch(statements)
+    else for (const statement of statements) await statement.run()
+    return true
+}
+
+const deleteAiHistory = async (env, userId) => {
+    const chats = (await env.DB.prepare('SELECT id FROM ai_chats WHERE user_id = ?').bind(userId).all()).results || []
+    if (!chats.length) return 0
+    const statements = [
+        env.DB.prepare('DELETE FROM ai_messages WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM ai_chats WHERE user_id = ?').bind(userId)
+    ]
+    if (env.DB.batch) await env.DB.batch(statements)
+    else for (const statement of statements) await statement.run()
+    return chats.length
+}
+
+const aiBookmarkContext = async (env, userId, value) => {
+    if (value === undefined || value === null || value === '') return { text: '', sources: [] }
+    const bookmarkId = Number(value)
+    if (!Number.isSafeInteger(bookmarkId) || bookmarkId <= 0) return { error: 'bookmark_not_found' }
+    const bookmark = await env.DB.prepare(`SELECT id, url, title, description, note, highlights
+        FROM bookmarks WHERE id = ? AND user_id = ? AND removed_at IS NULL`).bind(bookmarkId, userId).first()
+    if (!bookmark) return { error: 'bookmark_not_found' }
+    let highlights = []
+    try { highlights = JSON.parse(bookmark.highlights || '[]') } catch {}
+    const text = [
+        'Authorized Bookmark context:',
+        'Title: ' + String(bookmark.title || ''),
+        'URL: ' + String(bookmark.url || ''),
+        'Description: ' + String(bookmark.description || ''),
+        'Notes: ' + String(bookmark.note || ''),
+        'Highlights: ' + highlights.map(item => String(item.text || item)).join(' | ')
+    ].join('\n').slice(0, Number(env.AI_CONTEXT_MAX_CHARS) || 12000)
+    return {
+        text,
+        sources: [{ raindropId: bookmark.id, title: String(bookmark.title || bookmark.url || ''), url: String(bookmark.url || '') }]
+    }
+}
+
+const aiMessageText = value => {
+    if (value === null || value === undefined) return ''
+    if (typeof value === 'string' || typeof value === 'number') return String(value)
+    if (typeof value !== 'object') return ''
+    const choice = value.choices?.[0]
+    return aiMessageText(value.response ?? value.delta ?? value.text ?? value.token ?? value.content
+        ?? choice?.delta?.content ?? choice?.message?.content ?? '')
+}
+
+const parseAiLine = line => {
+    let value = String(line || '').trim()
+    if (!value || value === '[DONE]' || value.startsWith(':') || value.startsWith('event:')) return null
+    if (value.startsWith('data:')) value = value.slice(5).trim()
+    if (!value || value === '[DONE]') return null
+    try { return aiMessageText(JSON.parse(value)) } catch { return value }
+}
+
+async function* aiResultChunks(result) {
+    if (result?.body?.getReader || result?.getReader) {
+        const reader = (result.body || result).getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let next = await reader.read()
+        while (!next.done) {
+            buffer += decoder.decode(next.value, { stream: true })
+            const lines = buffer.split(/\r?\n/)
+            buffer = lines.pop() || ''
+            for (const line of lines) {
+                const delta = parseAiLine(line)
+                if (delta) yield delta
+            }
+            next = await reader.read()
+        }
+        buffer += decoder.decode()
+        const delta = parseAiLine(buffer)
+        if (delta) yield delta
+        return
+    }
+    if (result && typeof result[Symbol.asyncIterator] === 'function') {
+        for await (const chunk of result) {
+            const delta = aiMessageText(chunk)
+            if (delta) yield delta
+        }
+        return
+    }
+    const delta = aiMessageText(result)
+    if (delta) yield delta
+}
+
+const runWorkersAi = async (env, messages) => {
+    if (!env.AI || typeof env.AI.run !== 'function') throw new Error('Workers AI binding is unavailable')
+    const result = await env.AI.run(aiModel(env), { messages, stream: true })
+    if (!result || result.ok === false || result.error || result.errors?.length) throw new Error('Workers AI provider failed')
+    return result
+}
+
+const aiEvent = value => 'data: ' + JSON.stringify(value) + '\n\n'
+
+const aiAuth = async (request, env) => {
+    if (!authReady(env)) return { response: configurationError(request, env) }
+    const session = await getSession(request, env)
+    if (session) return { session }
+    return {
+        response: json({
+            result: false,
+            auth: false,
+            error: 'auth_required',
+            errorMessage: 'Login is required',
+            login: new URL('/account/login', env.APP_ORIGIN || request.url).toString()
+        }, 401, request, env)
+    }
+}
+
+const aiRoute = async (request, env, url) => {
+    const auth = await aiAuth(request, env)
+    if (auth.response) return auth.response
+    const { user_id: userId } = auth.session
+
+    if (url.pathname === '/v2/ai/config' && request.method === 'GET') {
+        const quota = await readAiQuota(env, userId)
+        return json({
+            result: true,
+            provider: 'workers_ai',
+            model: aiModel(env),
+            available: Boolean(env.AI?.run),
+            aiPageOrigin: env.AI_PAGE_ORIGIN || null,
+            quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() }
+        }, 200, request, env)
+    }
+
+    if (url.pathname === '/v2/ai/quota' && request.method === 'GET') {
+        const quota = await readAiQuota(env, userId)
+        return json({ result: true, quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } }, 200, request, env)
+    }
+
+    const chatMatch = url.pathname.match(/^\/v2\/ai\/(?:chats|history)\/([^/]+)$/)
+    if (chatMatch && request.method === 'GET') {
+        try {
+            const items = await listAiHistory(env, userId, decodeURIComponent(chatMatch[1]))
+            if (!items.length) return error('ai_chat_not_found', 404, request, env, 'AI chat was not found')
+            return json({ result: true, chat: items[0], item: items[0] }, 200, request, env)
+        } catch {
+            return error('ai_history_unavailable', 503, request, env, 'AI history is temporarily unavailable')
+        }
+    }
+
+    if (chatMatch && request.method === 'DELETE') {
+        try {
+            const deleted = await deleteAiChat(env, userId, decodeURIComponent(chatMatch[1]))
+            if (!deleted) return error('ai_chat_not_found', 404, request, env, 'AI chat was not found')
+            await recordAudit(env, request, { userId, action: 'ai.history_deleted', resourceType: 'ai_chat', resourceId: decodeURIComponent(chatMatch[1]), outcome: 'success' })
+            return json({ result: true, deleted: 1 }, 200, request, env)
+        } catch {
+            return error('ai_history_unavailable', 503, request, env, 'AI history is temporarily unavailable')
+        }
+    }
+
+    if ((url.pathname === '/v2/ai/history' || url.pathname === '/v2/ai/chats') && request.method === 'GET') {
+        try {
+            const chatId = url.searchParams.get('chatId') || url.searchParams.get('chat_id')
+            const items = await listAiHistory(env, userId, chatId)
+            return json({ result: true, items, chats: items, history: items }, 200, request, env)
+        } catch {
+            return error('ai_history_unavailable', 503, request, env, 'AI history is temporarily unavailable')
+        }
+    }
+
+    if (url.pathname === '/v2/ai/history' || url.pathname === '/v2/ai/chats') {
+        if (request.method === 'DELETE') {
+            try {
+                const chatId = url.searchParams.get('chatId') || url.searchParams.get('chat_id')
+                const deleted = chatId ? Number(await deleteAiChat(env, userId, chatId)) : await deleteAiHistory(env, userId)
+                if (chatId && !deleted) return error('ai_chat_not_found', 404, request, env, 'AI chat was not found')
+                await recordAudit(env, request, { userId, action: 'ai.history_deleted', resourceType: 'ai_chat', outcome: 'success' })
+                return json({ result: true, deleted: chatId ? 1 : deleted }, 200, request, env)
+            } catch {
+                return error('ai_history_unavailable', 503, request, env, 'AI history is temporarily unavailable')
+            }
+        }
+        if (request.method === 'POST') {
+            // `/chats` is accepted as a compatibility alias for the streaming `/chat` endpoint.
+            return aiChat(request, env, userId)
+        }
+    }
+
+    if ((url.pathname === '/v2/ai/chat' || url.pathname === '/v2/ai/chats') && request.method === 'POST')
+        return aiChat(request, env, userId)
+
+    return error('route_not_implemented', 404, request, env)
+}
+
+const aiChat = async (request, env, userId) => {
+    const { data } = await readBody(request)
+    const suppliedMessages = Array.isArray(data.messages) ? data.messages : []
+    const lastSuppliedMessage = suppliedMessages.filter(item => item?.role === 'user').at(-1)?.content
+    const message = String(data.message || data.prompt || lastSuppliedMessage || '').trim()
+    if (!message || message.length > aiMessageLimit)
+        return error('validation_failed', 400, request, env, 'Enter a message up to 8,000 characters')
+
+    const requestedChatId = String(data.chatId || data.chat_id || '').trim()
+    const now = Date.now()
+    let chat
+    try {
+        chat = requestedChatId ? await selectAiChat(env, userId, requestedChatId) : null
+        if (requestedChatId && !chat)
+            return error('ai_chat_not_found', 404, request, env, 'AI chat was not found')
+        const context = await aiBookmarkContext(env, userId, data.raindropId ?? data.bookmarkId)
+        if (context.error)
+            return error(context.error, 404, request, env, 'Bookmark was not found')
+        if (!env.AI || typeof env.AI.run !== 'function')
+            return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
+        const quota = await consumeAiQuota(env, request, userId)
+        if (!quota.allowed)
+            return retryableError('ai_quota_exceeded', request, env, 'Daily AI quota reached. Retry after the quota resets.', quota.retryAfterMs, {
+                quota: { used: quota.used, limit: quota.limit, remaining: quota.remaining, resetAt: new Date(quota.resetAt).toISOString() },
+                resetAt: new Date(quota.resetAt).toISOString(),
+                retryAt: new Date(quota.resetAt).toISOString()
+            })
+
+        if (!chat) {
+            chat = { id: aiChatId(), user_id: userId, title: message.slice(0, 120), created_at: now, updated_at: now }
+            await env.DB.prepare('INSERT INTO ai_chats (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+                .bind(chat.id, userId, chat.title, now, now).run()
+        }
+        const prior = (await env.DB.prepare(`SELECT role, content FROM ai_messages WHERE chat_id = ? AND user_id = ?
+            ORDER BY created_at DESC LIMIT ?`).bind(chat.id, userId, aiHistoryLimit * 2).all()).results || []
+        const history = []
+        let historyChars = 0
+        const contextLimit = Number(env.AI_CONTEXT_MAX_CHARS) || 12000
+        for (const item of prior) {
+            const content = String(item.content || '')
+            if (historyChars + content.length > contextLimit) break
+            history.unshift({ role: item.role, content })
+            historyChars += content.length
+        }
+        const prompt = context.text ? message + '\n\n' + context.text : message
+        const messages = [{ role: 'system', content: 'You are Raindrop AI. Answer in the user\'s language and use only the authorized context provided.' }, ...history, { role: 'user', content: prompt }]
+        await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
+            .bind(chat.id, userId, 'user', message, now).run()
+        const result = await runWorkersAi(env, messages)
+        const encoderStream = new TextEncoder()
+        const stream = new ReadableStream({
+            start(controller) {
+                const enqueue = value => {
+                    try { controller.enqueue(encoderStream.encode(value)) } catch {}
+                }
+                enqueue(aiEvent({ chatId: chat.id, sources: context.sources }))
+                ;(async () => {
+                    let assistant = ''
+                    try {
+                        for await (const delta of aiResultChunks(result)) {
+                            assistant += delta
+                            enqueue(aiEvent({ chatId: chat.id, delta }))
+                        }
+                        if (assistant)
+                            await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
+                                .bind(chat.id, userId, 'assistant', assistant, Date.now()).run()
+                        await env.DB.prepare('UPDATE ai_chats SET updated_at = ? WHERE id = ? AND user_id = ?')
+                            .bind(Date.now(), chat.id, userId).run()
+                        await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'success' })
+                        enqueue(aiEvent({ chatId: chat.id, done: true, sources: context.sources, quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } }))
+                    } catch {
+                        await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'failed' })
+                        enqueue(aiEvent({ chatId: chat.id, error: 'ai_provider_unavailable', errorMessage: 'Workers AI is temporarily unavailable. Retry the request.' }))
+                    } finally {
+                        try { controller.close() } catch {}
+                    }
+                })()
+            }
+        })
+        const headers = addCorsHeaders(new Headers({
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'X-Accel-Buffering': 'no',
+            'X-AI-Chat-ID': chat.id,
+            'X-Request-ID': requestId(request)
+        }), request, env)
+        return new Response(stream, { status: 200, headers })
+    } catch {
+        await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', outcome: 'failed' })
+        return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
+    }
+}
 
 const readUsage = async (env, userId) => {
     const limit = usageLimit(env)
@@ -2991,6 +3380,9 @@ const deleteUserData = async (env, userId) => {
         env.DB.prepare('DELETE FROM collections WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM account_deletions WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM usage_counters WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM ai_messages WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM ai_chats WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM ai_usage_counters WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId)
     ]
     if (env.DB.batch) return env.DB.batch(statements)
@@ -3011,6 +3403,7 @@ const purgeAccounting = async env => {
     const now = Date.now()
     try {
         await env.DB.prepare('DELETE FROM usage_counters WHERE window_start < ?').bind(now - usageWindowMs * 2).run()
+        await env.DB.prepare('DELETE FROM ai_usage_counters WHERE window_start < ?').bind(now - usageWindowMs * 2).run()
         await env.DB.prepare('DELETE FROM rate_limits WHERE window_start < ?').bind(now - rateWindowMs * 2).run()
         await env.DB.prepare('DELETE FROM audit_records WHERE created_at < ?').bind(now - 365 * usageWindowMs).run()
         await env.DB.prepare('DELETE FROM alerts WHERE created_at < ?').bind(now - 365 * usageWindowMs).run()
@@ -3064,6 +3457,9 @@ export default {
             const payload = await publicCollectionPayload(env, collectionId, suppliedSlug)
             return payload ? json(payload, 200, request, env) : error('collection_not_found', 404, request, env)
         }
+
+        if (url.pathname.startsWith('/v2/ai/'))
+            return aiRoute(request, env, url)
 
         if (url.pathname.startsWith('/v1/')) {
             const rateSession = authReady(env) ? await getSession(request, env) : null

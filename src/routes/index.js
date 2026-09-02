@@ -13,6 +13,7 @@ import My from './my'
 import Join from './join'
 import Public from './public'
 import Settings from './settings'
+import Ai from './ai'
 
 const Router = target == 'web' ? BrowserRouter : HashRouter
 
@@ -27,6 +28,7 @@ export default function Pages() {
                 <Route path='public/:resource' element={<Public />} />
 
                 <Route element={<Protected redirect />}>
+                    <Route path='ai' element={<Ai />} />
                     <Route path='add' element={<Add />} />
                     <Route path='my'>{My()}</Route>
                     <Route path='join/:token' element={<Join />} />

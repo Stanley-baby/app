@@ -1347,3 +1347,66 @@ paths:
       responses:
         '200': {description: Published Cleared Snapshot stream.}
         '404': {description: Content is not currently published.}
+  /v2/ai/config:
+    get:
+      responses:
+        '200': {description: Authenticated Workers AI configuration and per-user daily quota.}
+        '401': {description: Login required.}
+  /v2/ai/quota:
+    get:
+      responses:
+        '200': {description: Authenticated user's current AI quota and reset time.}
+        '401': {description: Login required.}
+  /v2/ai/chat:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: {type: string, maxLength: 8000}
+                chatId: {type: string}
+                raindropId: {type: integer, minimum: 1}
+      responses:
+        '200': {description: SSE stream of Workers AI deltas; provider is never silently changed.}
+        '400': {description: Invalid message.}
+        '401': {description: Login required.}
+        '404': {description: Chat or Bookmark is not owned by the User.}
+        '429': {description: Daily AI quota exhausted; retryAt and resetAt are returned.}
+        '503': {description: Workers AI is unavailable.}
+  /v2/ai/history:
+    get:
+      responses:
+        '200': {description: Private AI chats and messages for the authenticated User.}
+        '401': {description: Login required.}
+    delete:
+      responses:
+        '200': {description: All private AI history deleted for the authenticated User.}
+        '401': {description: Login required.}
+        '503': {description: AI history storage is temporarily unavailable.}
+  /v2/ai/chats/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Private AI chat and messages.}
+        '401': {description: Login required.}
+        '404': {description: Chat is not owned by the User.}
+        '503': {description: AI history storage is temporarily unavailable.}
+    delete:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Private AI chat deleted.}
+        '401': {description: Login required.}
+        '404': {description: Chat is not owned by the User.}
+        '503': {description: AI history storage is temporarily unavailable.}
