@@ -1,4 +1,5 @@
 import { target, environment } from '~target'
+import { independentService } from './environment'
 
 //safari extension in-app purchase
 let overrideProLink = ''
@@ -8,11 +9,13 @@ if (target == 'extension')
     else if (environment.includes('safari'))
         overrideProLink = 'https://api.raindrop.io/v1/auth/jwt?done_uri=rniomacsafari://subscribe'
 
+const appOrigin = independentService ? process.env.APP_ORIGIN : 'https://app.raindrop.io'
+
 export default {
     app: {
-        index: process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' ? process.env.APP_ORIGIN : 'https://app.raindrop.io',
-        search: process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' ? process.env.APP_ORIGIN + '/my/0/' : 'https://app.raindrop.io/my/0/',
-        import: process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' ? process.env.APP_ORIGIN + '/settings/import' : 'https://app.raindrop.io/settings/import'
+        index: appOrigin,
+        search: appOrigin + '/my/0/',
+        import: appOrigin + '/settings/import'
     },
     
     download: 'https://raindrop.io/download',

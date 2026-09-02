@@ -119,6 +119,7 @@ module.exports = (options={}) => {
 			'process.env.TURNSTILE_SITE_KEY': JSON.stringify(buildEnvironment.turnstileSiteKey),
 			'process.env.TURNSTILE_ENABLED': JSON.stringify(String(buildEnvironment.turnstileEnabled)),
 			'process.env.RAINDROP_BUILD_ENVIRONMENT': JSON.stringify(buildEnvironment.name),
+			'process.env.RAINDROP_INDEPENDENT_SERVICE': JSON.stringify(String(buildEnvironment.independentService)),
 			RAINDROP_ENVIRONMENT: JSON.stringify('browser'),
 			'process.env.SENTRY_RELEASE': JSON.stringify(production && !sentry?.disabled? process.env.SENTRY_RELEASE : undefined)
 		}),

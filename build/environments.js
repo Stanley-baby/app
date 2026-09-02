@@ -13,6 +13,7 @@ const resolveEnvironment = (options={}) => {
     return {
         ...profile,
         name,
+        independentService: ['local', 'preview', 'beta'].includes(name),
         apiOrigin: trimTrailingSlash(options.apiOrigin || process.env.API_ORIGIN || profile.apiOrigin),
         appOrigin: trimTrailingSlash(options.appOrigin || process.env.APP_ORIGIN || profile.appOrigin),
         aiPageOrigin: trimTrailingSlash(options.aiPageOrigin || process.env.AI_PAGE_ORIGIN || profile.aiPageOrigin),

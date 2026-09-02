@@ -63,6 +63,8 @@ module.exports = (env={}, args={}) => {
                 devMiddleware: {
                     writeToDisk: true
                 },
+
+                port: env.vendor == 'chrome' ? 2001 : 2000,
             },
 
             plugins: [
@@ -96,7 +98,7 @@ module.exports = (env={}, args={}) => {
                 ...(env.production ? [
                     new ZipPlugin({
                         path: '../../',
-                        filename: `${env.vendor}-${env.production?'prod':'dev'}.zip`,
+                        filename: `${env.vendor}-${env.environment == 'production' ? 'prod' : env.environment}.zip`,
                         exclude: []
                     })
                 ] : [])

@@ -49,3 +49,19 @@ test('Web and Chrome development profiles inject matching origins and API host p
 test('Pages serves client-side routes through the Web entry point', () => {
     assert.match(fs.readFileSync(new URL('../../src/assets/_redirects', import.meta.url), 'utf8'), /^\/\*\s+\/index\.html\s+200$/m)
 })
+
+test('Chrome extension development and Beta builds stay isolated', () => {
+    assert.equal(extension({ vendor: 'chrome' }).devServer.port, 2001)
+    assert.equal(extension({ vendor: 'edge' }).devServer.port, 2000)
+
+    const betaConfig = extension({ environment: 'beta', production: true, vendor: 'chrome' })
+    const archive = betaConfig.plugins.find(plugin => plugin.constructor.name == 'ZipPlugin')
+    assert.equal(archive.options.filename, 'chrome-beta.zip')
+})
+
+test('Independent Service capability is enabled outside production', () => {
+    for (const name of ['local', 'preview', 'beta', 'production']) {
+        const definitions = definitionsFor(web({ environment: name }))
+        assert.equal(valueFor(definitions, 'RAINDROP_INDEPENDENT_SERVICE'), String(name != 'production'))
+    }
+})

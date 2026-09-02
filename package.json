@@ -15,6 +15,7 @@
 		"build": "webpack --config build/web.js --env production",
 		"build:extension": "npm run build:extension:chrome && npm run build:extension:edge && npm run build:extension:firefox && npm run build:extension:opera && npm run build:extension:safari && npm run build:extension:safari-ios",
 		"build:extension:chrome": "webpack --config build/extension.js --env production --env vendor=chrome",
+		"build:extension:chrome:beta": "webpack --config build/extension.js --env production --env vendor=chrome --env environment=beta",
 		"build:extension:edge": "webpack --config build/extension.js --env production --env vendor=edge",
 		"build:extension:firefox": "webpack --config build/extension.js --env production --env vendor=firefox",
 		"build:extension:opera": "webpack --config build/extension.js --env production --env vendor=opera",

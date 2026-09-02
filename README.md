@@ -8,6 +8,7 @@ Be sure to run `npm i` before calling any commands below
 | web      | `npm run build` |
 | electron | `npm run build:electron` |
 | chrome   | `npm run build:extension:chrome` |
+| chrome beta | `npm run build:extension:chrome:beta` | Private Beta API at the isolated `beta` profile |
 | edge     | `npm run build:extension:edge` |
 | firefox   | `npm run build:extension:firefox` | Saved to `dist/firefox/prod`
 | opera    | `npm run build:extension:opera` |

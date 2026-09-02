@@ -1,6 +1,7 @@
 import { call, put, takeEvery, select } from 'redux-saga/effects'
 import Api from '../../modules/api'
 import _ from 'lodash'
+import { independentService } from '~config/environment'
 
 import {
 	BOOKMARK_UPDATE_REQ, BOOKMARK_CREATE_REQ, BOOKMARK_UPDATE_SUCCESS,
@@ -36,7 +37,7 @@ function* draftLoad({ newOne, ignore=false, ...draft }) {
 			_id = draft._id
 		//Need to find out by link only
 		else {
-			if (preventDuplicate && draft._id){
+			if (preventDuplicate && draft._id && !independentService){
 				const { ids=[] } = yield call(Api.get, `import/url/exists?url=${encodeURIComponent(draft._id)}`)
 
 				//existing
@@ -144,7 +145,7 @@ function* draftCoverUpload({ _id, cover, ignore=false, onSuccess, onFail }) {
 	It should be called exactly after 'new' draft saved (locally) or after actual create of bookmark
 */
 function* enrichCreated({ draft, item, overrideEmpty }) {
-	if (!draft) return
+	if (!draft || independentService) return
 
 	try{
 		const parse = yield call(Api.get, 'import/url/parse?url='+encodeURIComponent(draft))
