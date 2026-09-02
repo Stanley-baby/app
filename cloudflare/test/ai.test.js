@@ -25,6 +25,7 @@ class AiDatabase {
         this.messages = []
         this.usage = []
         this.globalUsage = []
+        this.bookmarks = []
         this.quotaFailure = false
         this.nextMessageId = 1
     }
@@ -49,7 +50,7 @@ class AiDatabase {
             return null
         }
         const all = async () => {
-            if (sql.includes('FROM bookmarks b')) return { results: [] }
+            if (sql.includes('FROM bookmarks b')) return { results: this.bookmarks }
             if (sql.includes('FROM ai_chats WHERE user_id')) return { results: this.chats.filter(item => item.user_id === values[0]).map(item => ({ ...item })) }
             if (sql.includes('FROM ai_messages WHERE chat_id')) return { results: this.messages.filter(item => item.chat_id === values[0] && item.user_id === values[1]).sort((a, b) => b.created_at - a.created_at).slice(0, values[2]).map(item => ({ ...item })) }
             if (sql.includes('FROM ai_messages') && sql.includes('user_id = ?')) return { results: this.messages.filter(item => item.user_id === values[0]).map(item => ({ ...item })) }
@@ -76,6 +77,20 @@ class AiDatabase {
                     row.units++
                     row.updated_at = updatedAt
                 } else this.globalUsage.push({ window_start: windowStart, units: 1, updated_at: updatedAt })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE ai_usage_counters SET units = units - 1')) {
+                const row = this.usage.find(item => item.user_id === values[1] && item.window_start === values[2])
+                if (!row || !row.units) return { meta: { changes: 0 } }
+                row.units--
+                row.updated_at = values[0]
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE ai_global_usage_counters SET units = units - 1')) {
+                const row = this.globalUsage.find(item => item.window_start === values[1])
+                if (!row || !row.units) return { meta: { changes: 0 } }
+                row.units--
+                row.updated_at = values[0]
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('INSERT INTO ai_chats')) {
@@ -199,6 +214,44 @@ test('AI quota storage failures fail closed', async () => {
     const response = await worker.fetch(request('/v2/ai/config'), env)
     assert.equal(response.status, 503)
     assert.equal((await response.json()).error, 'ai_quota_unavailable')
+})
+
+test('AI global quota does not charge denied users', async () => {
+    const { env, db } = await environment()
+    env.AI_GLOBAL_DAILY_QUOTA = '1'
+    const first = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'First' }) }), env)
+    assert.equal(first.status, 200)
+    await first.text()
+    const second = await worker.fetch(request('/v2/ai/chat', {
+        method: 'POST',
+        headers: { Cookie: 'rd_session=two' },
+        body: JSON.stringify({ message: 'Second' })
+    }), env)
+    assert.equal(second.status, 429)
+    assert.equal((await second.json()).quota.scope, 'global')
+    assert.deepEqual(db.usage.map(item => [item.user_id, item.units]), [[1, 1]])
+    assert.equal(db.globalUsage[0].units, 1)
+})
+
+test('AI grounds natural-language prompts in authorized bookmark search results', async () => {
+    const { env, db, calls } = await environment()
+    db.bookmarks.push({
+        id: 7,
+        user_id: 1,
+        url: 'https://developers.cloudflare.com/workers-ai/',
+        title: 'Cloudflare Workers AI',
+        description: 'AI documentation',
+        note: '',
+        highlights: '[]'
+    })
+    const response = await worker.fetch(request('/v2/ai/chat', {
+        method: 'POST',
+        body: JSON.stringify({ message: 'Find Cloudflare bookmarks' })
+    }), env)
+    assert.equal(response.status, 200)
+    const body = await response.text()
+    assert.match(body, /"raindropId":7/)
+    assert.match(calls[0][1].messages.at(-1).content, /Cloudflare Workers AI/)
 })
 
 test('AI provider failures are explicit and do not invoke a fallback', async () => {

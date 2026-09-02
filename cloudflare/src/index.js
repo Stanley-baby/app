@@ -2846,16 +2846,24 @@ const consumeAiQuota = async (env, request, userId) => {
         const results = env.DB.batch
             ? await env.DB.batch([userStatement, globalStatement])
             : [await userStatement.run(), await globalStatement.run()]
-        if (results.some(result => Number(result?.meta?.changes || 0) !== 1)) {
+        const userChanged = Number(results[0]?.meta?.changes || 0) === 1
+        const globalChanged = Number(results[1]?.meta?.changes || 0) === 1
+        if (!userChanged || !globalChanged) {
+            if (userChanged)
+                await env.DB.prepare(`UPDATE ai_usage_counters SET units = units - 1, updated_at = ?
+                    WHERE user_id = ? AND window_start = ? AND units > 0`).bind(now, userId, windowStart).run()
+            if (globalChanged)
+                await env.DB.prepare(`UPDATE ai_global_usage_counters SET units = units - 1, updated_at = ?
+                    WHERE window_start = ? AND units > 0`).bind(now, windowStart).run()
             const retryAfterMs = resetAt - now
             await recordAudit(env, request, { userId, action: 'ai.quota_exceeded', resourceType: 'ai_quota', outcome: 'blocked' })
             await recordAlert(env, request, {
                 userId,
                 kind: 'ai_quota_exceeded',
                 severity: 'warning',
-                metadata: { scope: 'concurrent', limit, used: previous, retryAfter: Math.ceil(retryAfterMs / 1000) }
+                metadata: { scope: !globalChanged ? 'global' : 'user', limit, used: previous, retryAfter: Math.ceil(retryAfterMs / 1000) }
             })
-            return { allowed: false, scope: 'concurrent', used: previous, limit, remaining: 0, resetAt, retryAfterMs, global: { used: globalPrevious, limit: globalLimit, remaining: 0 } }
+            return { allowed: false, scope: !globalChanged ? 'global' : 'user', used: previous, limit, remaining: 0, resetAt, retryAfterMs, global: { used: globalPrevious, limit: globalLimit, remaining: 0 } }
         }
 
         return {
@@ -2941,7 +2949,15 @@ const aiBookmarkContext = async (env, userId, value, query = '') => {
             bookmarks = bookmark && !bookmark.removed_at ? [bookmark] : []
             if (!bookmarks.length) return { error: 'bookmark_not_found' }
         } else if (query.trim()) {
-            const pattern = `%${query.trim().slice(0, 160)}%`
+            const ignoredTerms = new Set(['find', 'show', 'search', 'my', 'bookmarks', 'bookmark', 'about', 'what', 'is', 'the', 'for', 'with', 'please'])
+            const terms = query.trim().split(/\s+/)
+                .map(term => term.replace(/[.,!?;:()[\]{}"'`]/g, '').slice(0, 80))
+                .filter(term => term.length > 1 && !ignoredTerms.has(term.toLowerCase()))
+                .slice(0, 5)
+            if (!terms.length) return { text: '', sources: [] }
+            const fields = ['title', 'url', 'description', 'note', 'tags', 'highlights']
+            const clauses = terms.map(() => fields.map(field => `b.${field} LIKE ?`).join(' OR ')).join(' OR ')
+            const values = terms.flatMap(term => Array(fields.length).fill(`%${term}%`))
             bookmarks = (await env.DB.prepare(`WITH RECURSIVE accessible(id) AS (
                     SELECT c.id FROM collections c
                     LEFT JOIN collection_collaborators cc ON cc.collection_id = c.id AND cc.user_id = ?
@@ -2953,8 +2969,8 @@ const aiBookmarkContext = async (env, userId, value, query = '') => {
                 SELECT b.id, b.user_id, b.url, b.title, b.description, b.note, b.highlights
                 FROM bookmarks b
                 WHERE b.removed_at IS NULL AND (b.user_id = ? OR b.collection_id IN (SELECT id FROM accessible))
-                    AND (b.title LIKE ? OR b.url LIKE ? OR b.description LIKE ? OR b.note LIKE ? OR b.tags LIKE ? OR b.highlights LIKE ?)
-                ORDER BY b.updated_at DESC LIMIT 5`).bind(userId, userId, userId, ...Array(6).fill(pattern)).all()).results || []
+                    AND (${clauses})
+                ORDER BY b.updated_at DESC LIMIT 5`).bind(userId, userId, userId, ...values).all()).results || []
         } else return { text: '', sources: [] }
 
         const contextLimit = Number(env.AI_CONTEXT_MAX_CHARS) || 12000
