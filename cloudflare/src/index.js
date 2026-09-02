@@ -2659,6 +2659,9 @@ const auditRoute = request => {
         [/^\/v1\/content\/[^/]+\/publish$/, '/v1/content/:id/publish'],
         [/^\/v1\/import\/[^/]+(?:\/(?:review|commit|status|retry|mappings))?$/, '/v1/import/:id'],
         [/^\/v1\/raindrop\/\d+\/suggest$/, '/v1/raindrop/:id/suggest'],
+        [/^\/v2\/ai\/(?:action-proposals|proposals)\/[^/]+\/(?:approve|reject|decision)$/, '/v2/ai/action-proposals/:id/decision'],
+        [/^\/v2\/ai\/(?:action-proposals|proposals)\/[^/]+$/, '/v2/ai/action-proposals/:id'],
+        [/^\/v2\/ai\/(?:approvals|standing-approvals)\/[^/]+$/, '/v2/ai/approvals/:id'],
         [/^\/v2\/ai\/(?:chats|history)\/[^/]+$/, '/v2/ai/chats/:id']
     ]
     const match = patterns.find(([pattern]) => pattern.test(pathname))
@@ -2677,7 +2680,8 @@ const auditRoute = request => {
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
         '/v1/raindrop/file', '/v1/raindrop/suggest', '/v1/content/upload', '/v1/collaborators/join',
         '/v2/ai/config', '/v2/ai/quota', '/v2/ai/chat', '/v2/ai/history', '/v2/ai/chats',
-        '/v2/ai/context', '/v2/ai/suggestions', '/v2/ai/description-draft'
+        '/v2/ai/context', '/v2/ai/suggestions', '/v2/ai/description-draft', '/v2/ai/tools',
+        '/v2/ai/tools/execute', '/v2/ai/action-proposals', '/v2/ai/proposals', '/v2/ai/approvals', '/v2/ai/standing-approvals'
     ])
     return known.has(pathname) ? pathname : '/v1/unknown'
 }
@@ -3179,6 +3183,426 @@ const aiDescriptionDraft = async (request, env, userId) => {
     }
 }
 
+const aiToolCatalog = [
+    {
+        name: 'bookmark_read',
+        kind: 'read',
+        approval: 'none',
+        approvalRequired: false,
+        scope: 'authorized_bookmarks',
+        description: 'Read Bookmark metadata that the User may access'
+    },
+    {
+        name: 'bookmark_update',
+        kind: 'write',
+        approval: 'action_proposal',
+        approvalRequired: true,
+        standingApproval: 'user_tool_collection',
+        scope: 'collection',
+        description: 'Update an authorized Bookmark after approval'
+    },
+    {
+        name: 'bookmark_delete',
+        kind: 'write',
+        approval: 'action_proposal',
+        approvalRequired: true,
+        standingApproval: 'user_tool_collection',
+        scope: 'collection',
+        description: 'Move an authorized Bookmark to the Recycle Bin after approval'
+    }
+]
+
+const aiWriteTools = new Map(aiToolCatalog.filter(tool => tool.kind === 'write').map(tool => [tool.name, tool]))
+
+const aiCanonicalTool = value => {
+    const name = String(value || '').trim().toLowerCase().replace(/[.:\-/]+/g, '_')
+    const aliases = {
+        bookmark_read: 'bookmark_read',
+        bookmark_search: 'bookmark_read',
+        bookmark_context: 'bookmark_read',
+        read_bookmark: 'bookmark_read',
+        bookmark_update: 'bookmark_update',
+        update_bookmark: 'bookmark_update',
+        bookmark_delete: 'bookmark_delete',
+        delete_bookmark: 'bookmark_delete'
+    }
+    return aliases[name] || null
+}
+
+const aiActionId = () => randomToken(18)
+
+const aiActionChanges = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const allowed = new Set(['link', 'url', 'title', 'description', 'excerpt', 'note', 'collectionId', 'tags', 'highlights', 'removed'])
+    const keys = Object.keys(value)
+    if (!keys.length || keys.some(key => !allowed.has(key))) return null
+    const changes = {}
+    for (const key of keys) {
+        if (value[key] !== undefined) changes[key] = value[key]
+    }
+    if (Object.hasOwn(changes, 'removed') && typeof changes.removed !== 'boolean') return null
+    if (changes.title !== undefined && String(changes.title).trim().length > 500) return null
+    if (changes.description !== undefined && String(changes.description).trim().length > 10000) return null
+    if (changes.excerpt !== undefined && String(changes.excerpt).trim().length > 10000) return null
+    if (changes.note !== undefined && String(changes.note).trim().length > 10000) return null
+    if (changes.link !== undefined && !validateFetchableUrl(changes.link).ok) return null
+    if (changes.url !== undefined && !validateFetchableUrl(changes.url).ok) return null
+    if (changes.tags !== undefined && !validTagList(changes.tags)) return null
+    if (changes.highlights !== undefined && !validHighlightChanges(changes.highlights)) return null
+    return Object.keys(changes).length ? changes : null
+}
+
+const aiActionPayload = row => {
+    try {
+        const payload = JSON.parse(row.payload || '{}')
+        return payload && typeof payload === 'object' ? payload : {}
+    } catch {
+        return {}
+    }
+}
+
+const aiPublicProposal = row => {
+    const payload = aiActionPayload(row)
+    let result = null
+    try { result = row.result ? JSON.parse(row.result) : null } catch {}
+    return {
+        id: String(row.id),
+        tool: String(row.tool_name),
+        toolName: String(row.tool_name),
+        action: String(row.action),
+        bookmarkId: Number(row.bookmark_id),
+        collectionId: Number(row.collection_id),
+        changes: payload.changes || {},
+        payload: payload.changes || payload,
+        status: String(row.status),
+        approvalRequired: row.status === 'pending',
+        result,
+        error: row.error_code ? { code: row.error_code, message: row.error_message || row.error_code } : null,
+        createdAt: taskDate(row.created_at),
+        updatedAt: taskDate(row.updated_at),
+        decidedAt: taskDate(row.decided_at)
+    }
+}
+
+const aiPublicStandingApproval = row => ({
+    id: String(row.id),
+    tool: String(row.tool_name),
+    toolName: String(row.tool_name),
+    collectionId: Number(row.collection_id),
+    createdAt: taskDate(row.created_at),
+    updatedAt: taskDate(row.updated_at),
+    revokedAt: taskDate(row.revoked_at)
+})
+
+const selectAiProposal = async (env, proposalId, userId) => env.DB.prepare(`SELECT id, user_id, tool_name, action,
+    bookmark_id, collection_id, payload, status, result, error_code, error_message, created_at, updated_at, decided_at
+    FROM ai_action_proposals WHERE id = ? AND user_id = ?`).bind(proposalId, userId).first()
+
+const listAiProposals = async (env, userId, status = '') => {
+    const allowed = new Set(['pending', 'applied', 'rejected', 'failed'])
+    const where = allowed.has(status) ? ' AND status = ?' : ''
+    const values = allowed.has(status) ? [userId, status] : [userId]
+    const rows = await env.DB.prepare(`SELECT id, user_id, tool_name, action, bookmark_id, collection_id, payload,
+        status, result, error_code, error_message, created_at, updated_at, decided_at
+        FROM ai_action_proposals WHERE user_id = ?${where} ORDER BY updated_at DESC LIMIT 50`).bind(...values).all()
+    return (rows.results || []).map(aiPublicProposal)
+}
+
+const listAiStandingApprovals = async (env, userId) => {
+    const rows = await env.DB.prepare(`SELECT id, user_id, tool_name, collection_id, created_at, updated_at, revoked_at
+        FROM ai_standing_approvals WHERE user_id = ? AND revoked_at IS NULL ORDER BY updated_at DESC`).bind(userId).all()
+    return (rows.results || []).map(aiPublicStandingApproval)
+}
+
+const selectAiStandingApproval = async (env, userId, toolName, collectionId) => env.DB.prepare(`SELECT id, user_id,
+    tool_name, collection_id, created_at, updated_at, revoked_at FROM ai_standing_approvals
+    WHERE user_id = ? AND tool_name = ? AND collection_id = ? AND revoked_at IS NULL`).bind(userId, toolName, collectionId).first()
+
+const saveAiStandingApproval = async (env, userId, toolName, collectionId) => {
+    const now = Date.now()
+    const existing = await env.DB.prepare(`SELECT id FROM ai_standing_approvals
+        WHERE user_id = ? AND tool_name = ? AND collection_id = ?`).bind(userId, toolName, collectionId).first()
+    if (existing) {
+        await env.DB.prepare(`UPDATE ai_standing_approvals SET revoked_at = NULL, updated_at = ?
+            WHERE id = ? AND user_id = ?`).bind(now, existing.id, userId).run()
+        return await env.DB.prepare(`SELECT id, user_id, tool_name, collection_id, created_at, updated_at, revoked_at
+            FROM ai_standing_approvals WHERE id = ? AND user_id = ?`).bind(existing.id, userId).first()
+    }
+    const id = aiActionId()
+    await env.DB.prepare(`INSERT INTO ai_standing_approvals
+        (id, user_id, tool_name, collection_id, created_at, updated_at, revoked_at)
+        VALUES (?, ?, ?, ?, ?, ?, NULL)`).bind(id, userId, toolName, collectionId, now, now).run()
+    return await env.DB.prepare(`SELECT id, user_id, tool_name, collection_id, created_at, updated_at, revoked_at
+        FROM ai_standing_approvals WHERE id = ? AND user_id = ?`).bind(id, userId).first()
+}
+
+const aiWriteBookmark = async (env, bookmarkId, userId) => {
+    const owned = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
+        .bind(bookmarkId, userId).first()
+    const bookmark = owned || await bookmarkAccessible(env, bookmarkId, userId)
+    if (!bookmark) return { error: 'bookmark_not_found' }
+    const role = owned ? 'owner' : await collectionRole(env, userId, bookmark.collection_id)
+    if (roleLevel(role) < roleLevel('editor')) return { error: 'permission_denied' }
+    return { bookmark, collectionId: Number(bookmark.collection_id || -1), role }
+}
+
+const aiApplyBookmarkUpdate = async (request, env, userId, bookmarkId, changes) => {
+    const target = await aiWriteBookmark(env, bookmarkId, userId)
+    if (target.error) return { response: target.error === 'permission_denied'
+        ? error('permission_denied', 403, request, env, 'Editor access is required to update this Bookmark')
+        : error('bookmark_not_found', 404, request, env) }
+    const existing = target.bookmark
+    const title = changes.title === undefined ? existing.title : String(changes.title).trim()
+    const link = changes.link === undefined && changes.url === undefined ? existing.url : String(changes.link ?? changes.url).trim()
+    const description = changes.description === undefined && changes.excerpt === undefined
+        ? existing.description || existing.excerpt || ''
+        : String(changes.description ?? changes.excerpt).trim()
+    const note = changes.note === undefined ? existing.note || '' : String(changes.note).trim()
+    const tags = changes.tags === undefined ? bookmarkTags(existing.tags) : bookmarkTags(changes.tags)
+    let collectionId = changes.collectionId === undefined ? existing.collection_id : parseBookmarkCollectionId(changes.collectionId)
+    const removedAt = changes.removed === false ? null : changes.removed === true ? Date.now() : existing.removed_at
+    const removedBatch = changes.removed === false ? null : changes.removed === true ? randomToken(16) : existing.removed_batch
+    const highlights = changes.highlights === undefined ? bookmarkHighlights(existing.highlights) : changes.highlights
+    if (changes.collectionId === undefined && changes.removed === false && collectionId > 0 &&
+        !await collectionOwned(env, userId, collectionId) && !await collectionCanWrite(env, userId, collectionId)) collectionId = -1
+    const urlCheck = validateFetchableUrl(link)
+    if (!urlCheck.ok || title.length > 500 || description.length > 10000 || note.length > 10000)
+        return { response: error(urlCheck.ok ? 'validation_failed' : urlCheck.code, 400, request, env,
+            urlCheck.ok ? 'Enter an HTTP(S) bookmark URL and a title under 500 characters' : urlCheck.message) }
+    if (changes.tags !== undefined && !validTagList(changes.tags))
+        return { response: error('validation_failed', 400, request, env, 'Bookmark tags must be 100 characters or fewer') }
+    if (!Number.isSafeInteger(collectionId) || collectionId < -1 || collectionId > 0 &&
+        !await collectionOwned(env, userId, collectionId) && !await collectionCanWrite(env, userId, collectionId))
+        return { response: error('collection_not_found', 404, request, env) }
+    if (!validHighlightChanges(highlights))
+        return { response: error('validation_failed', 400, request, env, 'Highlight text and note must be valid') }
+    const now = Date.now()
+    await env.DB.prepare(`UPDATE bookmarks SET url = ?, title = ?, description = ?, note = ?, collection_id = ?, tags = ?,
+        highlights = ?, removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
+        .bind(link, title, description, note, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)),
+            removedAt, removedBatch, now, bookmarkId, existing.user_id).run()
+    const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, existing.user_id).first()
+    const task = link !== existing.url ? await createMetadataTask(env, request, userId, bookmarkId, link) : null
+    return { item: bookmarkItem(item || { ...existing, url: link, title, description, note, collection_id: collectionId, tags: JSON.stringify(tags), highlights: JSON.stringify(highlights), removed_at: removedAt, removed_batch: removedBatch, updated_at: now }), task }
+}
+
+const aiApplyBookmarkDelete = async (request, env, userId, bookmarkId) => {
+    const target = await aiWriteBookmark(env, bookmarkId, userId)
+    if (target.error) return { response: target.error === 'permission_denied'
+        ? error('permission_denied', 403, request, env, 'Editor access is required to remove this Bookmark')
+        : error('bookmark_not_found', 404, request, env) }
+    const now = Date.now()
+    const removedBatch = randomToken(16)
+    await env.DB.prepare('UPDATE bookmarks SET removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+        .bind(now, removedBatch, now, bookmarkId, target.bookmark.user_id).run()
+    return { item: { bookmarkId, removed: true, removedAt: new Date(now).toISOString() } }
+}
+
+const aiApplyProposal = async (request, env, userId, proposal) => {
+    const target = await aiWriteBookmark(env, Number(proposal.bookmark_id), userId)
+    if (target.error) return { response: target.error === 'permission_denied'
+        ? error('permission_denied', 403, request, env, 'Editor access is required for this AI action')
+        : error('bookmark_not_found', 404, request, env) }
+    if (Number(target.collectionId) !== Number(proposal.collection_id))
+        return { response: error('proposal_target_changed', 409, request, env, 'The Bookmark changed Collections; create a new proposal') }
+    const payload = aiActionPayload(proposal)
+    const changes = payload.changes || {}
+    if (proposal.action === 'delete') return aiApplyBookmarkDelete(request, env, userId, Number(proposal.bookmark_id))
+    return aiApplyBookmarkUpdate(request, env, userId, Number(proposal.bookmark_id), changes)
+}
+
+const aiCreateActionProposal = async (request, env, userId) => {
+    const { data: rawData } = await readBody(request)
+    const data = rawData && typeof rawData === 'object' ? rawData : {}
+    const tool = aiCanonicalTool(data.tool || data.toolName || data.name)
+    const definition = aiWriteTools.get(tool)
+    if (!definition) return error('ai_tool_not_allowed', 400, request, env, 'This AI write tool is not available')
+    const bookmarkId = Number(data.raindropId ?? data.bookmarkId ?? data.resourceId)
+    if (!Number.isSafeInteger(bookmarkId) || bookmarkId <= 0)
+        return error('validation_failed', 400, request, env, 'Provide a valid Bookmark ID')
+    const target = await aiWriteBookmark(env, bookmarkId, userId)
+    if (target.error === 'bookmark_not_found') return error('bookmark_not_found', 404, request, env)
+    if (target.error === 'permission_denied') return error('permission_denied', 403, request, env, 'Editor access is required for this AI action')
+    const changes = tool === 'bookmark_update'
+        ? aiActionChanges(data.changes ?? data.input ?? data.patch ?? data.payload?.changes ?? data.payload)
+        : {}
+    if (tool === 'bookmark_update' && !changes)
+        return error('validation_failed', 400, request, env, 'Provide one or more supported Bookmark changes')
+    if (changes?.collectionId !== undefined) {
+        const collectionId = parseBookmarkCollectionId(changes.collectionId)
+        if (!Number.isSafeInteger(collectionId) || collectionId < -1 || collectionId > 0 &&
+            !await collectionOwned(env, userId, collectionId) && !await collectionCanWrite(env, userId, collectionId))
+            return error('collection_not_found', 404, request, env)
+    }
+    const now = Date.now()
+    const id = aiActionId()
+    await env.DB.prepare(`INSERT INTO ai_action_proposals
+        (id, user_id, tool_name, action, bookmark_id, collection_id, payload, status, result, error_code, created_at, updated_at, decided_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)`).bind(
+        id, userId, tool, definition.name === 'bookmark_delete' ? 'delete' : 'update', bookmarkId,
+        target.collectionId, JSON.stringify({ changes }), now, now).run()
+    let proposal = await selectAiProposal(env, id, userId)
+    const standing = await selectAiStandingApproval(env, userId, tool, target.collectionId)
+    const requestedCollection = changes?.collectionId === undefined ? target.collectionId : parseBookmarkCollectionId(changes.collectionId)
+    const canAutoApprove = Boolean(standing && requestedCollection === target.collectionId)
+    if (canAutoApprove) {
+        const applied = await aiApplyProposal(request, env, userId, proposal)
+        if (!applied.response) {
+            await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'applied', result = ?, updated_at = ?, decided_at = ?
+                WHERE id = ? AND user_id = ? AND status = 'pending'`).bind(JSON.stringify(applied.item || {}), Date.now(), Date.now(), id, userId).run()
+            proposal = await selectAiProposal(env, id, userId) || proposal
+            await recordAudit(env, request, { userId, action: 'ai.action.applied', resourceType: 'ai_action_proposal', resourceId: id, outcome: 'standing_approval' })
+            return json({ result: true, autoApproved: true, approval: 'standing', proposal: aiPublicProposal(proposal), item: applied.item, ...(applied.task ? { task: publicTask(applied.task), taskId: String(applied.task.id) } : {}) }, 200, request, env)
+        }
+    }
+    await recordAudit(env, request, { userId, action: 'ai.action.proposed', resourceType: 'ai_action_proposal', resourceId: id, outcome: 'pending' })
+    return json({ result: true, proposal: aiPublicProposal(proposal) }, 201, request, env)
+}
+
+const aiApproveProposal = async (request, env, userId, proposalId, forcedAlwaysApprove = null) => {
+    let proposal = await selectAiProposal(env, proposalId, userId)
+    if (!proposal) return error('ai_proposal_not_found', 404, request, env, 'AI Action Proposal was not found')
+    if (proposal.status === 'applied') return json({ result: true, proposal: aiPublicProposal(proposal) }, 200, request, env)
+    if (proposal.status !== 'pending') return error('ai_proposal_not_pending', 409, request, env, 'This AI Action Proposal is no longer pending')
+    let alwaysApprove = forcedAlwaysApprove
+    if (alwaysApprove === null) {
+        const { data: rawData } = await readBody(request)
+        const data = rawData && typeof rawData === 'object' ? rawData : {}
+        alwaysApprove = data.alwaysApprove === true || data.always_approve === true
+    }
+    const payload = aiActionPayload(proposal)
+    const changes = payload.changes || {}
+    const destination = changes.collectionId === undefined ? Number(proposal.collection_id) : parseBookmarkCollectionId(changes.collectionId)
+    if (alwaysApprove && destination !== Number(proposal.collection_id))
+        return error('ai_approval_scope_invalid', 400, request, env, 'Always approve must stay within one Collection')
+    const applied = await aiApplyProposal(request, env, userId, proposal)
+    if (applied.response) return applied.response
+    const now = Date.now()
+    await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'applied', result = ?, error_code = NULL,
+        error_message = NULL, updated_at = ?, decided_at = ? WHERE id = ? AND user_id = ? AND status = 'pending'`)
+        .bind(JSON.stringify(applied.item || {}), now, now, proposalId, userId).run()
+    let approval = null
+    if (alwaysApprove) {
+        approval = await saveAiStandingApproval(env, userId, proposal.tool_name, Number(proposal.collection_id))
+        approval = approval ? aiPublicStandingApproval(approval) : null
+    }
+    proposal = await selectAiProposal(env, proposalId, userId) || proposal
+    await recordAudit(env, request, { userId, action: 'ai.action.applied', resourceType: 'ai_action_proposal', resourceId: proposalId, outcome: alwaysApprove ? 'standing_approval' : 'approved' })
+    return json({ result: true, proposal: aiPublicProposal(proposal), item: applied.item,
+        ...(approval ? { approval, standingApproval: approval } : {}),
+        ...(applied.task ? { task: publicTask(applied.task), taskId: String(applied.task.id) } : {}) }, 200, request, env)
+}
+
+const aiRejectProposal = async (request, env, userId, proposalId) => {
+    const proposal = await selectAiProposal(env, proposalId, userId)
+    if (!proposal) return error('ai_proposal_not_found', 404, request, env, 'AI Action Proposal was not found')
+    if (proposal.status !== 'pending') return error('ai_proposal_not_pending', 409, request, env, 'This AI Action Proposal is no longer pending')
+    const now = Date.now()
+    await env.DB.prepare(`UPDATE ai_action_proposals SET status = 'rejected', updated_at = ?, decided_at = ?
+        WHERE id = ? AND user_id = ? AND status = 'pending'`).bind(now, now, proposalId, userId).run()
+    const updated = await selectAiProposal(env, proposalId, userId) || proposal
+    await recordAudit(env, request, { userId, action: 'ai.action.rejected', resourceType: 'ai_action_proposal', resourceId: proposalId, outcome: 'rejected' })
+    return json({ result: true, proposal: aiPublicProposal(updated) }, 200, request, env)
+}
+
+const aiStandingApprovalRoute = async (request, env, userId, url) => {
+    const approvalId = url.pathname.match(/^\/v2\/ai\/(?:approvals|standing-approvals)\/([^/]+)$/)?.[1]
+    if (request.method === 'GET' && !approvalId) {
+        const approvals = await listAiStandingApprovals(env, userId)
+        return json({ result: true, approvals, items: approvals }, 200, request, env)
+    }
+    if (request.method === 'POST' && !approvalId) {
+        const { data: rawData } = await readBody(request)
+        const data = rawData && typeof rawData === 'object' ? rawData : {}
+        const tool = aiCanonicalTool(data.tool || data.toolName || data.name)
+        if (!aiWriteTools.has(tool)) return error('ai_tool_not_allowed', 400, request, env, 'Standing approval requires a write AI tool')
+        const collectionId = Number(data.collectionId ?? data.collection_id)
+        if (!Number.isSafeInteger(collectionId) || collectionId <= 0)
+            return error('validation_failed', 400, request, env, 'Standing approval requires one Collection')
+        const collection = await env.DB.prepare('SELECT id, removed_at FROM collections WHERE id = ?').bind(collectionId).first()
+        if (!collection || collection.removed_at) return error('collection_not_found', 404, request, env)
+        if (!await collectionCanWrite(env, userId, collectionId))
+            return error('permission_denied', 403, request, env, 'Editor access is required for standing approval')
+        const approval = await saveAiStandingApproval(env, userId, tool, collectionId)
+        if (!approval) return error('ai_actions_unavailable', 503, request, env, 'AI approvals are temporarily unavailable')
+        await recordAudit(env, request, { userId, action: 'ai.standing_approval.granted', resourceType: 'ai_standing_approval', resourceId: approval.id, outcome: 'success' })
+        const item = aiPublicStandingApproval(approval)
+        return json({ result: true, approval: item, standingApproval: item }, 201, request, env)
+    }
+    if (request.method === 'DELETE' && approvalId) {
+        const approval = await env.DB.prepare('SELECT id FROM ai_standing_approvals WHERE id = ? AND user_id = ? AND revoked_at IS NULL')
+            .bind(decodeURIComponent(approvalId), userId).first()
+        if (!approval) return error('ai_approval_not_found', 404, request, env, 'Standing approval was not found')
+        await env.DB.prepare('UPDATE ai_standing_approvals SET revoked_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL')
+            .bind(Date.now(), Date.now(), approval.id, userId).run()
+        await recordAudit(env, request, { userId, action: 'ai.standing_approval.revoked', resourceType: 'ai_standing_approval', resourceId: approval.id, outcome: 'success' })
+        return json({ result: true, revoked: true, id: String(approval.id) }, 200, request, env)
+    }
+    return error('route_not_implemented', 404, request, env)
+}
+
+const aiActionsRoute = async (request, env, userId, url) => {
+    if (url.pathname === '/v2/ai/tools' && request.method === 'GET') {
+        const approvals = await listAiStandingApprovals(env, userId)
+        return json({ result: true, tools: aiToolCatalog, approvals }, 200, request, env)
+    }
+
+    if ((url.pathname === '/v2/ai/tools' || url.pathname === '/v2/ai/tools/execute') && request.method === 'POST') {
+        const { data: rawData } = await readBody(request)
+        const data = rawData && typeof rawData === 'object' ? rawData : {}
+        const tool = aiCanonicalTool(data.tool || data.toolName || data.name)
+        if (tool !== 'bookmark_read')
+            return error(aiWriteTools.has(tool) ? 'ai_action_requires_proposal' : 'ai_tool_not_allowed', 400, request, env,
+                aiWriteTools.has(tool) ? 'Write tools require an AI Action Proposal' : 'This AI read tool is not available')
+        const bookmarkId = data.bookmarkId ?? data.raindropId ?? data.resourceId
+        const query = String(data.query || data.message || '').trim()
+        if (bookmarkId === undefined && !query) return error('validation_failed', 400, request, env, 'Provide a Bookmark ID or search query')
+        if (query.length > aiMessageLimit) return error('validation_failed', 400, request, env, 'Search query is too long')
+        const context = await aiBookmarkContext(env, userId, bookmarkId, query)
+        if (context.error) return error(context.error, 404, request, env, 'Bookmark was not found')
+        const result = { bookmarks: context.items || [], sources: context.sources || [] }
+        await recordAudit(env, request, { userId, action: 'ai.tool.read', resourceType: 'ai_tool', resourceId: tool, outcome: 'success' })
+        return json({ result: true, tool, package: result, sources: result.sources }, 200, request, env)
+    }
+
+    if (url.pathname === '/v2/ai/approvals' || url.pathname === '/v2/ai/standing-approvals' ||
+        url.pathname.startsWith('/v2/ai/approvals/') || url.pathname.startsWith('/v2/ai/standing-approvals/'))
+        return aiStandingApprovalRoute(request, env, userId, url)
+
+    const proposalIdMatch = url.pathname.match(/^\/v2\/ai\/(?:proposals|action-proposals)\/([^/]+)$/)
+    if (proposalIdMatch && request.method === 'GET') {
+        const proposal = await selectAiProposal(env, decodeURIComponent(proposalIdMatch[1]), userId)
+        return proposal
+            ? json({ result: true, proposal: aiPublicProposal(proposal) }, 200, request, env)
+            : error('ai_proposal_not_found', 404, request, env, 'AI Action Proposal was not found')
+    }
+
+    const proposalPath = url.pathname === '/v2/ai/proposals' || url.pathname === '/v2/ai/action-proposals'
+    const decisionMatch = url.pathname.match(/^\/v2\/ai\/(?:proposals|action-proposals)\/([^/]+)\/decision$/)
+    if (decisionMatch && request.method === 'POST') {
+        const copy = request.clone()
+        const { data: rawData } = await readBody(request)
+        const decision = String(rawData?.decision || rawData?.action || '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+        if (decision === 'reject') return aiRejectProposal(copy, env, userId, decodeURIComponent(decisionMatch[1]))
+        if (decision === 'approve') return aiApproveProposal(copy, env, userId, decodeURIComponent(decisionMatch[1]), false)
+        if (decision === 'always_approve') return aiApproveProposal(copy, env, userId, decodeURIComponent(decisionMatch[1]), true)
+        return error('validation_failed', 400, request, env, 'Decision must be approve, reject, or always_approve')
+    }
+    const proposalMatch = url.pathname.match(/^\/v2\/ai\/(?:proposals|action-proposals)\/([^/]+)\/(approve|reject)$/)
+    if (proposalMatch && request.method === 'POST') {
+        const proposalId = decodeURIComponent(proposalMatch[1])
+        return proposalMatch[2] === 'approve'
+            ? aiApproveProposal(request, env, userId, proposalId)
+            : aiRejectProposal(request, env, userId, proposalId)
+    }
+    if (proposalPath && request.method === 'GET') {
+        const proposals = await listAiProposals(env, userId, url.searchParams.get('status') || '')
+        return json({ result: true, proposals, items: proposals }, 200, request, env)
+    }
+    if (proposalPath && request.method === 'POST') return aiCreateActionProposal(request, env, userId)
+    return null
+}
+
 const aiMessageText = value => {
     if (value === null || value === undefined) return ''
     if (typeof value === 'string' || typeof value === 'number') return String(value)
@@ -3309,6 +3733,9 @@ const aiRoute = async (request, env, url) => {
 
     if (url.pathname === '/v2/ai/description-draft' && request.method === 'POST')
         return aiDescriptionDraft(request, env, userId)
+
+    const actionsResponse = await aiActionsRoute(request, env, userId, url)
+    if (actionsResponse) return actionsResponse
 
     const chatMatch = url.pathname.match(/^\/v2\/ai\/(?:chats|history)\/([^/]+)$/)
     if (chatMatch && request.method === 'GET') {
@@ -3703,6 +4130,8 @@ const deleteUserData = async (env, userId) => {
         env.DB.prepare('DELETE FROM ai_messages WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_chats WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_usage_counters WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM ai_action_proposals WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM ai_standing_approvals WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId)
     ]
     if (env.DB.batch) return env.DB.batch(statements)

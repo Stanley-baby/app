@@ -45,6 +45,7 @@ export default function AiPage() {
     const [sources, setSources] = useState([])
     const [suggestions, setSuggestions] = useState(null)
     const [draft, setDraft] = useState(null)
+    const [proposals, setProposals] = useState([])
     const [input, setInput] = useState('')
     const [error, setError] = useState('')
     const [loading, setLoading] = useState(true)
@@ -67,6 +68,13 @@ export default function AiPage() {
             const items = historyBody.items || historyBody.chats || []
             setConfig(configBody)
             setChats(items)
+            try {
+                const proposalsResponse = await fetch(API_ORIGIN + '/v2/ai/action-proposals?status=pending', { credentials: 'include' })
+                if (proposalsResponse.ok) {
+                    const proposalsBody = await readJson(proposalsResponse)
+                    setProposals(proposalsBody.items || proposalsBody.proposals || [])
+                }
+            } catch {}
             if (!raindropId && items[0]) {
                 setChatId(items[0].id)
                 setMessages(items[0].messages || [])
@@ -181,15 +189,16 @@ export default function AiPage() {
         setApplyingDraft(true)
         setError('')
         try {
-            const response = await fetch(API_ORIGIN + '/v1/raindrop/' + encodeURIComponent(raindropId), {
-                method: 'PUT',
+            const response = await fetch(API_ORIGIN + '/v2/ai/action-proposals', {
+                method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ description: draft })
+                body: JSON.stringify({ tool: 'bookmark_update', bookmarkId: raindropId, changes: { description: draft } })
             })
             const body = await readJson(response)
-            if (!response.ok) throw new Error(body.errorMessage || 'Description could not be saved')
-            postToHost({ type: 'ai:tool-called', tool: { name: 'bookmark_update', raindropId } })
+            if (!response.ok) throw new Error(body.errorMessage || 'Description proposal could not be created')
+            if (body.proposal?.status === 'pending') setProposals(current => [body.proposal, ...current])
+            if (body.item) postToHost({ type: 'ai:tool-called', tool: { name: 'bookmark_update', raindropId } })
             setDraft(null)
         } catch (draftError) {
             setError(draftError.message)
@@ -197,6 +206,25 @@ export default function AiPage() {
             setApplyingDraft(false)
         }
     }, [applyingDraft, draft, raindropId])
+
+    const decideProposal = useCallback(async (proposalId, decision) => {
+        setError('')
+        try {
+            const response = await fetch(API_ORIGIN + '/v2/ai/action-proposals/' + encodeURIComponent(proposalId) + '/decision', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ decision })
+            })
+            const body = await readJson(response)
+            if (!response.ok) throw new Error(body.errorMessage || 'AI Action Proposal could not be decided')
+            if (body.proposal?.status === 'pending') setProposals(current => current.map(item => item.id === proposalId ? body.proposal : item))
+            else setProposals(current => current.filter(item => item.id !== proposalId))
+            if (body.item) postToHost({ type: 'ai:tool-called', tool: { name: body.proposal?.tool || 'bookmark_update', raindropId: body.proposal?.bookmarkId } })
+        } catch (proposalError) {
+            setError(proposalError.message)
+        }
+    }, [])
 
     const deleteHistory = useCallback(async () => {
         const response = await fetch(API_ORIGIN + '/v2/ai/history', { method: 'DELETE', credentials: 'include' })
@@ -284,6 +312,18 @@ export default function AiPage() {
                                 <button type='button' onClick={() => setDraft(null)} disabled={applyingDraft}>{t.s('cancel')}</button>
                             </div>
                         </div>}
+                    </section>}
+                    {proposals.length > 0 && <section className={s.proposals} aria-label='AI Action Proposals'>
+                        <strong>AI Action Proposals</strong>
+                        {proposals.map(proposal => <div className={s.proposal} key={proposal.id}>
+                            <span>{proposal.tool} · Bookmark {proposal.bookmarkId}</span>
+                            <code>{JSON.stringify(proposal.changes || proposal.payload || {})}</code>
+                            <div className={s.draftActions}>
+                                <button type='button' onClick={() => decideProposal(proposal.id, 'approve')}>Approve</button>
+                                {proposal.collectionId > 0 && <button type='button' onClick={() => decideProposal(proposal.id, 'always_approve')}>Always approve for Collection</button>}
+                                <button type='button' onClick={() => decideProposal(proposal.id, 'reject')}>Reject</button>
+                            </div>
+                        </div>)}
                     </section>}
                     <div className={s.messages} aria-live='polite'>
                         {messages.map((message, index) => <p className={message.role === 'user' ? s.user : s.assistant} key={message.id || index}>{message.content}</p>)}

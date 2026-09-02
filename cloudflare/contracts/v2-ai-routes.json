@@ -32,6 +32,66 @@
             "responses": [200, 400, 401, 404, 429, 503]
         },
         {
+            "method": "GET",
+            "path": "/v2/ai/tools",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "POST",
+            "path": "/v2/ai/tools",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v2/ai/tools/execute",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404]
+        },
+        {
+            "method": "GET",
+            "path": "/v2/ai/action-proposals",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "POST",
+            "path": "/v2/ai/action-proposals",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403, 404, 503]
+        },
+        {
+            "method": "GET",
+            "path": "/v2/ai/action-proposals/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
+            "method": "POST",
+            "path": "/v2/ai/action-proposals/:id/decision",
+            "authentication": "required",
+            "responses": [200, 400, 401, 403, 404, 409]
+        },
+        {
+            "method": "GET",
+            "path": "/v2/ai/approvals",
+            "authentication": "required",
+            "responses": [200, 401]
+        },
+        {
+            "method": "POST",
+            "path": "/v2/ai/approvals",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403, 404, 503]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v2/ai/approvals/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404]
+        },
+        {
             "method": "POST",
             "path": "/v2/ai/chat",
             "authentication": "required",

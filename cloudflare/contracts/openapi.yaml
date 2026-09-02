@@ -1446,6 +1446,124 @@ paths:
         '404': {description: Bookmark is not owned by or shared with the User.}
         '429': {description: Daily AI quota exhausted.}
         '503': {description: Workers AI is unavailable.}
+  /v2/ai/tools:
+    get:
+      responses:
+        '200': {description: Authenticated AI Tool catalog and active Standing AI Approvals.}
+        '401': {description: Login required.}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tool]
+              properties:
+                tool: {type: string, enum: [bookmark_read, bookmark_search, bookmark_context, bookmark_update, bookmark_delete]}
+                bookmarkId: {type: integer, minimum: 1}
+                query: {type: string, maxLength: 8000}
+      responses:
+        '200': {description: Authorized AI read-tool result; write tools are rejected here.}
+        '400': {description: Invalid or write-only AI Tool request.}
+        '401': {description: Login required.}
+        '404': {description: Bookmark is not owned by or shared with the User.}
+  /v2/ai/action-proposals:
+    get:
+      parameters:
+        - in: query
+          name: status
+          schema: {type: string, enum: [pending, applied, rejected, failed]}
+      responses:
+        '200': {description: User-scoped AI Action Proposals.}
+        '401': {description: Login required.}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tool, bookmarkId]
+              properties:
+                tool: {type: string, enum: [bookmark_update, bookmark_delete]}
+                bookmarkId: {type: integer, minimum: 1}
+                changes: {type: object}
+      responses:
+        '201': {description: Pending AI Action Proposal requiring an explicit decision.}
+        '400': {description: Invalid AI Tool or change payload.}
+        '401': {description: Login required.}
+        '403': {description: Editor access is required for the Bookmark.}
+        '404': {description: Bookmark or destination Collection is not available.}
+        '503': {description: Proposal storage is temporarily unavailable.}
+  /v2/ai/action-proposals/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: User-scoped AI Action Proposal.}
+        '401': {description: Login required.}
+        '404': {description: Proposal is not owned by the User.}
+  /v2/ai/action-proposals/{id}/decision:
+    post:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: {type: string, enum: [approve, reject, always_approve]}
+      responses:
+        '200': {description: AI Action Proposal approved, rejected, or applied under a scoped Standing AI Approval.}
+        '400': {description: Invalid decision or Standing AI Approval scope.}
+        '401': {description: Login required.}
+        '403': {description: Current Bookmark permissions no longer allow the action.}
+        '404': {description: Proposal is not owned by the User.}
+        '409': {description: Proposal is no longer pending or its target changed.}
+  /v2/ai/approvals:
+    get:
+      responses:
+        '200': {description: Active user-scoped Standing AI Approvals.}
+        '401': {description: Login required.}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tool, collectionId]
+              properties:
+                tool: {type: string, enum: [bookmark_update, bookmark_delete]}
+                collectionId: {type: integer, minimum: 1}
+      responses:
+        '201': {description: Standing AI Approval limited to this User, Tool, and Collection.}
+        '400': {description: Invalid write Tool or Collection.}
+        '401': {description: Login required.}
+        '403': {description: Editor access is required for the Collection.}
+        '404': {description: Collection is not available.}
+        '503': {description: Approval storage is temporarily unavailable.}
+  /v2/ai/approvals/{id}:
+    delete:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Standing AI Approval revoked.}
+        '401': {description: Login required.}
+        '404': {description: Approval is not owned by the User or already revoked.}
   /v2/ai/chat:
     post:
       requestBody:

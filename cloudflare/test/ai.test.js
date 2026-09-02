@@ -27,6 +27,8 @@ class AiDatabase {
         this.globalUsage = []
         this.bookmarks = []
         this.collections = []
+        this.proposals = []
+        this.standingApprovals = []
         this.quotaFailure = false
         this.nextMessageId = 1
     }
@@ -46,11 +48,14 @@ class AiDatabase {
             if (this.quotaFailure && sql.includes('ai_usage')) throw new Error('quota storage unavailable')
             if (sql.includes('FROM ai_usage_counters')) return this.usage.find(item => item.user_id === values[0] && item.window_start === values[1]) || null
             if (sql.includes('FROM ai_global_usage_counters')) return this.globalUsage.find(item => item.window_start === values[0]) || null
+            if (sql.includes('FROM ai_action_proposals WHERE id')) return this.proposals.find(item => item.id === values[0] && item.user_id === values[1]) || null
+            if (sql.includes('FROM ai_standing_approvals') && sql.includes('id = ?') && sql.includes('user_id = ?') && !sql.includes('tool_name = ?')) return this.standingApprovals.find(item => item.id === values[0] && item.user_id === values[1]) || null
+            if (sql.includes('FROM ai_standing_approvals') && sql.includes('user_id = ?') && !sql.includes('WHERE id')) return this.standingApprovals.find(item =>
+                item.user_id === values[0] && item.tool_name === values[1] && item.collection_id === values[2] && (!sql.includes('revoked_at IS NULL') || !item.revoked_at)) || null
             if (sql.includes('FROM ai_chats WHERE id')) return this.chats.find(item => item.id === values[0] && item.user_id === values[1]) || null
             if (sql.includes('FROM bookmarks WHERE id'))
                 return this.bookmarks.find(item => item.id === values[0] && item.user_id === values[1] && !item.removed_at) || null
-            if (sql.includes('FROM collections WHERE id'))
-                return this.collections.find(item => item.id === values[0] && item.user_id === values[1] && !item.removed_at) || null
+            if (sql.includes('FROM collections WHERE id')) return this.collections.find(item => item.id === values[0] && !item.removed_at) || null
             if (sql.includes('FROM bookmarks')) return null
             return null
         }
@@ -58,6 +63,9 @@ class AiDatabase {
             if (sql.includes('FROM bookmarks b')) return { results: this.bookmarks }
             if (sql.includes('FROM bookmarks WHERE user_id')) return { results: this.bookmarks.filter(item => item.user_id === values[0] && !item.removed_at) }
             if (sql.includes('FROM collections WHERE user_id')) return { results: this.collections.filter(item => item.user_id === values[0] && !item.removed_at) }
+            if (sql.includes('FROM ai_action_proposals WHERE user_id')) return { results: this.proposals.filter(item =>
+                item.user_id === values[0] && (!values[1] || item.status === values[1])) }
+            if (sql.includes('FROM ai_standing_approvals WHERE user_id')) return { results: this.standingApprovals.filter(item => item.user_id === values[0] && !item.revoked_at) }
             if (sql.includes('FROM ai_chats WHERE user_id')) return { results: this.chats.filter(item => item.user_id === values[0]).map(item => ({ ...item })) }
             if (sql.includes('FROM ai_messages WHERE chat_id')) return { results: this.messages.filter(item => item.chat_id === values[0] && item.user_id === values[1]).sort((a, b) => b.created_at - a.created_at).slice(0, values[2]).map(item => ({ ...item })) }
             if (sql.includes('FROM ai_messages') && sql.includes('user_id = ?')) return { results: this.messages.filter(item => item.user_id === values[0]).map(item => ({ ...item })) }
@@ -103,6 +111,48 @@ class AiDatabase {
             if (sql.includes('INSERT INTO ai_chats')) {
                 this.chats.push({ id: values[0], user_id: values[1], title: values[2], created_at: values[3], updated_at: values[4] })
                 return { meta: { changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO ai_action_proposals')) {
+                this.proposals.push({ id: values[0], user_id: values[1], tool_name: values[2], action: values[3], bookmark_id: values[4], collection_id: values[5], payload: values[6], status: 'pending', result: null, error_code: null, error_message: null, created_at: values.at(-2), updated_at: values.at(-1), decided_at: null })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO ai_standing_approvals')) {
+                const existing = this.standingApprovals.find(item => item.user_id === values[1] && item.tool_name === values[2] && item.collection_id === values[3])
+                if (existing) return { meta: { changes: 0 } }
+                this.standingApprovals.push({ id: values[0], user_id: values[1], tool_name: values[2], collection_id: values[3], created_at: values[4], updated_at: values[5], revoked_at: null })
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE ai_action_proposals SET status = \'applied\'')) {
+                const row = this.proposals.find(item => item.id === values[3] && item.user_id === values[4])
+                if (row) { row.status = 'applied'; row.result = values[0]; row.updated_at = values[1]; row.decided_at = values[2] }
+                return { meta: { changes: row ? 1 : 0 } }
+            }
+            if (sql.includes('UPDATE ai_action_proposals SET status = \'rejected\'')) {
+                const row = this.proposals.find(item => item.id === values[2] && item.user_id === values[3])
+                if (row) { row.status = 'rejected'; row.updated_at = values[0]; row.decided_at = values[1] }
+                return { meta: { changes: row ? 1 : 0 } }
+            }
+            if (sql.includes('UPDATE ai_standing_approvals SET revoked_at = NULL')) {
+                const row = this.standingApprovals.find(item => item.id === values[1] && item.user_id === values[2])
+                if (row) { row.revoked_at = null; row.updated_at = values[0] }
+                return { meta: { changes: row ? 1 : 0 } }
+            }
+            if (sql.includes('UPDATE ai_standing_approvals SET revoked_at = ?')) {
+                const row = this.standingApprovals.find(item => item.id === values[2] && item.user_id === values[3])
+                if (row) { row.revoked_at = values[0]; row.updated_at = values[1] }
+                return { meta: { changes: row ? 1 : 0 } }
+            }
+            if (sql.includes('UPDATE bookmarks SET url = ?')) {
+                const row = this.bookmarks.find(item => item.id === values[10] && item.user_id === values[11])
+                if (row) {
+                    Object.assign(row, { url: values[0], title: values[1], description: values[2], note: values[3], collection_id: values[4], tags: values[5], highlights: values[6], removed_at: values[7], removed_batch: values[8], updated_at: values[9] })
+                }
+                return { meta: { changes: row ? 1 : 0 } }
+            }
+            if (sql.includes('UPDATE bookmarks SET removed_at = ?')) {
+                const row = this.bookmarks.find(item => item.id === values[3] && item.user_id === values[4])
+                if (row) Object.assign(row, { removed_at: values[0], removed_batch: values[1], updated_at: values[2] })
+                return { meta: { changes: row ? 1 : 0 } }
             }
             if (sql.includes('INSERT INTO ai_messages')) {
                 this.messages.push({ id: this.nextMessageId++, chat_id: values[0], user_id: values[1], role: values[2], content: values[3], created_at: values[4] })
@@ -412,4 +462,93 @@ test('legacy Bookmark suggestion endpoints return the client-compatible item sha
     assert.equal(created.status, 200)
     const createdBody = await created.json()
     assert.ok(Array.isArray(createdBody.item.collections))
+})
+
+test('AI read tools return only authorized context and catalog writes as proposals', async () => {
+    const { env, db } = await environment()
+    db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/owned', title: 'Owned bookmark', description: 'Visible', note: '', highlights: '[]', tags: '[]' })
+    db.bookmarks.push({ id: 8, user_id: 2, url: 'https://example.test/private', title: 'Private bookmark', description: 'Hidden', note: '', highlights: '[]', tags: '[]' })
+
+    const toolsResponse = await worker.fetch(request('/v2/ai/tools'), env)
+    assert.equal(toolsResponse.status, 200)
+    const toolsBody = await toolsResponse.json()
+    assert.deepEqual(toolsBody.tools.map(item => item.name), ['bookmark_read', 'bookmark_update', 'bookmark_delete'])
+    assert.equal(toolsBody.tools.find(item => item.name === 'bookmark_update').approval, 'action_proposal')
+
+    const readResponse = await worker.fetch(request('/v2/ai/tools/execute', { method: 'POST', body: JSON.stringify({ tool: 'bookmark_read', bookmarkId: 7 }) }), env)
+    assert.equal(readResponse.status, 200)
+    assert.deepEqual((await readResponse.json()).package.bookmarks.map(item => item.title), ['Owned bookmark'])
+    const privateRead = await worker.fetch(request('/v2/ai/tools', { method: 'POST', body: JSON.stringify({ tool: 'bookmark_read', bookmarkId: 8 }) }), env)
+    assert.equal(privateRead.status, 404)
+})
+
+test('AI writes remain pending until approved or rejected', async () => {
+    const { env, db } = await environment()
+    db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/action', title: 'Action bookmark', description: 'Original', note: '', highlights: '[]', tags: '[]', collection_id: -1, created_at: Date.now(), updated_at: Date.now() })
+
+    const created = await worker.fetch(request('/v2/ai/action-proposals', {
+        method: 'POST', body: JSON.stringify({ tool: 'bookmark_update', bookmarkId: 7, changes: { description: 'Proposed description' } })
+    }), env)
+    assert.equal(created.status, 201)
+    const proposal = (await created.json()).proposal
+    assert.equal(proposal.status, 'pending')
+    assert.equal(db.bookmarks[0].description, 'Original')
+    const getApprove = await worker.fetch(request('/v2/ai/action-proposals/' + proposal.id + '/approve'), env)
+    assert.equal(getApprove.status, 404)
+    assert.equal(db.bookmarks[0].description, 'Original')
+
+    const rejected = await worker.fetch(request('/v2/ai/action-proposals/' + proposal.id + '/reject', { method: 'POST' }), env)
+    assert.equal(rejected.status, 200)
+    assert.equal((await rejected.json()).proposal.status, 'rejected')
+    assert.equal(db.bookmarks[0].description, 'Original')
+
+    const approvedCreate = await worker.fetch(request('/v2/ai/proposals', {
+        method: 'POST', body: JSON.stringify({ tool: 'bookmark_update', bookmarkId: 7, payload: { description: 'Approved description' } })
+    }), env)
+    assert.equal(approvedCreate.status, 201)
+    const approvedProposal = (await approvedCreate.json()).proposal
+    const approved = await worker.fetch(request('/v2/ai/proposals/' + approvedProposal.id + '/decision', {
+        method: 'POST', body: JSON.stringify({ decision: 'approve' })
+    }), env)
+    assert.equal(approved.status, 200)
+    assert.equal((await approved.json()).proposal.status, 'applied')
+    assert.equal(db.bookmarks[0].description, 'Approved description')
+
+    const deleteCreate = await worker.fetch(request('/v2/ai/action-proposals', {
+        method: 'POST', body: JSON.stringify({ tool: 'bookmark_delete', bookmarkId: 7 })
+    }), env)
+    assert.equal(deleteCreate.status, 201)
+    const deleteProposal = (await deleteCreate.json()).proposal
+    const deleted = await worker.fetch(request('/v2/ai/action-proposals/' + deleteProposal.id + '/approve', { method: 'POST' }), env)
+    assert.equal(deleted.status, 200)
+    assert.equal(db.bookmarks[0].removed_at > 0, true)
+})
+
+test('standing AI approval is scoped to one tool and Collection and can be revoked', async () => {
+    const { env, db } = await environment()
+    db.collections.push({ id: 3, user_id: 1, title: 'Scoped collection', parent_id: null, removed_at: null })
+    db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/action', title: 'Action bookmark', description: 'Original', note: '', highlights: '[]', tags: '[]', collection_id: 3, created_at: Date.now(), updated_at: Date.now() })
+
+    const grant = await worker.fetch(request('/v2/ai/approvals', {
+        method: 'POST', body: JSON.stringify({ tool: 'bookmark_update', collectionId: 3 })
+    }), env)
+    assert.equal(grant.status, 201)
+    const approval = (await grant.json()).approval
+    assert.equal(approval.collectionId, 3)
+
+    const auto = await worker.fetch(request('/v2/ai/action-proposals', {
+        method: 'POST', body: JSON.stringify({ tool: 'bookmark_update', bookmarkId: 7, changes: { title: 'Auto-approved' } })
+    }), env)
+    assert.equal(auto.status, 200)
+    assert.equal((await auto.json()).autoApproved, true)
+    assert.equal(db.bookmarks[0].title, 'Auto-approved')
+
+    const revoked = await worker.fetch(request('/v2/ai/approvals/' + approval.id, { method: 'DELETE' }), env)
+    assert.equal(revoked.status, 200)
+    assert.equal((await revoked.json()).revoked, true)
+    const afterRevoke = await worker.fetch(request('/v2/ai/action-proposals', {
+        method: 'POST', body: JSON.stringify({ tool: 'bookmark_update', bookmarkId: 7, changes: { title: 'Needs approval' } })
+    }), env)
+    assert.equal(afterRevoke.status, 201)
+    assert.equal((await afterRevoke.json()).proposal.status, 'pending')
 })

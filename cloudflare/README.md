@@ -37,6 +37,14 @@ and Highlights only; Snapshots and attachments are excluded by default. Drafts
 are returned for editing and are never written until the User explicitly applies
 them.
 
+AI Tools are exposed through `GET /v2/ai/tools` and authorized read execution on
+`POST /v2/ai/tools`. Bookmark writes use `POST /v2/ai/action-proposals` and
+remain pending until `POST /v2/ai/action-proposals/:id/decision` receives
+`approve`, `reject`, or `always_approve`. Standing approvals are stored per User,
+write Tool, and Collection through `/v2/ai/approvals`; deleting an approval
+revokes it. Every application rechecks the current Bookmark and Collection role,
+so a standing approval never bypasses normal permissions.
+
 Each profile also sets `USAGE_QUOTA_DAILY` (default `1000`) and
 `RATE_LIMIT_PER_MINUTE` (default `60`). Authenticated write requests consume
 one daily usage unit; every `/v1` route uses a per-user or privacy-preserving
