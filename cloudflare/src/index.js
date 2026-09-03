@@ -3688,19 +3688,19 @@ const aiToolCall = value => {
 const aiExecuteToolCall = async (request, env, userId, value) => {
     const call = aiToolCall(value)
     if (!call) return null
-    const args = call.args
+    const args = call.args.arguments && typeof call.args.arguments === 'object' ? call.args.arguments : call.args
     if (call.name === 'bookmark_read') {
-        const bookmarkId = args.bookmarkId ?? args.raindropId
-        const query = String(args.query || args.message || '').trim()
+        const bookmarkId = args.bookmarkId ?? args.bookmark_id ?? args.raindropId ?? args.raindrop_id
+        const query = String(args.query || args.search || args.message || '').trim()
         if (bookmarkId === undefined && !query) return { name: call.name, status: 'rejected', error: 'validation_failed' }
         const context = await aiBookmarkContext(env, userId, bookmarkId, query)
         if (context.error) return { name: call.name, status: 'rejected', error: context.error }
         return { name: call.name, status: 'completed', bookmarks: context.items || [], sources: context.sources || [] }
     }
 
-    const bookmarkId = args.bookmarkId ?? args.raindropId ?? args.resourceId
+    const bookmarkId = args.bookmarkId ?? args.bookmark_id ?? args.raindropId ?? args.raindrop_id ?? args.resourceId ?? args.resource_id
     const body = { tool: call.name, bookmarkId }
-    if (call.name === 'bookmark_update') body.changes = args.changes ?? args.input ?? args.patch ?? {}
+    if (call.name === 'bookmark_update') body.changes = args.changes ?? args.input ?? args.patch ?? args.payload?.changes ?? {}
     const actionRequest = new Request(request.url, {
         method: 'POST',
         headers: { Cookie: request.headers.get('Cookie') || '', 'Content-Type': 'application/json' },
