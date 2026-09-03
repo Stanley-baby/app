@@ -545,6 +545,30 @@ test('AI chat returns authorized tool results to the model for a continuation ro
     assert.deepEqual(continuation.tools.map(item => item.name), ['bookmark_read', 'bookmark_update', 'bookmark_delete'])
 })
 
+test('AI chat merges streamed tool-call argument fragments before execution', async () => {
+    const { env, db, calls } = await environment()
+    db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/owned', title: 'Fragmented bookmark', description: 'Visible', note: '', highlights: '[]', tags: [] })
+    env.AI.run = async (...args) => {
+        calls.push(args)
+        if (calls.length === 1) return new ReadableStream({
+            start(controller) {
+                controller.enqueue(new TextEncoder().encode('data: {"tool_calls":[{"index":0,"name":"bookmark_read"}]}\n\n'))
+                controller.enqueue(new TextEncoder().encode('data: {"tool_calls":[{"index":0,"arguments":"{\\"bookmarkId\\":7}"}]}\n\n'))
+                controller.close()
+            }
+        })
+        return new Response('data: {"response":"Fragment read complete"}\n\n', {
+            headers: { 'Content-Type': 'text/event-stream' }
+        })
+    }
+
+    const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Read bookmark 7' }) }), env)
+    assert.equal(response.status, 200)
+    assert.match(await response.text(), /Fragment read complete/)
+    assert.equal(calls.length, 2)
+    assert.match(calls[1][1].messages.find(item => item.role === 'tool').content, /Fragmented bookmark/)
+})
+
 test('AI writes remain pending until approved or rejected', async () => {
     const { env, db } = await environment()
     db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/action', title: 'Action bookmark', description: 'Original', note: '', highlights: '[]', tags: '[]', collection_id: -1, created_at: Date.now(), updated_at: Date.now() })

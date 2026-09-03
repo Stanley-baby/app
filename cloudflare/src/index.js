@@ -3685,6 +3685,48 @@ const aiToolCall = value => {
     return { id: String(value.id || ''), name, args: args && typeof args === 'object' ? args : {} }
 }
 
+const aiToolCallKey = value => {
+    if (value?.id !== undefined && value.id !== null && value.id !== '') return 'id:' + value.id
+    if (value?.index !== undefined && value.index !== null) return 'index:' + value.index
+    if (value?.function?.name || value?.name) return 'name:' + (value.function?.name || value.name)
+    return 'anonymous'
+}
+
+const mergeAiToolArguments = (current, next) => {
+    if (typeof current === 'string' || typeof next === 'string') return String(current || '') + String(next || '')
+    if (current && typeof current === 'object' && next && typeof next === 'object') return { ...current, ...next }
+    return next === undefined ? current : next
+}
+
+const mergeAiToolCall = (current, next) => {
+    const currentFunction = current?.function && typeof current.function === 'object' ? current.function : {}
+    const nextFunction = next?.function && typeof next.function === 'object' ? next.function : {}
+    const currentArguments = currentFunction.arguments ?? current?.arguments
+    const nextArguments = nextFunction.arguments ?? next?.arguments
+    const merged = { ...current, ...next }
+    if (current?.function || next?.function) {
+        merged.function = { ...currentFunction, ...nextFunction }
+        if (currentArguments !== undefined || nextArguments !== undefined)
+            merged.function.arguments = mergeAiToolArguments(currentArguments, nextArguments)
+    } else if (currentArguments !== undefined || nextArguments !== undefined) {
+        merged.arguments = mergeAiToolArguments(currentArguments, nextArguments)
+    }
+    return merged
+}
+
+const mergeAiToolCalls = values => {
+    const merged = new Map()
+    let anonymousKey = null
+    for (const value of values) {
+        if (!value || typeof value !== 'object') continue
+        let key = aiToolCallKey(value)
+        if (key === 'anonymous' && anonymousKey) key = anonymousKey
+        else if (key.startsWith('name:') && value.id === undefined && value.index === undefined) anonymousKey = key
+        merged.set(key, mergeAiToolCall(merged.get(key), value))
+    }
+    return [...merged.values()]
+}
+
 const aiExecuteToolCall = async (request, env, userId, value) => {
     const call = aiToolCall(value)
     if (!call) return null
@@ -3975,35 +4017,36 @@ const aiChat = async (request, env, userId) => {
                     try {
                         for (;;) {
                             const roundExecutions = []
+                            const roundToolValues = []
                             for await (const event of aiResultChunks(pendingResult)) {
-                                const toolCalls = [...(event.toolCalls || []), ...(event.toolCalled ? [event.toolCalled] : [])]
-                                for (const rawTool of toolCalls) {
-                                    const key = String(rawTool?.id || JSON.stringify(rawTool))
-                                    if (handledTools.has(key)) continue
-                                    handledTools.add(key)
-                                    const toolCalled = confirmedAiTool(rawTool, context)
-                                    if (toolCalled) {
-                                        enqueue(aiEvent({ chatId: chat.id, toolCalled }))
-                                        continue
-                                    }
-                                    const call = aiToolCall(rawTool)
-                                    if (!call) continue
-                                    const executed = await aiExecuteToolCall(request, env, userId, rawTool)
-                                    roundExecutions.push({ call, executed })
-                                    if (executed) {
-                                        const eventValue = {
-                                            name: executed.name,
-                                            status: executed.status,
-                                            ...(executed.error ? { error: executed.error } : {}),
-                                            ...(executed.raindropId ? { raindropId: executed.raindropId } : {}),
-                                            ...(executed.proposal ? { proposal: executed.proposal } : {})
-                                        }
-                                        enqueue(aiEvent({ chatId: chat.id, toolCalled: eventValue, ...(executed.proposal ? { proposal: executed.proposal } : {}) }))
-                                    }
-                                }
+                                roundToolValues.push(...(event.toolCalls || []), ...(event.toolCalled ? [event.toolCalled] : []))
                                 if (event.delta) {
                                     assistant += event.delta
                                     enqueue(aiEvent({ chatId: chat.id, delta: event.delta }))
+                                }
+                            }
+                            for (const rawTool of mergeAiToolCalls(roundToolValues)) {
+                                const key = String(rawTool?.id || JSON.stringify(rawTool))
+                                if (handledTools.has(key)) continue
+                                handledTools.add(key)
+                                const toolCalled = confirmedAiTool(rawTool, context)
+                                if (toolCalled) {
+                                    enqueue(aiEvent({ chatId: chat.id, toolCalled }))
+                                    continue
+                                }
+                                const call = aiToolCall(rawTool)
+                                if (!call) continue
+                                const executed = await aiExecuteToolCall(request, env, userId, rawTool)
+                                roundExecutions.push({ call, executed })
+                                if (executed) {
+                                    const eventValue = {
+                                        name: executed.name,
+                                        status: executed.status,
+                                        ...(executed.error ? { error: executed.error } : {}),
+                                        ...(executed.raindropId ? { raindropId: executed.raindropId } : {}),
+                                        ...(executed.proposal ? { proposal: executed.proposal } : {})
+                                    }
+                                    enqueue(aiEvent({ chatId: chat.id, toolCalled: eventValue, ...(executed.proposal ? { proposal: executed.proposal } : {}) }))
                                 }
                             }
                             if (!roundExecutions.length || toolRound >= 2) break
