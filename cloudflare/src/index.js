@@ -3221,7 +3221,8 @@ const aiModelTools = [
             properties: {
                 bookmarkId: { type: 'integer', minimum: 1 },
                 query: { type: 'string', maxLength: aiMessageLimit }
-            }
+            },
+            required: ['bookmarkId']
         }
     },
     {
