@@ -1,4 +1,4 @@
-/* global Symbol, Uint8Array */
+/* global Symbol, Uint8Array, WeakMap */
 
 const encoder = new TextEncoder()
 const sessionDays = 30
@@ -33,7 +33,12 @@ const backupMaxBytes = 16 * 1024 * 1024
 const backupUserPageSize = 100
 const backupProviders = new Set(['gdrive', 'onedrive', 'webdav'])
 
-const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
+const requestIds = new WeakMap()
+
+const requestId = request => {
+    if (!requestIds.has(request)) requestIds.set(request, String(Date.now()) + '-' + Math.random())
+    return requestIds.get(request)
+}
 
 const addCorsHeaders = (headers, request, env) => {
     const origin = request.headers.get('Origin')
@@ -414,6 +419,16 @@ const requestedSyncVersion = url => {
     if (value === undefined || value === '') return null
     const version = Number(value)
     return Number.isSafeInteger(version) && version >= 0 ? version : -1
+}
+
+const requestedPage = url => {
+    const pageValue = url.searchParams.get('page')
+    const perpageValue = url.searchParams.get('perpage')
+    const page = pageValue === null || pageValue === '' ? 0 : Number(pageValue)
+    const perpage = perpageValue === null || perpageValue === '' ? 40 : Number(perpageValue)
+    if (!Number.isSafeInteger(page) || page < 0 || !Number.isSafeInteger(perpage) || perpage < 1 || perpage > 100)
+        return null
+    return { page, perpage }
 }
 
 const changedBookmarks = async (env, userId, since) => {
@@ -834,11 +849,18 @@ const enqueueTask = async (env, task) => {
         await env.TASK_QUEUE.send(taskPayload(task))
         return true
     } catch {
+        const now = Date.now()
         try {
             await env.DB.prepare(`UPDATE background_tasks SET status = 'dead_letter', progress = 0,
                 error_code = ?, error_message = ?, updated_at = ?, completed_at = ? WHERE id = ?`).bind(
-                'task_enqueue_failed', 'Background task could not be queued', Date.now(), Date.now(), task.id).run()
+                'task_enqueue_failed', 'Background task could not be queued', now, now, task.id).run()
         } catch {}
+        await recordAlert(env, taskRequest(env, task.id), {
+            userId: task.user_id,
+            kind: 'task_enqueue_failed',
+            severity: 'error',
+            metadata: { taskId: String(task.id), type: String(task.type || 'unknown') }
+        })
         return false
     }
 }
@@ -2632,7 +2654,7 @@ const getSession = async (request, env) => {
     return { ...session, token }
 }
 
-const auditRequestId = () => randomToken(16)
+const auditRequestId = request => requestId(request)
 
 const auditRoute = request => {
     const pathname = new URL(request.url).pathname
@@ -2658,6 +2680,8 @@ const auditRoute = request => {
         [/^\/v1\/collection\/\d+\/(?:transfer|ownership|published-snapshots|snapshots)(?:\/[^/]+)?$/, '/v1/collection/:id/sharing'],
         [/^\/v1\/content\/[^/]+\/publish$/, '/v1/content/:id/publish'],
         [/^\/v1\/import\/[^/]+(?:\/(?:review|commit|status|retry|mappings))?$/, '/v1/import/:id'],
+        [/^\/v1\/public\/collections?\/\d+(?:\/[^/]+)?$/, '/v1/public/collections/:id/:slug'],
+        [/^\/v1\/public\/content\/[^/]+$/, '/v1/public/content/:id'],
         [/^\/v1\/raindrop\/\d+\/suggest$/, '/v1/raindrop/:id/suggest'],
         [/^\/v2\/ai\/(?:action-proposals|proposals)\/[^/]+\/(?:approve|reject|decision)$/, '/v2/ai/action-proposals/:id/decision'],
         [/^\/v2\/ai\/(?:action-proposals|proposals)\/[^/]+$/, '/v2/ai/action-proposals/:id'],
@@ -2679,6 +2703,7 @@ const auditRoute = request => {
         '/v1/import', '/v1/import/preflight',
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
         '/v1/raindrop/file', '/v1/raindrop/suggest', '/v1/content/upload', '/v1/collaborators/join',
+        '/v1/public/collections', '/v1/public/content',
         '/v2/ai/config', '/v2/ai/provider', '/v2/ai/provider/test', '/v2/ai/quota', '/v2/ai/chat', '/v2/ai/history', '/v2/ai/chats',
         '/v2/ai/context', '/v2/ai/suggestions', '/v2/ai/description-draft', '/v2/ai/tools',
         '/v2/ai/tools/execute', '/v2/ai/action-proposals', '/v2/ai/proposals', '/v2/ai/approvals', '/v2/ai/standing-approvals'
@@ -2987,13 +3012,29 @@ const consumeAiQuota = async (env, request, userId) => {
             return { allowed: false, scope: !globalChanged ? 'global' : 'user', used: previous, limit, remaining: 0, resetAt, retryAfterMs, global: { used: globalPrevious, limit: globalLimit, remaining: 0 } }
         }
 
+        const userUsed = previous + 1
+        const globalUsed = globalPrevious + 1
+        const userThreshold = Math.max(1, Math.ceil(limit * 0.8))
+        if (previous < userThreshold && userUsed >= userThreshold)
+            await recordAlert(env, request, {
+                userId,
+                kind: 'ai_quota_threshold',
+                metadata: { scope: 'user', limit, used: userUsed, remaining: Math.max(0, limit - userUsed) }
+            })
+        const globalThreshold = Math.max(1, Math.ceil(globalLimit * 0.8))
+        if (globalPrevious < globalThreshold && globalUsed >= globalThreshold)
+            await recordAlert(env, request, {
+                kind: 'ai_quota_threshold',
+                metadata: { scope: 'global', limit: globalLimit, used: globalUsed, remaining: Math.max(0, globalLimit - globalUsed) }
+            })
+
         return {
             allowed: true,
-            used: previous + 1,
+            used: userUsed,
             limit,
-            remaining: Math.max(0, limit - previous - 1),
+            remaining: Math.max(0, limit - userUsed),
             resetAt,
-            global: { used: globalPrevious + 1, limit: globalLimit, remaining: Math.max(0, globalLimit - globalPrevious - 1) }
+            global: { used: globalUsed, limit: globalLimit, remaining: Math.max(0, globalLimit - globalUsed) }
         }
     } catch {
         return { error: 'ai_quota_unavailable', resetAt }
@@ -4431,21 +4472,24 @@ const sendVerification = async (env, email, token) => {
         return false
 
     const confirmationUrl = new URL('/account/confirm/' + token, env.APP_ORIGIN).toString()
-    const response = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-            Authorization: 'Bearer ' + env.RESEND_API_KEY,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            from: env.MAIL_FROM,
-            to: [email],
-            subject: 'Confirm your Raindrop Beta email',
-            html: '<p>Confirm your email to finish setting up Raindrop Beta.</p><p><a href="' + confirmationUrl + '">Confirm email</a></p>'
+    try {
+        const response = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+                Authorization: 'Bearer ' + env.RESEND_API_KEY,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                from: env.MAIL_FROM,
+                to: [email],
+                subject: 'Confirm your Raindrop Beta email',
+                html: '<p>Confirm your email to finish setting up Raindrop Beta.</p><p><a href="' + confirmationUrl + '">Confirm email</a></p>'
+            })
         })
-    })
-
-    return response.ok
+        return response.ok
+    } catch {
+        return false
+    }
 }
 
 const requiresVerification = pathname =>
@@ -4636,6 +4680,7 @@ export default {
     async fetch(request, env) {
         const url = new URL(request.url)
 
+        try {
         if (request.method === 'OPTIONS')
             return cors(request, env)
 
@@ -5844,6 +5889,9 @@ export default {
                     const marker = await bookmarkSync(env, session.user_id)
                     return json({ result: true, items, count: items.length, ...marker, fromVersion: since }, 200, request, env)
                 }
+                const page = requestedPage(url)
+                if (!page)
+                    return error('validation_failed', 400, request, env, 'Page must be non-negative and perpage must be between 1 and 100')
                 const spaceId = Number(listMatch[1])
                 const search = String(url.searchParams.get('search') || '').replace(/^"|"$/g, '')
                 let where = 'user_id = ?'
@@ -5870,7 +5918,9 @@ export default {
                 }
                 const rows = await env.DB.prepare(`SELECT id, user_id, url, title, description, note, cover, collection_id, tags, highlights, removed_at, created_at, updated_at, change_version FROM bookmarks WHERE ${where} ORDER BY updated_at DESC`).bind(...values).all()
                 const marker = await bookmarkSync(env, session.user_id)
-                return json({ result: true, items: rows.results.map(bookmarkItem), count: rows.results.length, ...marker }, 200, request, env)
+                const allItems = rows.results.map(bookmarkItem)
+                const start = page.page * page.perpage
+                return json({ result: true, items: allItems.slice(start, start + page.perpage), count: allItems.length, page: page.page, perpage: page.perpage, ...marker }, 200, request, env)
             }
 
             if (url.pathname === '/v1/raindrops/changes' && request.method === 'GET') {
@@ -6099,6 +6149,16 @@ export default {
         }
 
         return error('not_found', 404, request, env)
+        } catch (failure) {
+            const code = /^[a-z0-9_:-]{1,64}$/i.test(String(failure?.code || '')) ? String(failure.code) : 'unhandled_exception'
+            await recordAlert(env, request, {
+                userId: null,
+                kind: 'api_error',
+                severity: 'error',
+                metadata: { code, status: Number.isInteger(failure?.status) ? failure.status : 500 }
+            })
+            return error('internal_error', 500, request, env, 'Internal server error')
+        }
     },
 
     async queue(batch, env) {
@@ -6141,6 +6201,8 @@ export default {
         ]))
     }
 }
+
+export { auditRoute }
 
 export {
     createContentTask,

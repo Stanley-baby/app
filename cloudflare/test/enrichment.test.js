@@ -1,3 +1,5 @@
+/* global globalThis */
+
 import assert from 'node:assert/strict'
 import { webcrypto } from 'node:crypto'
 import test from 'node:test'
@@ -26,6 +28,7 @@ class TaskDatabase {
             completed_at: task.completed_at || null
         }] : []
         this.bookmarks = [{ id: 1, user_id: 1, title: '', description: '', removed_at: null }]
+        this.alerts = []
         this.nextId = 1
     }
 
@@ -72,8 +75,11 @@ class TaskDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE background_tasks SET status = \'dead_letter\'')) {
-                const [retryCount, errorCode, errorMessage, updatedAt, completedAt, id] = values
-                const task = this.tasks.find(item => item.id === id && item.status === 'processing')
+                const enqueueFailure = values.length === 5
+                const [retryCount, errorCode, errorMessage, updatedAt, completedAt, id] = enqueueFailure
+                    ? [0, values[0], values[1], values[2], values[3], values[4]]
+                    : values
+                const task = this.tasks.find(item => item.id === id && ['queued', 'processing', 'retrying'].includes(item.status))
                 if (!task) return { meta: { changes: 0 } }
                 Object.assign(task, { status: 'dead_letter', progress: 0, retry_count: retryCount, error_code: errorCode, error_message: errorMessage, next_retry_at: null, updated_at: updatedAt, completed_at: completedAt })
                 return { meta: { changes: 1 } }
@@ -92,6 +98,10 @@ class TaskDatabase {
                 if (!bookmark.title) bookmark.title = title
                 if (!bookmark.description) bookmark.description = description
                 bookmark.updated_at = updatedAt
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('INSERT INTO alerts')) {
+                this.alerts.push({ kind: values[2], severity: values[3], route: values[4], metadata: values[6] })
                 return { meta: { changes: 1 } }
             }
             return { meta: { changes: 1 } }
@@ -195,6 +205,19 @@ test('metadata task creation is idempotent and queue payload contains no URL or 
     assert.equal(first.id, second.id)
     assert.equal(db.tasks.length, 1)
     assert.deepEqual(sent, [{ taskId: first.id, type: 'metadata_enrichment' }])
+})
+
+test('queue publish failures create a redacted operational alert', async () => {
+    const db = new TaskDatabase()
+    const env = {
+        ...baseEnv(db),
+        TASK_QUEUE: { send: async () => { throw new Error('queue failed with page secret') } }
+    }
+    const task = await createMetadataTask(env, null, 1, 1, 'https://public.example.test/page-secret')
+    assert.equal(task.status, 'dead_letter')
+    assert.equal(db.alerts.length, 1)
+    assert.equal(db.alerts[0].kind, 'task_enqueue_failed')
+    assert.doesNotMatch(JSON.stringify(db.alerts[0]), /page-secret|queue failed/i)
 })
 
 test('queue follows redirects, enriches empty fields, and records success', async t => {

@@ -5,553 +5,601 @@
             "method": "POST",
             "path": "/v1/auth/email/signup",
             "authentication": "none",
-            "responses": [201, 400, 403, 409, 502, 503]
+            "responses": [201, 400, 403, 409, 502, 503, 500]
         },
         {
             "method": "POST",
             "path": "/v1/auth/email/login",
             "authentication": "none",
-            "responses": [200, 401, 503]
+            "responses": [200, 401, 503, 500]
         },
         {
             "method": "POST",
             "path": "/v1/auth/email/confirm",
             "authentication": "none",
-            "responses": [200, 400, 503]
+            "responses": [200, 400, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/auth/google",
             "authentication": "none",
-            "responses": [302, 503]
+            "responses": [302, 503, 500]
         },
         {
             "method": "POST",
             "path": "/v1/auth/google",
             "authentication": "none",
-            "responses": [200, 403, 503]
+            "responses": [200, 403, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/auth/google/callback",
             "authentication": "none",
-            "responses": [303, 503]
+            "responses": [303, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/sessions",
             "authentication": "required",
-            "responses": [200, 401]
+            "responses": [200, 401, 500]
         },
         {
             "method": "GET",
             "path": "/v1/collections/all",
             "authentication": "required",
-            "responses": [200, 401]
+            "responses": [200, 401, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/collections",
             "authentication": "required",
-            "responses": [200, 400, 401, 404]
+            "responses": [200, 400, 401, 404, 500]
         },
         {
             "method": "PUT",
             "path": "/v1/collections/clean",
             "authentication": "required",
-            "responses": [200, 401]
+            "responses": [200, 401, 500]
         },
         {
             "method": "POST",
             "path": "/v1/collection",
             "authentication": "required",
-            "responses": [201, 400, 401, 404]
+            "responses": [201, 400, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/collection/:id",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "PUT",
             "path": "/v1/collection/:id",
             "authentication": "required",
-            "responses": [200, 400, 401, 404]
+            "responses": [200, 400, 401, 404, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/collection/:id",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/tags/:collectionId",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/tags/recent",
             "authentication": "required",
-            "responses": [200, 401]
+            "responses": [200, 401, 500]
         },
         {
             "method": "PUT",
             "path": "/v1/tags/0",
             "authentication": "required",
-            "responses": [200, 400, 401, 409]
+            "responses": [200, 400, 401, 409, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/tag",
             "authentication": "required",
-            "responses": [200, 400, 401, 409]
+            "responses": [200, 400, 401, 409, 500]
         },
         {
             "method": "GET",
             "path": "/v1/filters/:collectionId",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/raindrop",
             "authentication": "required",
-            "responses": [201, 400, 401]
+            "responses": [201, 400, 401, 500]
         },
         {
             "method": "POST",
             "path": "/v1/raindrop/suggest",
             "authentication": "required",
-            "responses": [200, 400, 401, 404, 429]
+            "responses": [200, 400, 401, 404, 429, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrop/:id/suggest",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrop/:id",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "PUT",
             "path": "/v1/raindrop/:id",
             "authentication": "required",
-            "responses": [200, 400, 401, 404]
+            "responses": [200, 400, 401, 404, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/raindrop/:id",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrop/:id/highlights.txt",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrop/:id/highlights.csv",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/raindrops",
             "authentication": "required",
-            "responses": [201, 400, 401]
+            "responses": [201, 400, 401, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrops/:collectionId",
             "authentication": "required",
-            "responses": [200, 400, 401]
+            "responses": [200, 400, 401, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/raindrops/:collectionId",
             "authentication": "required",
-            "responses": [200, 400, 401, 404]
+            "responses": [200, 400, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrops/:collectionId/export.html",
             "authentication": "required",
-            "responses": [200, 400, 401, 403, 404, 413, 503]
+            "responses": [200, 400, 401, 403, 404, 413, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrops/:collectionId/export.csv",
             "authentication": "required",
-            "responses": [200, 400, 401, 403, 404, 413, 503]
+            "responses": [200, 400, 401, 403, 404, 413, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrops/:collectionId/export.txt",
             "authentication": "required",
-            "responses": [200, 400, 401, 403, 404, 413, 503]
+            "responses": [200, 400, 401, 403, 404, 413, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrops/:collectionId/export.zip",
             "authentication": "required",
-            "responses": [200, 400, 401, 403, 404, 413, 503]
+            "responses": [200, 400, 401, 403, 404, 413, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrops/changes",
             "authentication": "required",
-            "responses": [200, 400, 401]
+            "responses": [200, 400, 401, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backup",
             "authentication": "required",
-            "responses": [202, 401, 403, 503]
+            "responses": [202, 401, 403, 503, 500]
         },
         {
             "method": "POST",
             "path": "/v1/backup",
             "authentication": "required",
-            "responses": [202, 401, 403, 503]
+            "responses": [202, 401, 403, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backups",
             "authentication": "required",
-            "responses": [200, 401, 403]
+            "responses": [200, 401, 403, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backup/connections",
             "authentication": "required",
-            "responses": [200, 401, 403]
+            "responses": [200, 401, 403, 500]
         },
         {
             "method": "POST",
             "path": "/v1/backup/connections",
             "authentication": "required",
-            "responses": [201, 400, 401, 403]
+            "responses": [201, 400, 401, 403, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backup/connections/gdrive/authorize",
             "authentication": "required",
-            "responses": [302, 401, 403, 503]
+            "responses": [302, 401, 403, 503, 500]
         },
         {
             "method": "POST",
             "path": "/v1/backup/connections/:id/default",
             "authentication": "required",
-            "responses": [200, 401, 403, 404]
+            "responses": [200, 401, 403, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backups/:id",
             "authentication": "required",
-            "responses": [200, 401, 403, 404]
+            "responses": [200, 401, 403, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backup/:id/status",
             "authentication": "required",
-            "responses": [200, 401, 403, 404]
+            "responses": [200, 401, 403, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backup/:id.html",
             "authentication": "required",
-            "responses": [200, 401, 403, 404, 409, 503]
+            "responses": [200, 401, 403, 404, 409, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backup/:id.csv",
             "authentication": "required",
-            "responses": [200, 401, 403, 404, 409, 503]
+            "responses": [200, 401, 403, 404, 409, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backup/:id.txt",
             "authentication": "required",
-            "responses": [200, 401, 403, 404, 409, 503]
+            "responses": [200, 401, 403, 404, 409, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/backup/:id.zip",
             "authentication": "required",
-            "responses": [200, 401, 403, 404, 409, 503]
+            "responses": [200, 401, 403, 404, 409, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/collection/:id/lastAction",
             "authentication": "required",
-            "responses": [200, 401]
+            "responses": [200, 401, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/sessions/:id",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/user",
             "authentication": "required",
-            "responses": [200, 401]
+            "responses": [200, 401, 500]
         },
         {
             "method": "GET",
             "path": "/v1/user/quota",
             "authentication": "required",
-            "responses": [200, 401, 429]
+            "responses": [200, 401, 429, 500]
         },
         {
             "method": "GET",
             "path": "/v1/user/connect/google",
             "authentication": "required",
-            "responses": [302, 401, 503]
+            "responses": [302, 401, 503, 500]
         },
         {
             "method": "POST",
             "path": "/v1/user/connect/google/revoke",
             "authentication": "required",
-            "responses": [200, 401, 403, 409]
+            "responses": [200, 401, 403, 409, 500]
         },
         {
             "method": "GET",
             "path": "/v1/user/deletion",
             "authentication": "required",
-            "responses": [200, 401]
+            "responses": [200, 401, 500]
         },
         {
             "method": "POST",
             "path": "/v1/user/deletion",
             "authentication": "required",
-            "responses": [202, 401, 409]
+            "responses": [202, 401, 409, 500]
         },
         {
             "method": "GET",
             "path": "/v1/tasks/:id",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/tasks/:id/status",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/tasks/:id/failure",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/tasks/:id/retry",
             "authentication": "required",
-            "responses": [202, 400, 401, 404, 409]
+            "responses": [202, 400, 401, 404, 409, 500]
         },
         {
             "method": "POST",
             "path": "/v1/import/preflight",
             "authentication": "required",
-            "responses": [201, 400, 401, 413, 503]
+            "responses": [201, 400, 401, 413, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/import",
             "authentication": "required",
-            "responses": [200, 401]
+            "responses": [200, 401, 500]
         },
         {
             "method": "GET",
             "path": "/v1/import/:id",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/import/:id/review",
             "authentication": "required",
-            "responses": [200, 400, 401, 404, 409]
+            "responses": [200, 400, 401, 404, 409, 500]
         },
         {
             "method": "POST",
             "path": "/v1/import/:id/commit",
             "authentication": "required",
-            "responses": [200, 202, 401, 404, 409, 503]
+            "responses": [200, 202, 401, 404, 409, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/import/:id/status",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/import/:id/retry",
             "authentication": "required",
-            "responses": [202, 400, 401, 404, 409]
+            "responses": [202, 400, 401, 404, 409, 500]
         },
         {
             "method": "GET",
             "path": "/v1/import/:id/mappings",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/user/deletion",
             "authentication": "required",
-            "responses": [200, 401]
+            "responses": [200, 401, 500]
         },
         {
             "method": "PUT",
             "path": "/v1/raindrop/file",
             "authentication": "required",
-            "responses": [201, 400, 401, 403, 413, 503]
+            "responses": [201, 400, 401, 403, 413, 503, 500]
         },
         {
             "method": "POST",
             "path": "/v1/content/upload",
             "authentication": "required",
-            "responses": [201, 400, 401, 403, 404, 413, 503]
+            "responses": [201, 400, 401, 403, 404, 413, 503, 500]
         },
         {
             "method": "POST",
             "path": "/v1/raindrop/:id/attachments",
             "authentication": "required",
-            "responses": [201, 400, 401, 403, 404, 413, 503]
+            "responses": [201, 400, 401, 403, 404, 413, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrop/:id/content",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/raindrop/:id/capture",
             "authentication": "required",
-            "responses": [202, 400, 401, 403, 404, 503]
+            "responses": [202, 400, 401, 403, 404, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrop/:id/capture",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/raindrop/:id/capture/status",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/content/:id",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/content/:id/download",
             "authentication": "required",
-            "responses": [200, 401, 404, 409, 503]
+            "responses": [200, 401, 404, 409, 503, 500]
         },
         {
             "method": "GET",
             "path": "/v1/collection/:id/sharing",
             "authentication": "required",
-            "responses": [200, 401, 404]
+            "responses": [200, 401, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/collection/:id/sharing",
             "authentication": "required",
-            "responses": [201, 400, 401, 403, 404]
+            "responses": [201, 400, 401, 403, 404, 500]
         },
         {
             "method": "PUT",
             "path": "/v1/collection/:id/sharing/:userId",
             "authentication": "required",
-            "responses": [200, 400, 401, 403, 404]
+            "responses": [200, 400, 401, 403, 404, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/collection/:id/sharing/:userId",
             "authentication": "required",
-            "responses": [200, 401, 403, 404]
+            "responses": [200, 401, 403, 404, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/collection/:id/sharing",
             "authentication": "required",
-            "responses": [200, 401, 403, 404]
+            "responses": [200, 401, 403, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/collaborators/join",
             "authentication": "required",
-            "responses": [200, 400, 401, 404]
+            "responses": [200, 400, 401, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/collection/:id/transfer",
             "authentication": "required",
-            "responses": [200, 400, 401, 403, 404]
+            "responses": [200, 400, 401, 403, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/collection/:id/published-snapshots",
             "authentication": "required",
-            "responses": [200, 401, 403, 404]
+            "responses": [200, 401, 403, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/collection/:id/published-snapshots",
             "authentication": "required",
-            "responses": [200, 400, 401, 403, 404, 409]
+            "responses": [200, 400, 401, 403, 404, 409, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/collection/:id/published-snapshots/:contentId",
             "authentication": "required",
-            "responses": [200, 401, 403, 404]
+            "responses": [200, 401, 403, 404, 500]
         },
         {
             "method": "POST",
             "path": "/v1/content/:id/publish",
             "authentication": "required",
-            "responses": [200, 400, 401, 403, 404, 409]
+            "responses": [200, 400, 401, 403, 404, 409, 500]
         },
         {
             "method": "DELETE",
             "path": "/v1/content/:id/publish",
             "authentication": "required",
-            "responses": [200, 401, 403, 404]
+            "responses": [200, 401, 403, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/public/collections/:id/:slug",
             "authentication": "none",
-            "responses": [200, 404]
+            "responses": [200, 404, 500]
         },
         {
             "method": "GET",
             "path": "/v1/public/content/:id",
             "authentication": "none",
-            "responses": [200, 404]
+            "responses": [200, 404, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/auth/logout",
+            "authentication": "none",
+            "responses": [200, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/user/remove",
+            "authentication": "required",
+            "responses": [200, 401, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/user/stats",
+            "authentication": "required",
+            "responses": [200, 401, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/user/send_email_confirm",
+            "authentication": "required",
+            "responses": [200, 401, 502, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/collaborators/join",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404, 500]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/content/upload",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403, 404, 413, 503, 500]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/raindrop/:id/attachments",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403, 404, 413, 503, 500]
+        },
+        {
+            "method": "PATCH",
+            "path": "/v1/collection/:id/sharing/:userId",
+            "authentication": "required",
+            "responses": [200, 400, 401, 403, 404, 500]
         }
     ]
 }

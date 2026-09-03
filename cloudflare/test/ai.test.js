@@ -30,6 +30,7 @@ class AiDatabase {
         this.proposals = []
         this.standingApprovals = []
         this.providers = []
+        this.alerts = []
         this.quotaFailure = false
         this.nextMessageId = 1
     }
@@ -199,6 +200,10 @@ class AiDatabase {
                 this.providers = this.providers.filter(item => item.user_id !== values[0])
                 return { meta: { changes: before - this.providers.length } }
             }
+            if (sql.includes('INSERT INTO alerts')) {
+                this.alerts.push({ kind: values[2], severity: values[3], route: values[4], metadata: values[6] })
+                return { meta: { changes: 1 } }
+            }
             return { meta: { changes: 1 } }
         }
         return { bind: (...next) => { values = next; return { first, all, run } } }
@@ -312,6 +317,20 @@ test('AI global quota does not charge denied users', async () => {
     assert.equal((await second.json()).quota.scope, 'global')
     assert.deepEqual(db.usage.map(item => [item.user_id, item.units]), [[1, 1]])
     assert.equal(db.globalUsage[0].units, 1)
+})
+
+test('AI capacity thresholds emit content-free alerts', async () => {
+    const { env, db } = await environment()
+    const response = await worker.fetch(request('/v2/ai/chat', {
+        method: 'POST',
+        body: JSON.stringify({ message: 'Threshold check' })
+    }), env)
+    assert.equal(response.status, 200)
+    await response.text()
+    const threshold = db.alerts.find(item => item.kind === 'ai_quota_threshold')
+    assert.ok(threshold)
+    assert.match(threshold.metadata, /"scope":"user"/)
+    assert.doesNotMatch(threshold.metadata, /Threshold check|Bookmark|attachment/i)
 })
 
 test('AI grounds natural-language prompts in authorized bookmark search results', async () => {

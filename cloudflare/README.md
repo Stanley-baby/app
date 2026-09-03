@@ -22,7 +22,11 @@ put the actual D1 ID in the matching block, and set each secret with the same
 the Web build. Apply the D1 migrations before deploying the Worker.
 
 The client build selects the same profiles with `--env environment=preview`.
-The contract test skeleton runs with `npm run test:contract`.
+The versioned `/v1` route manifest and request fixtures live in
+`contracts/v1-routes.json` and `contracts/v1-fixtures.json`; the contract suite
+checks their OpenAPI operations and QA dimensions. Run it with
+`npm run test:contract`. The alert taxonomy and recovery steps are in
+`OPERATIONS_RUNBOOK.md`.
 
 The AI page is served at `/ai` and is embedded by the existing Stella iframe.
 Authenticated clients use `/v2/ai/config`, `/v2/ai/context`, `/v2/ai/chat` (SSE),
