@@ -2679,7 +2679,7 @@ const auditRoute = request => {
         '/v1/import', '/v1/import/preflight',
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
         '/v1/raindrop/file', '/v1/raindrop/suggest', '/v1/content/upload', '/v1/collaborators/join',
-        '/v2/ai/config', '/v2/ai/quota', '/v2/ai/chat', '/v2/ai/history', '/v2/ai/chats',
+        '/v2/ai/config', '/v2/ai/provider', '/v2/ai/provider/test', '/v2/ai/quota', '/v2/ai/chat', '/v2/ai/history', '/v2/ai/chats',
         '/v2/ai/context', '/v2/ai/suggestions', '/v2/ai/description-draft', '/v2/ai/tools',
         '/v2/ai/tools/execute', '/v2/ai/action-proposals', '/v2/ai/proposals', '/v2/ai/approvals', '/v2/ai/standing-approvals'
     ])
@@ -2774,6 +2774,121 @@ const aiHistoryLimit = 50
 const aiDailyLimit = env => integerEnv(env, ['AI_DAILY_QUOTA'], 20)
 const aiGlobalDailyLimit = env => integerEnv(env, ['AI_GLOBAL_DAILY_QUOTA'], 10000)
 const aiModel = env => String(env.AI_MODEL || aiDefaultModel)
+const aiProviderModelLimit = 200
+const aiProviderKeyLimit = 4096
+
+const aiProviderFailure = (code, message) => Object.assign(new Error(message), { providerCode: code })
+
+const aiProviderEndpoint = value => {
+    const checked = validateFetchableUrl(value)
+    if (!checked.ok || checked.url.protocol !== 'https:' || checked.url.search || checked.url.hash)
+        return { ok: false, code: 'ai_provider_endpoint_invalid', message: 'Custom AI Provider must use a public HTTPS endpoint' }
+    const url = checked.url
+    const path = url.pathname.replace(/\/+$/, '')
+    url.pathname = path.endsWith('/chat/completions') ? path : path + '/chat/completions'
+    return { ok: true, url }
+}
+
+const aiProviderRedirect = value => {
+    const checked = validateFetchableUrl(value)
+    if (!checked.ok || checked.url.protocol !== 'https:')
+        return { ok: false }
+    return checked
+}
+
+const aiProviderFetch = async (env, endpoint, init = {}) => {
+    let current = endpoint
+    const origin = endpoint.origin
+    for (let redirect = 0; redirect <= metadataMaxRedirects; redirect++) {
+        try { await resolvePublicAddress(current, env) } catch {
+            throw aiProviderFailure('ai_provider_endpoint_invalid', 'Custom AI Provider endpoint is not public')
+        }
+        let response
+        try {
+            response = await fetch(current.toString(), { ...init, redirect: 'manual' })
+        } catch {
+            throw aiProviderFailure('ai_provider_unavailable', 'Custom AI Provider is unavailable')
+        }
+        if (response.status < 300 || response.status >= 400) return response
+        const location = response.headers.get('Location')
+        if (!location || redirect === metadataMaxRedirects)
+            throw aiProviderFailure('ai_provider_redirect_invalid', 'Custom AI Provider returned an unsafe redirect')
+        let target
+        try { target = new URL(location, current) } catch {
+            throw aiProviderFailure('ai_provider_redirect_invalid', 'Custom AI Provider returned an unsafe redirect')
+        }
+        const checked = aiProviderRedirect(target.toString())
+        if (!checked.ok || checked.url.origin !== origin)
+            throw aiProviderFailure('ai_provider_redirect_invalid', 'Custom AI Provider returned an unsafe redirect')
+        current = checked.url
+    }
+    throw aiProviderFailure('ai_provider_redirect_invalid', 'Custom AI Provider returned an unsafe redirect')
+}
+
+const aiProviderTools = tools => (Array.isArray(tools) ? tools : []).map(tool => ({
+    type: 'function',
+    function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters
+    }
+}))
+
+const aiProviderProbe = (model, apiKey) => ({
+    model,
+    messages: [{ role: 'user', content: 'Reply with OK only.' }],
+    max_tokens: 1,
+    stream: true,
+    headers: {
+        Authorization: 'Bearer ' + apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream'
+    }
+})
+
+const testAiProvider = async (env, endpointValue, modelValue, apiKey) => {
+    const endpoint = aiProviderEndpoint(endpointValue)
+    if (!endpoint.ok) throw aiProviderFailure(endpoint.code, endpoint.message)
+    const model = String(modelValue || '').trim()
+    if (!model || model.length > aiProviderModelLimit)
+        throw aiProviderFailure('validation_failed', 'Custom AI Provider model is required')
+    const probe = aiProviderProbe(model, apiKey)
+    const response = await aiProviderFetch(env, endpoint.url, {
+        method: 'POST',
+        headers: probe.headers,
+        body: JSON.stringify({ model: probe.model, messages: probe.messages, max_tokens: probe.max_tokens, stream: probe.stream })
+    })
+    if (!response.ok) throw aiProviderFailure('ai_provider_rejected', 'Custom AI Provider rejected the connection test')
+    if (!String(response.headers.get('Content-Type') || '').toLowerCase().includes('text/event-stream'))
+        throw aiProviderFailure('ai_provider_invalid_response', 'Custom AI Provider does not support streaming')
+    let streamed = false
+    for await (const event of aiResultChunks(response)) {
+        if (event.delta || event.toolCalled || event.toolCalls?.length) streamed = true
+    }
+    if (!streamed) throw aiProviderFailure('ai_provider_invalid_response', 'Custom AI Provider returned an invalid stream')
+    return true
+}
+
+const selectAiProvider = async (env, userId) => {
+    try {
+        return await env.DB.prepare(`SELECT endpoint, model, encrypted_api_key, verified_at
+            FROM ai_providers WHERE user_id = ?`).bind(userId).first()
+    } catch {
+        return null
+    }
+}
+
+const publicAiProvider = row => row ? {
+    configured: true,
+    endpoint: String(row.endpoint || ''),
+    model: String(row.model || ''),
+    verifiedAt: taskDate(row.verified_at)
+} : { configured: false, endpoint: '', model: '', verifiedAt: null }
+
+const customAiMessages = (messages, tools) => ({
+    messages,
+    ...(tools?.length ? { tools: aiProviderTools(tools), tool_choice: 'auto' } : {})
+})
 
 const aiWindow = now => {
     const windowStart = Math.floor(now / usageWindowMs) * usageWindowMs
@@ -3126,20 +3241,27 @@ const aiSuggestions = async (request, env, userId, { legacy = false, bookmarkId 
         return error('ai_context_unavailable', 503, request, env, 'AI context is temporarily unavailable')
     }
     const language = aiLanguage(data.language || data.lang, request)
+    const providerName = String(data.provider || 'workers_ai').trim().toLowerCase()
+    if (!['workers_ai', 'custom'].includes(providerName))
+        return error('validation_failed', 400, request, env, 'Choose Workers AI or Custom AI Provider')
+    const customProvider = providerName === 'custom' ? await selectAiProvider(env, userId) : null
+    if (providerName === 'custom' && !customProvider)
+        return error('ai_provider_not_configured', 409, request, env, 'Configure and test a Custom AI Provider before using it')
     let output = ''
     let quota
-    if (env.AI?.run) {
-        const charged = await aiQuota(request, env, userId)
-        if (charged.response) return charged.response
-        quota = charged.quota
+    if (providerName === 'custom' || env.AI?.run) {
+        const charged = providerName === 'custom' ? null : await aiQuota(request, env, userId)
+        if (charged?.response) return charged.response
+        quota = charged?.quota
         try {
-            const result = await runWorkersAi(env, [
+            const result = await runAiProvider(env, providerName, [
                 { role: 'system', content: `Return JSON only in ${language}. Use only the supplied authorized Bookmark and candidate IDs/tags.` },
                 { role: 'user', content: JSON.stringify({ task: 'suggest_collection_and_tags', bookmark: context.items?.[0] || bookmark, candidates }) }
-            ])
+            ], {}, customProvider)
             output = await aiCollectText(result)
         } catch {
-            if (!legacy) return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
+            if (!legacy) return error('ai_provider_unavailable', 503, request, env,
+                providerName === 'custom' ? 'Custom AI Provider is temporarily unavailable. Choose another provider.' : 'Workers AI is temporarily unavailable. Retry the request.')
         }
     } else if (!legacy) {
         return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
@@ -3166,20 +3288,29 @@ const aiDescriptionDraft = async (request, env, userId) => {
     const value = data.raindropId
     const context = await aiBookmarkContext(env, userId, value)
     if (context.error || !context.items.length) return error('bookmark_not_found', 404, request, env, 'Bookmark was not found')
-    if (!env.AI?.run) return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
-    const charged = await aiQuota(request, env, userId)
-    if (charged.response) return charged.response
+    const providerName = String(data.provider || 'workers_ai').trim().toLowerCase()
+    if (!['workers_ai', 'custom'].includes(providerName))
+        return error('validation_failed', 400, request, env, 'Choose Workers AI or Custom AI Provider')
+    const customProvider = providerName === 'custom' ? await selectAiProvider(env, userId) : null
+    if (providerName === 'custom' && !customProvider)
+        return error('ai_provider_not_configured', 409, request, env, 'Configure and test a Custom AI Provider before using it')
+    if (providerName === 'workers_ai' && !env.AI?.run)
+        return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
+    const charged = providerName === 'custom' ? null : await aiQuota(request, env, userId)
+    if (charged?.response) return charged.response
     const language = aiLanguage(data.language || data.lang, request)
     try {
-        const result = await runWorkersAi(env, [
+        const result = await runAiProvider(env, providerName, [
             { role: 'system', content: `Write one concise Bookmark description in ${language}. Return only the proposed description text. Do not change any Bookmark.` },
             { role: 'user', content: context.text }
-        ])
+        ], {}, customProvider)
         const draft = (await aiCollectText(result)).slice(0, 10000).trim()
-        if (!draft) return error('ai_provider_unavailable', 503, request, env, 'Workers AI returned an empty description')
-        return json({ result: true, language, draft, sources: context.sources, quota: { ...charged.quota, resetAt: new Date(charged.quota.resetAt).toISOString() } }, 200, request, env)
+        if (!draft) return error('ai_provider_unavailable', 503, request, env, providerName === 'custom' ? 'Custom AI Provider returned an empty description' : 'Workers AI returned an empty description')
+        return json({ result: true, language, draft, sources: context.sources,
+            ...(charged ? { quota: { ...charged.quota, resetAt: new Date(charged.quota.resetAt).toISOString() } } : {}) }, 200, request, env)
     } catch {
-        return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
+        return error('ai_provider_unavailable', 503, request, env,
+            providerName === 'custom' ? 'Custom AI Provider is temporarily unavailable. Choose another provider.' : 'Workers AI is temporarily unavailable. Retry the request.')
     }
 }
 
@@ -3686,8 +3817,8 @@ const aiToolCall = value => {
 }
 
 const aiToolCallKey = value => {
-    if (value?.id !== undefined && value.id !== null && value.id !== '') return 'id:' + value.id
     if (value?.index !== undefined && value.index !== null) return 'index:' + value.index
+    if (value?.id !== undefined && value.id !== null && value.id !== '') return 'id:' + value.id
     if (value?.function?.name || value?.name) return 'name:' + (value.function?.name || value.name)
     return 'anonymous'
 }
@@ -3772,7 +3903,8 @@ const aiResultEvent = value => {
     if (typeof value === 'string' || typeof value === 'number') return { delta: String(value) }
     if (!value || typeof value !== 'object') return { delta: '' }
     const tool = value.toolCalled || value.tool_called
-    const toolCalls = value.toolCalls || value.tool_calls
+    const choice = value.choices?.[0]
+    const toolCalls = value.toolCalls || value.tool_calls || choice?.delta?.tool_calls || choice?.message?.tool_calls
     return {
         delta: aiMessageText(value),
         ...(tool ? { toolCalled: tool } : {}),
@@ -3827,6 +3959,35 @@ const runWorkersAi = async (env, messages, options = {}) => {
     return result
 }
 
+const runCustomAi = async (env, provider, messages, options = {}) => {
+    let credentials
+    try { credentials = await decryptCredentials(env, provider.encrypted_api_key) } catch {
+        throw aiProviderFailure('ai_provider_unavailable', 'Custom AI Provider credentials are unavailable')
+    }
+    const endpoint = aiProviderEndpoint(provider.endpoint)
+    if (!endpoint.ok || !credentials?.apiKey)
+        throw aiProviderFailure('ai_provider_unavailable', 'Custom AI Provider is not configured')
+    const payload = {
+        model: String(provider.model || ''),
+        ...customAiMessages(messages, options.tools),
+        stream: true
+    }
+    const response = await aiProviderFetch(env, endpoint.url, {
+        method: 'POST',
+        headers: {
+            Authorization: 'Bearer ' + credentials.apiKey,
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream'
+        },
+        body: JSON.stringify(payload)
+    })
+    if (!response.ok) throw aiProviderFailure('ai_provider_rejected', 'Custom AI Provider rejected the request')
+    return response
+}
+
+const runAiProvider = async (env, providerName, messages, options = {}, provider = null) =>
+    providerName === 'custom' ? runCustomAi(env, provider, messages, options) : runWorkersAi(env, messages, options)
+
 const aiEvent = value => 'data: ' + JSON.stringify(value) + '\n\n'
 
 const confirmedAiTool = (value, context) => {
@@ -3852,20 +4013,96 @@ const aiAuth = async (request, env) => {
     }
 }
 
+const aiProviderRoute = async (request, env, userId, url) => {
+    if (url.pathname === '/v2/ai/provider' && request.method === 'GET') {
+        const provider = await selectAiProvider(env, userId)
+        return json({ result: true, provider: 'custom', custom: publicAiProvider(provider) }, 200, request, env)
+    }
+
+    if (url.pathname === '/v2/ai/provider/test' && request.method === 'POST') {
+        const { data: rawData } = await readBody(request)
+        const data = rawData && typeof rawData === 'object' ? rawData : {}
+        const endpoint = String(data.endpoint || data.url || '').trim()
+        const model = String(data.model || '').trim()
+        const apiKey = String(data.apiKey || data.api_key || '').trim()
+        if (!endpoint || !model || !apiKey || apiKey.length > aiProviderKeyLimit)
+            return error('validation_failed', 400, request, env, 'Provide an endpoint, model, and API key')
+        try {
+            await testAiProvider(env, endpoint, model, apiKey)
+            await recordAudit(env, request, { userId, action: 'ai.provider.tested', resourceType: 'ai_provider', outcome: 'success' })
+            const normalized = aiProviderEndpoint(endpoint)
+            return json({ result: true, provider: 'custom', verified: true, endpoint: normalized.url.toString(), model }, 200, request, env)
+        } catch (failure) {
+            await recordAudit(env, request, { userId, action: 'ai.provider.tested', resourceType: 'ai_provider', outcome: 'failed' })
+            return error(failure?.providerCode || 'ai_provider_unavailable', 400, request, env,
+                failure?.providerCode === 'ai_provider_endpoint_invalid' || failure?.providerCode === 'ai_provider_redirect_invalid'
+                    ? failure.message : 'Custom AI Provider connection test failed')
+        }
+    }
+
+    if (url.pathname === '/v2/ai/provider' && request.method === 'PUT') {
+        const { data: rawData } = await readBody(request)
+        const data = rawData && typeof rawData === 'object' ? rawData : {}
+        const endpoint = String(data.endpoint || data.url || '').trim()
+        const model = String(data.model || '').trim()
+        const apiKey = String(data.apiKey || data.api_key || '').trim()
+        if (!endpoint || !model || !apiKey || model.length > aiProviderModelLimit || apiKey.length > aiProviderKeyLimit)
+            return error('validation_failed', 400, request, env, 'Provide an endpoint, model, and API key')
+        try {
+            await testAiProvider(env, endpoint, model, apiKey)
+            const normalized = aiProviderEndpoint(endpoint)
+            const now = Date.now()
+            const encrypted = await encryptCredentials(env, { apiKey })
+            await env.DB.prepare(`INSERT INTO ai_providers
+                (user_id, endpoint, model, encrypted_api_key, verified_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET endpoint = excluded.endpoint, model = excluded.model,
+                    encrypted_api_key = excluded.encrypted_api_key, verified_at = excluded.verified_at, updated_at = excluded.updated_at`)
+                .bind(userId, normalized.url.toString(), model, encrypted, now, now, now).run()
+            await recordAudit(env, request, { userId, action: 'ai.provider.saved', resourceType: 'ai_provider', outcome: 'success' })
+            return json({ result: true, provider: 'custom', custom: publicAiProvider({ endpoint: normalized.url.toString(), model, verified_at: now }) }, 200, request, env)
+        } catch (failure) {
+            await recordAudit(env, request, { userId, action: 'ai.provider.saved', resourceType: 'ai_provider', outcome: 'failed' })
+            if (failure?.providerCode)
+                return error(failure.providerCode, 400, request, env,
+                    failure.providerCode === 'ai_provider_endpoint_invalid' || failure.providerCode === 'ai_provider_redirect_invalid'
+                        ? failure.message : 'Custom AI Provider connection test failed')
+            return error('ai_provider_unavailable', 503, request, env, 'Custom AI Provider could not be saved')
+        }
+    }
+
+    if (url.pathname === '/v2/ai/provider' && request.method === 'DELETE') {
+        try {
+            const result = await env.DB.prepare('DELETE FROM ai_providers WHERE user_id = ?').bind(userId).run()
+            await recordAudit(env, request, { userId, action: 'ai.provider.deleted', resourceType: 'ai_provider', outcome: 'success' })
+            return json({ result: true, deleted: Number(result?.meta?.changes || 0) > 0 }, 200, request, env)
+        } catch {
+            return error('ai_provider_unavailable', 503, request, env, 'Custom AI Provider could not be deleted')
+        }
+    }
+    return null
+}
+
 const aiRoute = async (request, env, url) => {
     const auth = await aiAuth(request, env)
     if (auth.response) return auth.response
     const { user_id: userId } = auth.session
 
+    const providerResponse = await aiProviderRoute(request, env, userId, url)
+    if (providerResponse) return providerResponse
+
     if (url.pathname === '/v2/ai/config' && request.method === 'GET') {
         const quota = await readAiQuota(env, userId)
         if (quota.error)
             return error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.')
+        const custom = await selectAiProvider(env, userId)
         return json({
             result: true,
             provider: 'workers_ai',
             model: aiModel(env),
             available: Boolean(env.AI?.run),
+            workersAi: { available: Boolean(env.AI?.run), model: aiModel(env) },
+            custom: publicAiProvider(custom),
             aiPageOrigin: env.AI_PAGE_ORIGIN || null,
             quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() }
         }, 200, request, env)
@@ -3958,6 +4195,9 @@ const aiChat = async (request, env, userId) => {
         return error('validation_failed', 400, request, env, 'Enter a message up to 8,000 characters')
 
     const requestedChatId = String(data.chatId || '').trim()
+    const providerName = String(data.provider || 'workers_ai').trim().toLowerCase()
+    if (!['workers_ai', 'custom'].includes(providerName))
+        return error('validation_failed', 400, request, env, 'Choose Workers AI or Custom AI Provider')
     const now = Date.now()
     let chat
     try {
@@ -3967,12 +4207,15 @@ const aiChat = async (request, env, userId) => {
         const context = await aiBookmarkContext(env, userId, data.raindropId ?? data.bookmarkId, message)
         if (context.error)
             return error(context.error, 404, request, env, 'Bookmark was not found')
-        if (!env.AI || typeof env.AI.run !== 'function')
+        const customProvider = providerName === 'custom' ? await selectAiProvider(env, userId) : null
+        if (providerName === 'custom' && !customProvider)
+            return error('ai_provider_not_configured', 409, request, env, 'Configure and test a Custom AI Provider before using it')
+        if (providerName === 'workers_ai' && (!env.AI || typeof env.AI.run !== 'function'))
             return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
-        const quota = await consumeAiQuota(env, request, userId)
-        if (quota.error)
+        const quota = providerName === 'custom' ? null : await consumeAiQuota(env, request, userId)
+        if (quota?.error)
             return error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.')
-        if (!quota.allowed)
+        if (quota && !quota.allowed)
             return retryableError('ai_quota_exceeded', request, env, 'Daily AI quota reached. Retry after the quota resets.', quota.retryAfterMs, {
                 quota: { used: quota.used, limit: quota.limit, remaining: quota.remaining, resetAt: new Date(quota.resetAt).toISOString(), global: quota.global, scope: quota.scope },
                 resetAt: new Date(quota.resetAt).toISOString(),
@@ -4000,14 +4243,14 @@ const aiChat = async (request, env, userId) => {
         const messages = [{ role: 'system', content: `You are Raindrop AI. Answer in ${language}. Use only the authorized context provided. When context supports an answer, cite the matching Bookmark as [Title](URL). Read tools are permission-checked. Every write tool call creates an AI Action Proposal and waits for User approval.` }, ...history, { role: 'user', content: prompt }]
         await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
             .bind(chat.id, userId, 'user', message, now).run()
-        let result = await runWorkersAi(env, messages, { tools: aiModelTools })
+        let result = await runAiProvider(env, providerName, messages, { tools: aiModelTools }, customProvider)
         const encoderStream = new TextEncoder()
         const stream = new ReadableStream({
             start(controller) {
                 const enqueue = value => {
                     try { controller.enqueue(encoderStream.encode(value)) } catch {}
                 }
-                enqueue(aiEvent({ chatId: chat.id, sources: context.sources, citations: context.sources }))
+                enqueue(aiEvent({ chatId: chat.id, provider: providerName, sources: context.sources, citations: context.sources }))
                 ;(async () => {
                     let assistant = ''
                     const handledTools = new Set()
@@ -4051,14 +4294,26 @@ const aiChat = async (request, env, userId) => {
                             }
                             if (!roundExecutions.length || toolRound >= 2) break
                             const toolMessages = []
-                            for (const { call, executed } of roundExecutions) {
+                            if (providerName === 'custom') {
+                                const toolCalls = roundExecutions.map(({ call }) => ({
+                                    id: call.id || 'call_' + aiActionId(),
+                                    type: 'function',
+                                    function: { name: call.name, arguments: JSON.stringify(call.args || {}) }
+                                }))
+                                toolMessages.push({ role: 'assistant', content: null, tool_calls: toolCalls })
+                                roundExecutions.forEach(({ executed }, index) => toolMessages.push({
+                                    role: 'tool',
+                                    tool_call_id: toolCalls[index].id,
+                                    content: JSON.stringify(executed || { status: 'rejected', error: 'ai_tool_not_available' })
+                                }))
+                            } else for (const { call, executed } of roundExecutions) {
                                 toolMessages.push(
                                     { role: 'assistant', content: JSON.stringify({ name: call.name, arguments: call.args }) },
                                     { role: 'tool', content: JSON.stringify(executed || { name: call.name, status: 'rejected', error: 'ai_tool_not_available' }) }
                                 )
                             }
                             conversationMessages = [...conversationMessages, ...toolMessages]
-                            pendingResult = await runWorkersAi(env, conversationMessages, { tools: aiModelTools })
+                            pendingResult = await runAiProvider(env, providerName, conversationMessages, { tools: aiModelTools }, customProvider)
                             toolRound++
                         }
                         if (assistant)
@@ -4067,10 +4322,13 @@ const aiChat = async (request, env, userId) => {
                         await env.DB.prepare('UPDATE ai_chats SET updated_at = ? WHERE id = ? AND user_id = ?')
                             .bind(Date.now(), chat.id, userId).run()
                         await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'success' })
-                        enqueue(aiEvent({ chatId: chat.id, done: true, sources: context.sources, citations: context.sources, quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } }))
+                        enqueue(aiEvent({ chatId: chat.id, done: true, sources: context.sources, citations: context.sources,
+                            ...(quota ? { quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } } : {}) }))
                     } catch {
                         await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'failed' })
-                        enqueue(aiEvent({ chatId: chat.id, error: 'ai_provider_unavailable', errorMessage: 'Workers AI is temporarily unavailable. Retry the request.' }))
+                        enqueue(aiEvent({ chatId: chat.id, provider: providerName, error: 'ai_provider_unavailable',
+                            errorMessage: providerName === 'custom' ? 'Custom AI Provider failed. Choose Retry Custom or Use Workers AI.' : 'Workers AI is temporarily unavailable. Choose Retry Workers AI.',
+                            fallbackProviders: providerName === 'custom' ? ['workers_ai'] : [] }))
                     } finally {
                         try { controller.close() } catch {}
                     }
@@ -4087,7 +4345,13 @@ const aiChat = async (request, env, userId) => {
         return new Response(stream, { status: 200, headers })
     } catch {
         await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', outcome: 'failed' })
-        return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
+        return json({
+            result: false,
+            error: 'ai_provider_unavailable',
+            errorMessage: providerName === 'custom' ? 'Custom AI Provider failed. Choose Retry Custom or Use Workers AI.' : 'Workers AI is temporarily unavailable. Retry the request.',
+            provider: providerName,
+            fallbackProviders: providerName === 'custom' ? ['workers_ai'] : []
+        }, 503, request, env)
     }
 }
 
@@ -4328,6 +4592,7 @@ const deleteUserData = async (env, userId) => {
         env.DB.prepare('DELETE FROM usage_counters WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_messages WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_chats WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM ai_providers WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_usage_counters WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_action_proposals WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_standing_approvals WHERE user_id = ?').bind(userId),

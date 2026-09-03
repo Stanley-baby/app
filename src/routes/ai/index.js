@@ -49,6 +49,13 @@ export default function AiPage() {
     const [approvals, setApprovals] = useState([])
     const [input, setInput] = useState('')
     const [error, setError] = useState('')
+    const [provider, setProvider] = useState('workers_ai')
+    const [providerEndpoint, setProviderEndpoint] = useState('')
+    const [providerModel, setProviderModel] = useState('')
+    const [providerKey, setProviderKey] = useState('')
+    const [savingProvider, setSavingProvider] = useState(false)
+    const [failedProvider, setFailedProvider] = useState('')
+    const [lastMessage, setLastMessage] = useState('')
     const [loading, setLoading] = useState(true)
     const [sending, setSending] = useState(false)
     const [suggesting, setSuggesting] = useState(false)
@@ -68,6 +75,8 @@ export default function AiPage() {
                 throw new Error(configBody.errorMessage || historyBody.errorMessage || 'AI is unavailable')
             const items = historyBody.items || historyBody.chats || []
             setConfig(configBody)
+            setProviderEndpoint(configBody.custom?.endpoint || '')
+            setProviderModel(configBody.custom?.model || '')
             setChats(items)
             try {
                 const proposalsResponse = await fetch(API_ORIGIN + '/v2/ai/action-proposals?status=pending', { credentials: 'include' })
@@ -103,24 +112,28 @@ export default function AiPage() {
         setError('')
     }, [])
 
-    const send = useCallback(async event => {
-        event.preventDefault()
-        const message = input.trim()
+    const send = useCallback(async (event, requestedProvider = provider, requestedMessage = input) => {
+        event?.preventDefault()
+        const message = requestedMessage.trim()
         if (!message || sending) return
         setInput('')
         setError('')
+        setFailedProvider('')
         setSending(true)
         setMessages(current => [...current, { role: 'user', content: message }])
+        setLastMessage(message)
+        const selectedProvider = requestedProvider
         let assistantStarted = false
         try {
             const response = await fetch(API_ORIGIN + '/v2/ai/chat', {
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chatId, message, raindropId, language: t.currentLang })
+                body: JSON.stringify({ chatId, message, raindropId, language: t.currentLang, provider: selectedProvider })
             })
             if (!response.ok) {
                 const body = await readJson(response)
+                if (body.provider) setFailedProvider(body.provider)
                 const retry = body.retryAt ? ' Retry after ' + new Date(body.retryAt).toLocaleString() + '.' : ''
                 throw new Error((body.errorMessage || 'AI is unavailable') + retry)
             }
@@ -139,7 +152,10 @@ export default function AiPage() {
                         : [...current, { role: 'assistant', content: eventData.delta }])
                     assistantStarted = true
                 }
-                if (eventData.error) setError(eventData.errorMessage || eventData.error)
+                if (eventData.error) {
+                    setFailedProvider(eventData.provider || selectedProvider)
+                    setError(eventData.errorMessage || eventData.error)
+                }
                 if (eventData.quota) setConfig(current => ({ ...current, quota: eventData.quota }))
             })
             await load()
@@ -148,7 +164,52 @@ export default function AiPage() {
         } finally {
             setSending(false)
         }
-    }, [chatId, input, load, raindropId, sending])
+    }, [chatId, input, load, provider, raindropId, sending])
+
+    const saveProvider = useCallback(async () => {
+        if (savingProvider) return
+        setSavingProvider(true)
+        setError('')
+        try {
+            const response = await fetch(API_ORIGIN + '/v2/ai/provider', {
+                method: 'PUT',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ endpoint: providerEndpoint, model: providerModel, apiKey: providerKey })
+            })
+            const body = await readJson(response)
+            if (!response.ok) throw new Error(body.errorMessage || 'Custom AI Provider could not be saved')
+            setConfig(current => ({ ...current, custom: body.custom }))
+            setProviderKey('')
+            setProvider('custom')
+            setFailedProvider('')
+        } catch (saveError) {
+            setError(saveError.message)
+        } finally {
+            setSavingProvider(false)
+        }
+    }, [providerEndpoint, providerKey, providerModel, savingProvider])
+
+    const deleteProvider = useCallback(async () => {
+        setError('')
+        const response = await fetch(API_ORIGIN + '/v2/ai/provider', { method: 'DELETE', credentials: 'include' })
+        const body = await readJson(response)
+        if (!response.ok) {
+            setError(body.errorMessage || 'Custom AI Provider could not be deleted')
+            return
+        }
+        setConfig(current => ({ ...current, custom: { configured: false, endpoint: '', model: '', verifiedAt: null } }))
+        setProvider('workers_ai')
+        setProviderKey('')
+    }, [])
+
+    const chooseProvider = useCallback(value => {
+        setProvider(value)
+        setFailedProvider('')
+        setError('')
+    }, [])
+
+    const providerAvailable = provider === 'custom' ? Boolean(config?.custom?.configured) : Boolean(config?.workersAi?.available ?? config?.available)
 
     const generateSuggestions = useCallback(async () => {
         if (!raindropId || suggesting) return
@@ -159,10 +220,13 @@ export default function AiPage() {
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ raindropId, language: t.currentLang })
+                body: JSON.stringify({ raindropId, language: t.currentLang, provider })
             })
             const body = await readJson(response)
-            if (!response.ok) throw new Error(body.errorMessage || 'Suggestions are unavailable')
+            if (!response.ok) {
+                if (body.provider) setFailedProvider(body.provider)
+                throw new Error(body.errorMessage || 'Suggestions are unavailable')
+            }
             setSuggestions(body.suggestions || body.item || null)
             if (body.quota) setConfig(current => ({ ...current, quota: body.quota }))
         } catch (suggestionError) {
@@ -170,7 +234,7 @@ export default function AiPage() {
         } finally {
             setSuggesting(false)
         }
-    }, [raindropId, suggesting])
+    }, [provider, raindropId, suggesting])
 
     const generateDraft = useCallback(async () => {
         if (!raindropId || drafting) return
@@ -181,10 +245,13 @@ export default function AiPage() {
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ raindropId, language: t.currentLang })
+                body: JSON.stringify({ raindropId, language: t.currentLang, provider })
             })
             const body = await readJson(response)
-            if (!response.ok) throw new Error(body.errorMessage || 'Description draft is unavailable')
+            if (!response.ok) {
+                if (body.provider) setFailedProvider(body.provider)
+                throw new Error(body.errorMessage || 'Description draft is unavailable')
+            }
             setDraft(String(body.draft || ''))
             if (body.quota) setConfig(current => ({ ...current, quota: body.quota }))
         } catch (draftError) {
@@ -192,7 +259,7 @@ export default function AiPage() {
         } finally {
             setDrafting(false)
         }
-    }, [drafting, raindropId])
+    }, [drafting, provider, raindropId])
 
     const applyDraft = useCallback(async () => {
         if (!raindropId || draft === null || applyingDraft) return
@@ -313,9 +380,28 @@ export default function AiPage() {
                 </aside>
                 <main className={s.chat}>
                     {loading && <p>Loading…</p>}
-                    {!loading && !config?.available && <p>Workers AI is temporarily unavailable.</p>}
+                    {!loading && <section className={s.provider} aria-label='AI provider settings'>
+                        <label>Provider <select value={provider} onChange={event => chooseProvider(event.target.value)}>
+                            <option value='workers_ai'>Workers AI{config?.workersAi?.available === false ? ' (unavailable)' : ''}</option>
+                            <option value='custom'>Custom AI Provider{config?.custom?.configured ? '' : ' (not configured)'}</option>
+                        </select></label>
+                        {provider === 'custom' && <>
+                            <input value={providerEndpoint} onChange={event => setProviderEndpoint(event.target.value)} placeholder='https://provider.example/v1' aria-label='Custom AI endpoint' />
+                            <input value={providerModel} onChange={event => setProviderModel(event.target.value)} placeholder='Model' aria-label='Custom AI model' />
+                            <input type='password' value={providerKey} onChange={event => setProviderKey(event.target.value)} placeholder={config?.custom?.configured ? 'API key (enter to replace)' : 'API key'} aria-label='Custom AI API key' autoComplete='off' />
+                            <button type='button' onClick={saveProvider} disabled={savingProvider || !providerEndpoint.trim() || !providerModel.trim() || !providerKey.trim()}>{savingProvider ? 'Testing…' : 'Test & save'}</button>
+                            {config?.custom?.configured && <button type='button' onClick={deleteProvider} disabled={savingProvider}>Delete custom provider</button>}
+                        </>}
+                    </section>}
+                    {!loading && !providerAvailable && <p>{provider === 'custom' ? 'Configure and test the Custom AI Provider before chatting.' : 'Workers AI is temporarily unavailable.'}</p>}
+                    {failedProvider && <div className={s.providerError} role='alert'>
+                        <span>{failedProvider === 'custom' ? 'Custom AI Provider failed.' : 'Workers AI failed.'}</span>
+                        <button type='button' onClick={() => send(null, failedProvider, lastMessage)}>Retry {failedProvider === 'custom' ? 'Custom' : 'Workers AI'}</button>
+                        {failedProvider === 'custom' && <button type='button' onClick={() => send(null, 'workers_ai', lastMessage)}>Use Workers AI</button>}
+                        {failedProvider === 'workers_ai' && config?.custom?.configured && <button type='button' onClick={() => send(null, 'custom', lastMessage)}>Use Custom AI Provider</button>}
+                    </div>}
                     {raindropId && <section className={s.assist} aria-label='Bookmark AI tools'>
-                        <button type='button' onClick={generateSuggestions} disabled={suggesting || !config?.available}>
+                        <button type='button' onClick={generateSuggestions} disabled={suggesting || !providerAvailable}>
                             {suggesting ? 'Suggesting…' : t.s('suggestedCollectionsAndTags')}
                         </button>
                         {suggestions && <div className={s.suggestions}>
@@ -328,7 +414,7 @@ export default function AiPage() {
                             {(suggestions.tags || []).map(tag => <span key={tag}>#{tag}</span>)}
                             {(suggestions.newTags || suggestions.new_tags || []).map(tag => <span key={tag}>#{tag}</span>)}
                         </div>}
-                        <button type='button' onClick={generateDraft} disabled={drafting || !config?.available}>
+                        <button type='button' onClick={generateDraft} disabled={drafting || !providerAvailable}>
                             {drafting ? 'Drafting…' : t.s('addDescription')}
                         </button>
                         {draft !== null && <div className={s.draft}>
@@ -365,8 +451,8 @@ export default function AiPage() {
                     {error && <p className={s.error}>{error}</p>}
                     {config?.quota && <small>AI quota: {config.quota.remaining}/{config.quota.limit} remaining; resets {new Date(config.quota.resetAt).toLocaleString()}.</small>}
                     <form onSubmit={send} className={s.form}>
-                        <input value={input} onChange={event => setInput(event.target.value)} disabled={sending || !config?.available} placeholder='Ask Raindrop AI' aria-label='Message' />
-                        <button type='submit' disabled={sending || !input.trim() || !config?.available}>{sending ? 'Sending…' : 'Send'}</button>
+                        <input value={input} onChange={event => setInput(event.target.value)} disabled={sending || !providerAvailable} placeholder='Ask Raindrop AI' aria-label='Message' />
+                        <button type='submit' disabled={sending || !input.trim() || !providerAvailable}>{sending ? 'Sending…' : 'Send'}</button>
                     </form>
                 </main>
             </div>

@@ -26,13 +26,17 @@ The contract test skeleton runs with `npm run test:contract`.
 
 The AI page is served at `/ai` and is embedded by the existing Stella iframe.
 Authenticated clients use `/v2/ai/config`, `/v2/ai/context`, `/v2/ai/chat` (SSE),
-`/v2/ai/suggestions`, `/v2/ai/description-draft`, and `/v2/ai/history`; Workers
-AI is the only provider in this phase. Set `AI_MODEL` to a Workers AI model
+`/v2/ai/suggestions`, `/v2/ai/description-draft`, and `/v2/ai/history`. Workers
+AI is the default provider. Users can test and save an optional Custom AI
+Provider through `/v2/ai/provider` using a public HTTPS OpenAI-compatible
+endpoint; its API key is encrypted at rest and never returned. Set `AI_MODEL` to a Workers AI model
 with the Function calling capability (the profiles default to
 `@cf/meta/llama-3.3-70b-instruct-fp8-fast`), plus `AI_DAILY_QUOTA` and
 `AI_GLOBAL_DAILY_QUOTA`, per environment.
 Quota responses include an ISO `resetAt`; exhausted requests return `429` with
-`retryAt` and never fall back to another provider. The AI page uses the same
+`retryAt` and never fall back to another provider. Chat requests include an
+explicit `provider` (`workers_ai` or `custom`); provider failures expose a
+retry-or-switch choice without sending the same context automatically. The AI page uses the same
 environment's Pages origin (`/ai`) so the Stella iframe and session cookie stay
 on the deployed Beta app. Context requests include authorized Bookmark metadata
 and Highlights only; Snapshots and attachments are excluded by default. Drafts

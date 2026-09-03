@@ -1390,7 +1390,51 @@ paths:
   /v2/ai/config:
     get:
       responses:
-        '200': {description: Authenticated Workers AI configuration and per-user daily quota.}
+        '200': {description: Authenticated Workers AI and redacted Custom AI Provider configuration with per-user daily quota.}
+        '401': {description: Login required.}
+  /v2/ai/provider:
+    get:
+      responses:
+        '200': {description: Redacted Custom AI Provider configuration; API keys are never returned.}
+        '401': {description: Login required.}
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint, model, apiKey]
+              properties:
+                endpoint: {type: string, format: uri, description: Public HTTPS OpenAI-compatible endpoint.}
+                model: {type: string, maxLength: 200}
+                apiKey: {type: string, writeOnly: true, maxLength: 4096}
+      responses:
+        '200': {description: Provider tested and saved with the API key encrypted at rest.}
+        '400': {description: Invalid endpoint, model, credentials, or provider response.}
+        '401': {description: Login required.}
+        '503': {description: Provider storage is unavailable.}
+    delete:
+      responses:
+        '200': {description: Custom AI Provider deleted.}
+        '401': {description: Login required.}
+        '503': {description: Provider storage is unavailable.}
+  /v2/ai/provider/test:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint, model, apiKey]
+              properties:
+                endpoint: {type: string, format: uri, description: Public HTTPS OpenAI-compatible endpoint.}
+                model: {type: string, maxLength: 200}
+                apiKey: {type: string, writeOnly: true, maxLength: 4096}
+      responses:
+        '200': {description: Content-free provider connectivity test succeeded.}
+        '400': {description: Invalid endpoint, unsafe redirect, credentials, or provider response.}
         '401': {description: Login required.}
   /v2/ai/quota:
     get:
@@ -1420,11 +1464,13 @@ paths:
               properties:
                 raindropId: {type: integer, minimum: 1}
                 language: {type: string, maxLength: 32}
+                provider: {type: string, enum: [workers_ai, custom], description: Explicit provider choice.}
       responses:
         '200': {description: Authorized Collection and Tag suggestions.}
         '400': {description: Invalid Bookmark input.}
         '401': {description: Login required.}
         '404': {description: Bookmark is not owned by or shared with the User.}
+        '409': {description: Custom AI Provider is not configured.}
         '429': {description: Daily AI quota exhausted.}
         '503': {description: Workers AI is unavailable.}
   /v2/ai/description-draft:
@@ -1439,11 +1485,13 @@ paths:
               properties:
                 raindropId: {type: integer, minimum: 1}
                 language: {type: string, maxLength: 32}
+                provider: {type: string, enum: [workers_ai, custom], description: Explicit provider choice.}
       responses:
         '200': {description: Editable Description Draft with matching source links; no Bookmark is written.}
         '400': {description: Invalid Bookmark input.}
         '401': {description: Login required.}
         '404': {description: Bookmark is not owned by or shared with the User.}
+        '409': {description: Custom AI Provider is not configured.}
         '429': {description: Daily AI quota exhausted.}
         '503': {description: Workers AI is unavailable.}
   /v2/ai/tools:
@@ -1578,13 +1626,14 @@ paths:
                 chatId: {type: string}
                 raindropId: {type: integer, minimum: 1}
                 language: {type: string, maxLength: 32}
+                provider: {type: string, enum: [workers_ai, custom], description: Explicit provider choice; no automatic fallback.}
       responses:
-        '200': {description: SSE stream of Workers AI deltas; provider is never silently changed.}
+        '200': {description: SSE stream of the explicitly selected provider's deltas; provider is never silently changed.}
         '400': {description: Invalid message.}
         '401': {description: Login required.}
         '404': {description: Chat or Bookmark is not owned by the User.}
         '429': {description: Daily AI quota exhausted; retryAt and resetAt are returned.}
-        '503': {description: Workers AI is unavailable.}
+        '503': {description: Selected AI Provider is unavailable.}
   /v2/ai/history:
     get:
       responses:

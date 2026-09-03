@@ -29,6 +29,7 @@ class AiDatabase {
         this.collections = []
         this.proposals = []
         this.standingApprovals = []
+        this.providers = []
         this.quotaFailure = false
         this.nextMessageId = 1
     }
@@ -52,6 +53,7 @@ class AiDatabase {
             if (sql.includes('FROM ai_standing_approvals') && sql.includes('id = ?') && sql.includes('user_id = ?') && !sql.includes('tool_name = ?')) return this.standingApprovals.find(item => item.id === values[0] && item.user_id === values[1]) || null
             if (sql.includes('FROM ai_standing_approvals') && sql.includes('user_id = ?') && !sql.includes('WHERE id')) return this.standingApprovals.find(item =>
                 item.user_id === values[0] && item.tool_name === values[1] && item.collection_id === values[2] && (!sql.includes('revoked_at IS NULL') || !item.revoked_at)) || null
+            if (sql.includes('FROM ai_providers WHERE user_id')) return this.providers.find(item => item.user_id === values[0]) || null
             if (sql.includes('FROM ai_chats WHERE id')) return this.chats.find(item => item.id === values[0] && item.user_id === values[1]) || null
             if (sql.includes('FROM bookmarks WHERE id'))
                 return this.bookmarks.find(item => item.id === values[0] && item.user_id === values[1] && !item.removed_at) || null
@@ -122,6 +124,13 @@ class AiDatabase {
                 this.standingApprovals.push({ id: values[0], user_id: values[1], tool_name: values[2], collection_id: values[3], created_at: values[4], updated_at: values[5], revoked_at: null })
                 return { meta: { changes: 1 } }
             }
+            if (sql.includes('INSERT INTO ai_providers')) {
+                const [userId, endpoint, model, encryptedApiKey, verifiedAt, createdAt, updatedAt] = values
+                const existing = this.providers.find(item => item.user_id === userId)
+                if (existing) Object.assign(existing, { endpoint, model, encrypted_api_key: encryptedApiKey, verified_at: verifiedAt, updated_at: updatedAt })
+                else this.providers.push({ user_id: userId, endpoint, model, encrypted_api_key: encryptedApiKey, verified_at: verifiedAt, created_at: createdAt, updated_at: updatedAt })
+                return { meta: { changes: 1 } }
+            }
             if (sql.includes('UPDATE ai_action_proposals SET status = \'processing\'')) {
                 const row = this.proposals.find(item => item.id === values[1] && item.user_id === values[2] && item.status === 'pending')
                 if (row) { row.status = 'processing'; row.updated_at = values[0] }
@@ -184,6 +193,11 @@ class AiDatabase {
                 if (sql.includes(' WHERE id = ?')) this.chats = this.chats.filter(item => !(item.id === values[0] && item.user_id === values[1]))
                 else this.chats = this.chats.filter(item => item.user_id !== values[0])
                 return { meta: { changes: before - this.chats.length } }
+            }
+            if (sql.includes('DELETE FROM ai_providers')) {
+                const before = this.providers.length
+                this.providers = this.providers.filter(item => item.user_id !== values[0])
+                return { meta: { changes: before - this.providers.length } }
             }
             return { meta: { changes: 1 } }
         }
@@ -330,6 +344,94 @@ test('AI provider failures are explicit and do not invoke a fallback', async () 
     assert.equal(response.status, 503)
     assert.equal((await response.json()).error, 'ai_provider_unavailable')
     assert.equal(calls.length, 1)
+})
+
+test('Custom AI Provider validates public HTTPS endpoints and keeps probes metadata-free', async () => {
+    const { env, db } = await environment()
+    const privateEndpoint = await worker.fetch(request('/v2/ai/provider/test', {
+        method: 'POST',
+        body: JSON.stringify({ endpoint: 'http://127.0.0.1/v1', model: 'custom-model', apiKey: 'secret-key' })
+    }), env)
+    assert.equal(privateEndpoint.status, 400)
+    assert.equal((await privateEndpoint.json()).error, 'ai_provider_endpoint_invalid')
+
+    const calls = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options = {}) => {
+        const body = JSON.parse(options.body || '{}')
+        calls.push({ url: String(url), body, headers: options.headers })
+        if (body.stream) return new Response('data: {"choices":[{"delta":{"content":"Custom hello"}}]}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), { headers: { 'Content-Type': 'application/json' } })
+    }
+    try {
+        const saved = await worker.fetch(request('/v2/ai/provider', {
+            method: 'PUT',
+            body: JSON.stringify({ endpoint: 'https://provider.example.test/v1', model: 'custom-model', apiKey: 'secret-key' })
+        }), env)
+        assert.equal(saved.status, 200)
+        const savedBody = await saved.json()
+        assert.equal(savedBody.custom.configured, true)
+        assert.equal(savedBody.custom.endpoint, 'https://provider.example.test/v1/chat/completions')
+        assert.equal(db.providers.length, 1)
+        assert.doesNotMatch(db.providers[0].encrypted_api_key, /secret-key/)
+        assert.equal(calls[0].body.messages[0].content, 'Reply with OK only.')
+        assert.doesNotMatch(JSON.stringify(calls[0].body), /Bookmark|bookmark|Highlights|attachment/i)
+
+        const config = await worker.fetch(request('/v2/ai/config'), env)
+        const configBody = await config.json()
+        assert.equal(configBody.custom.configured, true)
+        assert.equal(Object.hasOwn(configBody.custom, 'apiKey'), false)
+
+        const chat = await worker.fetch(request('/v2/ai/chat', {
+            method: 'POST',
+            body: JSON.stringify({ provider: 'custom', message: 'Hello custom' })
+        }), env)
+        assert.equal(chat.status, 200)
+        const stream = await chat.text()
+        assert.match(stream, /"provider":"custom"/)
+        assert.match(stream, /Custom hello/)
+        assert.equal(calls[1].body.model, 'custom-model')
+        assert.ok(calls[1].body.tools.every(item => item.type === 'function'))
+        assert.deepEqual(db.usage, [])
+
+        globalThis.fetch = async () => { throw new Error('provider down') }
+        const failed = await worker.fetch(request('/v2/ai/chat', {
+            method: 'POST',
+            body: JSON.stringify({ provider: 'custom', message: 'Try custom again' })
+        }), env)
+        assert.equal(failed.status, 503)
+        const failedBody = await failed.json()
+        assert.equal(failedBody.provider, 'custom')
+        assert.deepEqual(failedBody.fallbackProviders, ['workers_ai'])
+
+        const deleted = await worker.fetch(request('/v2/ai/provider', { method: 'DELETE' }), env)
+        assert.equal(deleted.status, 200)
+        assert.equal((await deleted.json()).deleted, true)
+        assert.deepEqual(db.providers, [])
+    } finally {
+        globalThis.fetch = originalFetch
+    }
+})
+
+test('Custom AI Provider rejects unsafe redirects without sending credentials onward', async () => {
+    const { env } = await environment()
+    const originalFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = async () => {
+        calls++
+        return new Response(null, { status: 302, headers: { Location: 'http://127.0.0.1/private' } })
+    }
+    try {
+        const response = await worker.fetch(request('/v2/ai/provider/test', {
+            method: 'POST',
+            body: JSON.stringify({ endpoint: 'https://provider.example.test/v1', model: 'custom-model', apiKey: 'secret-key' })
+        }), env)
+        assert.equal(response.status, 400)
+        assert.equal((await response.json()).error, 'ai_provider_redirect_invalid')
+        assert.equal(calls, 1)
+    } finally {
+        globalThis.fetch = originalFetch
+    }
 })
 
 test('AI accepts a Workers AI ReadableStream binding result', async () => {
