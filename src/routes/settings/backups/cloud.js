@@ -17,7 +17,7 @@ const providers = [
 ]
 
 export default function SettingsBackupsCloud() {
-    const { pathname } = useLocation()
+    const { pathname, search } = useLocation()
     const webApp = target == 'web'
     const [connections, setConnections] = useState([])
     const [provider, setProvider] = useState('gdrive')
@@ -41,6 +41,12 @@ export default function SettingsBackupsCloud() {
     }
 
     useEffect(() => { if (webApp) load() }, [webApp])
+
+    useEffect(() => {
+        const params = new URLSearchParams(search)
+        if (params.get('connected') === 'onedrive') setMessage('OneDrive connected. Credentials are encrypted and cannot be read back.')
+        if (params.get('connect_error') === 'onedrive_authorization_failed') setMessage('OneDrive authorization failed. Please try again.')
+    }, [search])
 
     const save = async event => {
         event.preventDefault()
@@ -79,13 +85,13 @@ export default function SettingsBackupsCloud() {
                     </select>
                     {provider == 'gdrive'
                         ? <Button href={`${API_ENDPOINT_URL}backup/connections/gdrive/authorize`} variant='primary'>Connect Google Drive</Button>
-                        : <form className={s.form} onSubmit={save}>
-                            {provider == 'webdav' ? <>
+                        : provider == 'onedrive'
+                            ? <Button href={`${API_ENDPOINT_URL}backup/connections/onedrive/authorize`} variant='primary'>Connect OneDrive</Button>
+                            : <form className={s.form} onSubmit={save}>
                                 <Text required type='url' placeholder='HTTPS WebDAV URL' value={credentials.url || ''} onChange={event => setCredentials({ ...credentials, url: event.target.value })} />
                                 <Text required placeholder='Username' value={credentials.username || ''} onChange={event => setCredentials({ ...credentials, username: event.target.value })} />
                                 <Text required type='password' placeholder='App password' value={credentials.password || ''} onChange={event => setCredentials({ ...credentials, password: event.target.value })} />
-                            </> : <Text required type='password' placeholder='OneDrive access token' value={credentials.accessToken || ''} onChange={event => setCredentials({ accessToken: event.target.value })} />}
-                            <Button as='button' type='submit' variant='primary' disabled={!webApp}>Verify and save</Button>
+                                <Button as='button' type='submit' variant='primary' disabled={!webApp}>Verify and save</Button>
                         </form>}
                 </div>
                 {message && <p role='status'>{message}</p>}

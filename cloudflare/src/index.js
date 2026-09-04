@@ -3,7 +3,8 @@
 const encoder = new TextEncoder()
 const sessionDays = 30
 const verificationHours = 24
-const googleStateMinutes = 10
+const oauthStateMinutes = 10
+const microsoftScopes = 'offline_access Files.ReadWrite'
 const deletionDays = 30
 const passwordIterations = 100000
 const usageWindowMs = 24 * 60 * 60 * 1000
@@ -139,7 +140,7 @@ const hmac = async (value, secret) => {
 }
 
 const credentialKey = async env => {
-    const secret = env.BACKUP_CREDENTIAL_KEY || env.SESSION_SECRET
+    const secret = env.BACKUP_CREDENTIAL_KEY || env.ENCRYPTION_KEY || env.SESSION_SECRET
     if (!secret) throw new Error('Backup credential encryption is not configured')
     const source = await crypto.subtle.importKey('raw', encoder.encode(secret), 'PBKDF2', false, ['deriveKey'])
     return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: encoder.encode('raindrop-backup-credentials'), iterations: passwordIterations, hash: 'SHA-256' },
@@ -156,8 +157,15 @@ const encryptCredentials = async (env, credentials) => {
 const decryptCredentials = async (env, value) => {
     const [iv, encrypted] = String(value || '').split('.')
     if (!iv || !encrypted) throw new Error('Invalid encrypted credentials')
-    const clear = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64urlToBytes(iv) }, await credentialKey(env), base64urlToBytes(encrypted))
-    return JSON.parse(new TextDecoder().decode(clear))
+    let failure
+    for (const secret of [env.BACKUP_CREDENTIAL_KEY, env.ENCRYPTION_KEY, env.SESSION_SECRET].filter(Boolean).filter((item, index, all) => all.indexOf(item) === index)) {
+        try {
+            const key = await credentialKey({ ...env, BACKUP_CREDENTIAL_KEY: secret, ENCRYPTION_KEY: undefined })
+            const clear = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64urlToBytes(iv) }, key, base64urlToBytes(encrypted))
+            return JSON.parse(new TextDecoder().decode(clear))
+        } catch (error) { failure = error }
+    }
+    throw failure || new Error('Invalid encrypted credentials')
 }
 
 const passwordHash = async (password, salt) => {
@@ -1605,17 +1613,48 @@ const backupProviderRequest = (env, provider, credentials, operation, filename, 
     })
 }
 
+const fetchWebdav = async (env, request) => {
+    let current
+    try { current = new URL(request.url) } catch { throw new Error('WebDAV destination is not public') }
+    const origin = current.origin
+    const body = ['GET', 'HEAD'].includes(request.method) ? undefined : new Uint8Array(await request.clone().arrayBuffer())
+    for (let redirect = 0; redirect <= metadataMaxRedirects; redirect++) {
+        const checked = validateFetchableUrl(current.toString())
+        if (!checked.ok || checked.url.protocol !== 'https:' || checked.url.origin !== origin)
+            throw new Error('WebDAV destination must use a public HTTPS URL')
+        await resolvePublicAddress(checked.url, env)
+        let response
+        try {
+            response = await fetch(checked.url.toString(), {
+                method: request.method,
+                headers: new Headers(request.headers),
+                body: body ? body.slice() : undefined,
+                redirect: 'manual'
+            })
+        } catch { throw new Error('WebDAV destination is unavailable') }
+        if (response.status < 300 || response.status >= 400) return response
+        const location = response.headers.get('Location')
+        if (!location || redirect === metadataMaxRedirects)
+            throw new Error('WebDAV destination returned too many redirects')
+        try { current = new URL(location, checked.url) } catch { throw new Error('WebDAV destination returned an invalid redirect') }
+    }
+    throw new Error('WebDAV destination returned too many redirects')
+}
+
 const verifyBackupConnection = async (env, provider, credentials) => {
-    const response = await fetch(backupProviderRequest(env, provider, credentials, 'verify'))
+    const request = backupProviderRequest(env, provider, credentials, 'verify')
+    const response = provider === 'webdav' ? await fetchWebdav(env, request) : await fetch(request)
     if (!response.ok) throw new Error('The backup destination rejected the credentials')
 }
 
 const saveBackupConnection = async (env, userId, provider, credentials, makeDefault = false) => {
     const existing = await env.DB.prepare(`SELECT id, is_default FROM backup_connections
         WHERE user_id = ? AND provider = ?`).bind(userId, provider).first()
+    const currentDefault = await env.DB.prepare('SELECT id FROM backup_connections WHERE user_id = ? AND is_default = 1')
+        .bind(userId).first()
     const id = existing?.id || randomToken(18)
     const now = Date.now()
-    const isDefault = makeDefault || existing?.is_default ? 1 : 0
+    const isDefault = makeDefault || existing?.is_default || !currentDefault ? 1 : 0
     if (isDefault) await env.DB.prepare('UPDATE backup_connections SET is_default = 0 WHERE user_id = ?').bind(userId).run()
     await env.DB.prepare(`INSERT INTO backup_connections
         (id, user_id, provider, encrypted_credentials, is_default, verified_at, created_at, updated_at)
@@ -1653,6 +1692,33 @@ const refreshGoogleDriveCredentials = async (env, connection, credentials) => {
     return refreshed
 }
 
+const refreshOneDriveCredentials = async (env, connection, credentials) => {
+    if (credentials.accessToken && Number(credentials.expiresAt || 0) > Date.now() + 60000) return credentials
+    if (!credentials.refreshToken) throw new Error('OneDrive authorization has expired')
+    const response = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+            client_id: env.MICROSOFT_CLIENT_ID,
+            client_secret: env.MICROSOFT_CLIENT_SECRET,
+            refresh_token: credentials.refreshToken,
+            grant_type: 'refresh_token',
+            scope: microsoftScopes
+        })
+    })
+    if (!response.ok) throw new Error('OneDrive authorization could not be refreshed')
+    const token = await response.json()
+    const refreshed = {
+        accessToken: String(token.access_token || ''),
+        refreshToken: token.refresh_token ? String(token.refresh_token) : credentials.refreshToken,
+        expiresAt: Date.now() + Number(token.expires_in || 3600) * 1000
+    }
+    if (!refreshed.accessToken) throw new Error('OneDrive authorization could not be refreshed')
+    await env.DB.prepare('UPDATE backup_connections SET encrypted_credentials = ?, updated_at = ? WHERE id = ?')
+        .bind(await encryptCredentials(env, refreshed), Date.now(), connection.id).run()
+    return refreshed
+}
+
 const copyExternalBackup = async (env, backup, bytes) => {
     const connection = await env.DB.prepare(`SELECT id, provider, encrypted_credentials FROM backup_connections
         WHERE user_id = ? AND is_default = 1`).bind(backup.user_id).first()
@@ -1662,7 +1728,9 @@ const copyExternalBackup = async (env, backup, bytes) => {
     try {
         let credentials = await decryptCredentials(env, connection.encrypted_credentials)
         if (connection.provider === 'gdrive') credentials = await refreshGoogleDriveCredentials(env, connection, credentials)
-        const response = await fetch(backupProviderRequest(env, connection.provider, credentials, 'copy', filename, bytes))
+        if (connection.provider === 'onedrive') credentials = await refreshOneDriveCredentials(env, connection, credentials)
+        const request = backupProviderRequest(env, connection.provider, credentials, 'copy', filename, bytes)
+        const response = connection.provider === 'webdav' ? await fetchWebdav(env, request) : await fetch(request)
         if (!response.ok) throw new Error('External backup copy failed with HTTP ' + response.status)
         await env.DB.prepare(`INSERT INTO external_backup_copies
             (backup_id, connection_id, status, remote_path, error_message, created_at, completed_at)
@@ -2621,6 +2689,7 @@ const mutateBookmarkTags = async (env, userId, transform) => {
 const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
 const turnstileEnabled = env => String(env.TURNSTILE_ENABLED || '').toLowerCase() === 'true'
 const googleReady = env => Boolean(authReady(env) && env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.API_ORIGIN)
+const microsoftReady = env => Boolean(authReady(env) && env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.API_ORIGIN)
 
 const configurationError = (request, env) =>
     error('auth_configuration_missing', 503, request, env, 'Authentication is not configured')
@@ -2665,7 +2734,7 @@ const auditRoute = request => {
         [/^\/v1\/raindrop\/\d+$/, '/v1/raindrop/:id'],
         [/^\/v1\/raindrops\/-?\d+\/export\.(html|csv|txt|zip)$/, '/v1/raindrops/:collectionId/export'],
         [/^\/v1\/raindrops\/-?\d+$/, '/v1/raindrops/:collectionId'],
-        [/^\/v1\/backup\/connections\/gdrive\/authorize$/, '/v1/backup/connections/gdrive/authorize'],
+        [/^\/v1\/backup\/connections\/(gdrive|onedrive)\/authorize$/, '/v1/backup/connections/$1/authorize'],
         [/^\/v1\/backup\/connections\/[^/]+(?:\/default)?$/, '/v1/backup/connections/:id'],
         [/^\/v1\/(?:backup|backups)\/[^/]+(?:\.(?:html|csv|txt|zip)|\/status)?$/, '/v1/backups/:id'],
         [/^\/v1\/tags\/-?\d+$/, '/v1/tags/:collectionId'],
@@ -2693,7 +2762,7 @@ const auditRoute = request => {
 
     const known = new Set([
         '/v1/auth/email/signup', '/v1/auth/email/login', '/v1/auth/email/confirm',
-        '/v1/auth/google', '/v1/auth/google/callback', '/v1/auth/logout',
+        '/v1/auth/google', '/v1/auth/google/callback', '/v1/auth/onedrive/callback', '/v1/auth/logout',
         '/v1/sessions', '/v1/collections/all', '/v1/collections', '/v1/collections/clean',
         '/v1/collection', '/v1/tags/recent', '/v1/tags/0', '/v1/tag',
         '/v1/raindrops', '/v1/raindrops/changes', '/v1/raindrop', '/v1/user', '/v1/user/quota',
@@ -4526,6 +4595,7 @@ const appRedirect = (request, env, path, token) => {
 }
 
 const googleCallbackUrl = env => new URL('/v1/auth/google/callback', env.API_ORIGIN).toString()
+const microsoftCallbackUrl = env => new URL('/v1/auth/onedrive/callback', env.API_ORIGIN).toString()
 
 const appPath = (env, value, fallback = '/') => {
     try {
@@ -4537,10 +4607,10 @@ const appPath = (env, value, fallback = '/') => {
     }
 }
 
-const createGoogleState = async (env, purpose, userId, redirectPath = '/', admissionGranted = false) => {
+const createOAuthState = async (env, purpose, userId, redirectPath = '/', admissionGranted = false) => {
     const state = randomToken(32)
     await env.DB.prepare('INSERT INTO oauth_states (state_hash, purpose, user_id, redirect_path, admission_granted, expires_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .bind(await hmac(state, env.SESSION_SECRET), purpose, userId || null, redirectPath, admissionGranted ? 1 : 0, Date.now() + googleStateMinutes * 60 * 1000).run()
+        .bind(await hmac(state, env.SESSION_SECRET), purpose, userId || null, redirectPath, admissionGranted ? 1 : 0, Date.now() + oauthStateMinutes * 60 * 1000).run()
     return state
 }
 
@@ -4554,6 +4624,20 @@ const googleAuthorization = (env, state, drive = false) => {
         state,
         prompt: drive ? 'consent select_account' : 'select_account',
         ...(drive ? { access_type: 'offline', include_granted_scopes: 'true' } : {})
+    }).toString()
+    return url.toString()
+}
+
+const microsoftAuthorization = (env, state) => {
+    const url = new URL('https://login.microsoftonline.com/common/oauth2/v2.0/authorize')
+    url.search = new URLSearchParams({
+        client_id: env.MICROSOFT_CLIENT_ID,
+        redirect_uri: microsoftCallbackUrl(env),
+        response_type: 'code',
+        response_mode: 'query',
+        scope: microsoftScopes,
+        state,
+        prompt: 'select_account'
     }).toString()
     return url.toString()
 }
@@ -4587,6 +4671,33 @@ const googleProfile = async (env, code) => {
             name: String(data.name || data.email).slice(0, 100),
             accessToken: String(token.access_token),
             refreshToken: token.refresh_token ? String(token.refresh_token) : null,
+            expiresAt: Date.now() + Number(token.expires_in || 3600) * 1000
+        }
+    } catch {
+        return null
+    }
+}
+
+const microsoftToken = async (env, code) => {
+    try {
+        const response = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: env.MICROSOFT_CLIENT_ID,
+                client_secret: env.MICROSOFT_CLIENT_SECRET,
+                code,
+                redirect_uri: microsoftCallbackUrl(env),
+                grant_type: 'authorization_code',
+                scope: microsoftScopes
+            })
+        })
+        if (!response.ok) return null
+        const token = await response.json()
+        if (!token.access_token || !token.refresh_token) return null
+        return {
+            accessToken: String(token.access_token),
+            refreshToken: String(token.refresh_token),
             expiresAt: Date.now() + Number(token.expires_in || 3600) * 1000
         }
     } catch {
@@ -4727,7 +4838,7 @@ export default {
 
         if (url.pathname === '/v1/auth/google' && request.method === 'GET') {
             if (!googleReady(env)) return configurationError(request, env)
-            const state = await createGoogleState(env, 'login', null, appPath(env, url.searchParams.get('redirect')))
+            const state = await createOAuthState(env, 'login', null, appPath(env, url.searchParams.get('redirect')))
             return new Response(null, { status: 302, headers: { Location: googleAuthorization(env, state), 'X-Request-ID': requestId(request) } })
         }
 
@@ -4737,7 +4848,7 @@ export default {
             const admitted = env.ENVIRONMENT !== 'beta' || Boolean(env.BETA_ACCESS_PASSWORD && equal(data.betaAccessPassword, env.BETA_ACCESS_PASSWORD))
             if (!admitted)
                 return error('beta_access_denied', 403, request, env, 'Beta access password is invalid')
-            const state = await createGoogleState(env, 'login', null, appPath(env, data.redirect), true)
+            const state = await createOAuthState(env, 'login', null, appPath(env, data.redirect), true)
             return json({ result: true, location: googleAuthorization(env, state) }, 200, request, env)
         }
 
@@ -4798,6 +4909,30 @@ export default {
             }
             const session = await createSession(request, env, identity.user_id)
             return appRedirect(request, env, state.redirect_path || '/', session.token)
+        }
+
+        if (url.pathname === '/v1/auth/onedrive/callback' && request.method === 'GET') {
+            if (!microsoftReady(env)) return configurationError(request, env)
+            const stateHash = await hmac(String(url.searchParams.get('state') || ''), env.SESSION_SECRET)
+            const state = await env.DB.prepare('SELECT purpose, user_id, redirect_path FROM oauth_states WHERE state_hash = ? AND used_at IS NULL AND expires_at > ?')
+                .bind(stateHash, Date.now()).first()
+            if (!state || state.purpose !== 'backup_onedrive' || !url.searchParams.get('code'))
+                return appRedirect(request, env, '/settings/backups?connect_error=onedrive_authorization_failed')
+
+            await env.DB.prepare('UPDATE oauth_states SET used_at = ? WHERE state_hash = ?').bind(Date.now(), stateHash).run()
+            const credentials = await microsoftToken(env, url.searchParams.get('code'))
+            if (!credentials || !state.user_id)
+                return appRedirect(request, env, '/settings/backups?connect_error=onedrive_authorization_failed')
+
+            try {
+                await verifyBackupConnection(env, 'onedrive', credentials)
+                const currentDefault = await env.DB.prepare('SELECT id FROM backup_connections WHERE user_id = ? AND is_default = 1')
+                    .bind(state.user_id).first()
+                await saveBackupConnection(env, state.user_id, 'onedrive', credentials, !currentDefault)
+            } catch {
+                return appRedirect(request, env, '/settings/backups?connect_error=onedrive_authorization_failed')
+            }
+            return appRedirect(request, env, '/settings/backups?connected=onedrive')
         }
 
         if (url.pathname === '/v1/auth/email/signup' && request.method === 'POST') {
@@ -4928,7 +5063,7 @@ export default {
 
             if (url.pathname === '/v1/user/connect/google' && request.method === 'GET') {
                 if (!googleReady(env)) return configurationError(request, env)
-                const state = await createGoogleState(env, 'connect', session.user_id, '/settings/account')
+                const state = await createOAuthState(env, 'connect', session.user_id, '/settings/account')
                 return new Response(null, { status: 302, headers: { Location: googleAuthorization(env, state), 'X-Request-ID': requestId(request) } })
             }
 
@@ -5052,9 +5187,18 @@ export default {
 
             if (url.pathname === '/v1/backup/connections/gdrive/authorize' && request.method === 'GET') {
                 if (!googleReady(env)) return configurationError(request, env)
-                const state = await createGoogleState(env, 'backup_gdrive', session.user_id, '/settings/backups')
+                const state = await createOAuthState(env, 'backup_gdrive', session.user_id, '/settings/backups')
                 return new Response(null, { status: 302, headers: {
                     Location: googleAuthorization(env, state, true),
+                    'X-Request-ID': requestId(request)
+                } })
+            }
+
+            if (url.pathname === '/v1/backup/connections/onedrive/authorize' && request.method === 'GET') {
+                if (!microsoftReady(env)) return configurationError(request, env)
+                const state = await createOAuthState(env, 'backup_onedrive', session.user_id, '/settings/backups')
+                return new Response(null, { status: 302, headers: {
+                    Location: microsoftAuthorization(env, state),
                     'X-Request-ID': requestId(request)
                 } })
             }

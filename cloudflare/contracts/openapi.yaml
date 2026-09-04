@@ -111,6 +111,16 @@ paths:
           description: Service is temporarily unavailable.
         '500':
           $ref: '#/components/responses/InternalError'
+  /v1/auth/onedrive/callback:
+    get:
+      security: []
+      responses:
+        '303':
+          description: Complete a OneDrive connection.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/sessions:
     get:
       security:
@@ -913,6 +923,21 @@ paths:
           description: Email verification required.
         '503':
           description: Google OAuth is not configured.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backup/connections/onedrive/authorize:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '302':
+          description: Redirect to Microsoft consent for encrypted offline OneDrive access.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '503':
+          description: Microsoft OAuth is not configured.
         '500':
           $ref: '#/components/responses/InternalError'
   /v1/backup/connections/{id}/default:

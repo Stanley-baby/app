@@ -130,7 +130,11 @@ class BackupDatabase {
                 this.connections.filter(item => item.user_id === Number(values[0])).forEach(item => { item.is_default = 0 })
                 return { meta: { changes: 1 } }
             }
-            if (sql.includes('UPDATE backup_connections SET encrypted_credentials')) return { meta: { changes: 1 } }
+            if (sql.includes('UPDATE backup_connections SET encrypted_credentials')) {
+                const connection = this.connections.find(item => item.id === values[2])
+                if (connection) Object.assign(connection, { encrypted_credentials: values[0], updated_at: values[1] })
+                return { meta: { changes: connection ? 1 : 0 } }
+            }
             if (sql.includes('INSERT INTO external_backup_copies')) {
                 this.externalCopies.push({ backup_id: values[0], connection_id: values[1], status: sql.includes('\'succeeded\'') ? 'succeeded' : 'failed', remote_path: values[2] })
                 return { meta: { changes: 1 } }
@@ -210,12 +214,14 @@ const envFor = (db, bucket, queue) => ({
     CONTENT_BUCKET: bucket,
     TASK_QUEUE: queue,
     SESSION_SECRET: 'backup-test-secret',
-    BACKUP_CREDENTIAL_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY',
+    ENCRYPTION_KEY: 'backup-encryption-key',
     GOOGLE_CLIENT_ID: 'google-client-id',
     GOOGLE_CLIENT_SECRET: 'google-client-secret',
     API_ORIGIN: 'https://api.example.test',
     APP_ORIGIN: 'https://app.example.test',
     CORS_ORIGINS: 'https://app.example.test',
+    MICROSOFT_CLIENT_ID: 'microsoft-client-id',
+    MICROSOFT_CLIENT_SECRET: 'microsoft-client-secret',
     ENVIRONMENT: 'local',
     VERSION: 'test'
 })
@@ -359,7 +365,8 @@ test('external destinations verify independently, hide credentials, and receive 
     const env = envFor(db, bucket, queue)
     const requests = []
     const originalFetch = globalThis.fetch
-    globalThis.fetch = async request => {
+    globalThis.fetch = async (url, options = {}) => {
+        const request = typeof url === 'string' ? new Request(url, options) : url
         requests.push(request)
         return new Response(null, { status: request.method === 'PROPFIND' ? 207 : 200 })
     }
@@ -374,6 +381,7 @@ test('external destinations verify independently, hide credentials, and receive 
             body: JSON.stringify({ provider, credentials, default: provider === 'webdav' })
         }), env)
         assert.equal(response.status, 201)
+        if (provider === 'onedrive') assert.equal((await response.clone().json()).connection.default, true)
     }
 
     assert.deepEqual(requests.slice(0, 2).map(item => item.method), ['GET', 'PROPFIND'])
@@ -385,6 +393,7 @@ test('external destinations verify independently, hide credentials, and receive 
     assert.equal(JSON.parse(listBody).connections.find(item => item.provider === 'webdav').default, true)
     assert.doesNotMatch(db.connections.map(item => item.encrypted_credentials).join(' '), /microsoft-secret|app-secret/)
 
+    env.SESSION_SECRET = 'rotated-session-secret'
     const created = await worker.fetch(request('/v1/backup', { headers: { Cookie: 'rd_session=test' } }), env)
     assert.equal(created.status, 202)
     await worker.queue({ messages: [{ body: queue.messages[0], ack: () => {}, retry: () => assert.fail('unexpected retry') }] }, env)
@@ -392,6 +401,33 @@ test('external destinations verify independently, hide credentials, and receive 
     assert.equal(db.externalCopies[0].status, 'succeeded')
     assert.equal(requests[2].method, 'PUT')
     assert.match(requests[2].url, /^https:\/\/dav\.example\.test\/backups\/raindrop-backup-/)
+})
+
+test('WebDAV rejects private endpoints and redirects before sending credentials', async t => {
+    const db = new BackupDatabase()
+    const bucket = new MemoryBucket()
+    const queue = { send: async () => {} }
+    const env = envFor(db, bucket, queue)
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async url => {
+        const target = typeof url === 'string' ? url : url.url
+        if (target.startsWith('https://public.example.test'))
+            return new Response(null, { status: 302, headers: { Location: 'https://127.0.0.1/private' } })
+        return new Response(null, { status: 200 })
+    }
+    t.after(() => { globalThis.fetch = originalFetch })
+
+    const privateEndpoint = await worker.fetch(request('/v1/backup/connections', {
+        method: 'POST', headers: { Cookie: 'rd_session=test', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'webdav', credentials: { url: 'https://127.0.0.1/backups', username: 'user', password: 'secret' } })
+    }), env)
+    assert.equal(privateEndpoint.status, 400)
+
+    const privateRedirect = await worker.fetch(request('/v1/backup/connections', {
+        method: 'POST', headers: { Cookie: 'rd_session=test', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'webdav', credentials: { url: 'https://public.example.test/backups', username: 'user', password: 'secret' } })
+    }), env)
+    assert.equal(privateRedirect.status, 400)
 })
 
 test('Google Drive OAuth stores a refresh token and refreshes it before copying a backup', async t => {
@@ -443,4 +479,70 @@ test('Google Drive OAuth stores a refresh token and refreshes it before copying 
     assert.equal(uploaded.method, 'POST')
     assert.match(uploaded.headers.get('Authorization'), /refreshed-access/)
     assert.match(uploaded.headers.get('Content-Type'), /multipart\/related/)
+})
+
+test('OneDrive OAuth stores a refresh token and refreshes it before copying a backup', async t => {
+    const db = new BackupDatabase()
+    db.bookmarks = [{ id: 1, user_id: 1, collection_id: -1, url: 'https://example.test', title: 'OneDrive', description: '', note: '', tags: '[]', highlights: '[]', created_at: 1, updated_at: 1, removed_at: null }]
+    const bucket = new MemoryBucket()
+    const queue = { messages: [], send: async message => queue.messages.push(message) }
+    const env = envFor(db, bucket, queue)
+    let tokenRequests = 0
+    const refreshBodies = []
+    let uploaded = null
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options = {}) => {
+        if (url === 'https://login.microsoftonline.com/common/oauth2/v2.0/token') {
+            tokenRequests += 1
+            refreshBodies.push(String(options.body || ''))
+            return tokenRequests === 1
+                ? Response.json({ access_token: 'short-onedrive', refresh_token: 'onedrive-refresh-secret', expires_in: -1 })
+                : tokenRequests === 2
+                    ? Response.json({ access_token: 'refreshed-onedrive', refresh_token: 'rotated-onedrive-secret', expires_in: -1 })
+                    : Response.json({ access_token: 'second-refreshed-onedrive', refresh_token: 'rotated-again-onedrive-secret', expires_in: 3600 })
+        }
+        const target = typeof url === 'string' ? url : url.url
+        if (target.endsWith('/v1.0/me/drive')) return Response.json({ id: 'drive' })
+        if (target.includes('/v1.0/me/drive/root:/raindrop-backup-')) {
+            uploaded = typeof url === 'string' ? new Request(target, options) : url
+            return new Response(null, { status: 201 })
+        }
+        return originalFetch(url, options)
+    }
+    t.after(() => { globalThis.fetch = originalFetch })
+
+    const start = await worker.fetch(request('/v1/backup/connections/onedrive/authorize', { headers: { Cookie: 'rd_session=test' } }), env)
+    assert.equal(start.status, 302)
+    const authorization = new URL(start.headers.get('Location'))
+    assert.equal(authorization.hostname, 'login.microsoftonline.com')
+    assert.match(authorization.searchParams.get('scope'), /Files\.ReadWrite/)
+    assert.match(authorization.searchParams.get('scope'), /offline_access/)
+    assert.equal(authorization.searchParams.get('prompt'), 'select_account')
+    const callback = await worker.fetch(request('/v1/auth/onedrive/callback?code=onedrive-code&state=' + authorization.searchParams.get('state')), env)
+    assert.equal(callback.status, 303)
+    assert.match(callback.headers.get('Location'), /settings\/backups\?connected=onedrive/)
+    assert.equal(db.connections.length, 1)
+    assert.equal(db.connections[0].provider, 'onedrive')
+    assert.equal(db.connections[0].is_default, 1)
+    assert.doesNotMatch(db.connections[0].encrypted_credentials, /short-onedrive|onedrive-refresh-secret/)
+    const initialEncrypted = db.connections[0].encrypted_credentials
+
+    const created = await worker.fetch(request('/v1/backup', { headers: { Cookie: 'rd_session=test' } }), env)
+    assert.equal(created.status, 202)
+    await worker.queue({ messages: [{ body: queue.messages[0], ack: () => {}, retry: () => assert.fail('unexpected retry') }] }, env)
+    assert.equal(tokenRequests, 2)
+    assert.equal(db.backups[0].status, 'succeeded')
+    assert.equal(db.externalCopies[0].status, 'succeeded')
+    assert.equal(uploaded.method, 'PUT')
+    assert.match(uploaded.headers.get('Authorization'), /refreshed-onedrive/)
+    assert.equal(refreshBodies.length, 2)
+    assert.match(refreshBodies[1], /onedrive-refresh-secret/)
+    assert.notEqual(db.connections[0].encrypted_credentials, initialEncrypted)
+
+    const second = await worker.fetch(request('/v1/backup', { headers: { Cookie: 'rd_session=test' } }), env)
+    assert.equal(second.status, 202)
+    await worker.queue({ messages: [{ body: queue.messages[1], ack: () => {}, retry: () => assert.fail('unexpected retry') }] }, env)
+    assert.equal(tokenRequests, 3)
+    assert.match(refreshBodies[2], /rotated-onedrive-secret/)
+    assert.match(uploaded.headers.get('Authorization'), /second-refreshed-onedrive/)
 })
