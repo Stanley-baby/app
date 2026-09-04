@@ -5210,7 +5210,9 @@ export default {
                     const connection = await env.DB.prepare('SELECT id FROM backup_connections WHERE id = ? AND user_id = ?')
                         .bind(id, session.user_id).first()
                     if (!connection) return error('backup_connection_not_found', 404, request, env)
-                    await env.DB.prepare('UPDATE backup_connections SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE user_id = ?')
+                    await env.DB.prepare('UPDATE backup_connections SET is_default = 0 WHERE user_id = ?')
+                        .bind(session.user_id).run()
+                    await env.DB.prepare('UPDATE backup_connections SET is_default = 1 WHERE id = ? AND user_id = ?')
                         .bind(id, session.user_id).run()
                     return json({ result: true }, 200, request, env)
                 }

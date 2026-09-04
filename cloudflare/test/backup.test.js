@@ -126,6 +126,11 @@ class BackupDatabase {
                 this.connections.filter(item => item.user_id === Number(values[1])).forEach(item => { item.is_default = item.id === values[0] ? 1 : 0 })
                 return { meta: { changes: 1 } }
             }
+            if (sql.includes('UPDATE backup_connections SET is_default = 1')) {
+                const connection = this.connections.find(item => item.id === values[0] && item.user_id === Number(values[1]))
+                if (connection) connection.is_default = 1
+                return { meta: { changes: connection ? 1 : 0 } }
+            }
             if (sql.includes('UPDATE backup_connections SET is_default = 0')) {
                 this.connections.filter(item => item.user_id === Number(values[0])).forEach(item => { item.is_default = 0 })
                 return { meta: { changes: 1 } }
@@ -401,6 +406,14 @@ test('external destinations verify independently, hide credentials, and receive 
     assert.equal(db.externalCopies[0].status, 'succeeded')
     assert.equal(requests[2].method, 'PUT')
     assert.match(requests[2].url, /^https:\/\/dav\.example\.test\/backups\/raindrop-backup-/)
+
+    const oneDriveId = db.connections.find(item => item.provider === 'onedrive').id
+    const defaultResponse = await worker.fetch(request('/v1/backup/connections/' + oneDriveId + '/default', {
+        method: 'POST', headers: { Cookie: 'rd_session=test' }
+    }), env)
+    assert.equal(defaultResponse.status, 200)
+    assert.equal(db.connections.find(item => item.provider === 'onedrive').is_default, 1)
+    assert.equal(db.connections.filter(item => item.is_default).length, 1)
 })
 
 test('WebDAV rejects private endpoints and redirects before sending credentials', async t => {
