@@ -22,11 +22,23 @@ components:
       type: apiKey
       in: cookie
       name: rd_session
+    BearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: DeveloperToken or OAuthAccessToken
 x-error-alerts:
   api_error:
     response: internal_error
     metadata: [code, status]
     redacted: true
+x-bearer-auth:
+  description: Developer Tokens and OAuth access tokens may replace SessionCookie on data routes outside Beta.
+  scopes:
+    profile:read: User profile and quota reads.
+    bookmarks:read: Bookmark and saved-content reads.
+    bookmarks:write: Bookmark and saved-content writes.
+    collections:read: Collection, tag, and filter reads.
+    collections:write: Collection, tag, and filter writes.
 paths:
   /health:
     get:
@@ -111,6 +123,63 @@ paths:
           description: Service is temporarily unavailable.
         '500':
           $ref: '#/components/responses/InternalError'
+  /v1/auth/apple:
+    get:
+      security: []
+      responses:
+        '302': {description: Redirect to Apple consent.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '503': {description: Apple sign-in is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security: []
+      responses:
+        '200': {description: Authorize a Beta Apple signup and return the consent URL.}
+        '403': {description: Beta Access Password rejected.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '503': {description: Apple sign-in is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/apple/callback:
+    get:
+      security: []
+      responses:
+        '303': {description: Complete an Apple sign-in or connection.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '503': {description: Apple sign-in is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security: []
+      responses:
+        '303': {description: Complete an Apple sign-in or connection from the form_post response.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '503': {description: Apple sign-in is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/tfa/{token}:
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema: {type: string}
+    post:
+      security: []
+      responses:
+        '200': {description: Device session cookie created after Second Factor verification.}
+        '401': {description: Second Factor challenge is invalid or expired.}
+        '503': {description: Authentication is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security: []
+      responses:
+        '200': {description: Second Factor disabled with a Recovery Code.}
+        '401': {description: Second Factor challenge is invalid or expired.}
+        '503': {description: Authentication is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/auth/onedrive/callback:
     get:
       security: []
@@ -136,6 +205,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
       parameters:
         - in: query
           name: removed
@@ -154,6 +225,8 @@ paths:
     delete:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       requestBody:
         required: true
         content:
@@ -183,6 +256,8 @@ paths:
     put:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       responses:
         '200':
           description: Empty owned Collections permanently removed.
@@ -194,6 +269,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       requestBody:
         required: true
         content:
@@ -233,6 +310,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
       responses:
         '200':
           description: Authorized Collection with numeric Resource ID.
@@ -245,6 +324,8 @@ paths:
     put:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       requestBody:
         required: true
         content:
@@ -278,6 +359,8 @@ paths:
     delete:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       responses:
         '200':
           description: Owned Collection and descendants moved to the Recycle Bin, or the Recycle Bin was permanently cleared for the special -99 ID.
@@ -297,6 +380,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
       parameters:
         - in: query
           name: search
@@ -322,6 +407,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
       responses:
         '200':
           description: Recently updated authorized Tags.
@@ -333,6 +420,8 @@ paths:
     put:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       requestBody:
         required: true
         content:
@@ -364,6 +453,8 @@ paths:
     delete:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       parameters:
         - in: query
           name: tag
@@ -393,6 +484,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
       responses:
         '200':
           description: Authorized tag filters for a Collection.
@@ -406,6 +499,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       requestBody:
         required: true
         content:
@@ -454,6 +549,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       requestBody:
         required: true
         content:
@@ -491,6 +588,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       responses:
         '200':
           description: Collection and Tag suggestions for an authorized Bookmark.
@@ -510,6 +609,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       responses:
         '200':
           description: Bookmark with its numeric Resource ID and Change Version.
@@ -522,6 +623,8 @@ paths:
     put:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       requestBody:
         required: true
         content:
@@ -586,6 +689,8 @@ paths:
     delete:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       responses:
         '200':
           description: Bookmark moved to the Recycle Bin and a Change Version emitted.
@@ -605,6 +710,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       responses:
         '200':
           description: Plain-text Highlights for the authorized Bookmark.
@@ -624,6 +731,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       responses:
         '200':
           description: CSV Highlights for the authorized Bookmark.
@@ -637,6 +746,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       requestBody:
         required: true
         content:
@@ -734,6 +845,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       responses:
         '200':
           description: Zero-based Bookmark page, total count, and the current lastAction/version marker.
@@ -746,6 +859,8 @@ paths:
     delete:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       requestBody:
         required: false
         content:
@@ -796,6 +911,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       responses:
         '200':
           description: Authorized Bookmark export in the requested format.
@@ -817,6 +934,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       parameters:
         - in: query
           name: since
@@ -1032,6 +1151,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
       parameters:
         - in: path
           name: id
@@ -1049,6 +1170,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [profile:read]
       responses:
         '200':
           description: Authenticated User.
@@ -1056,10 +1179,40 @@ paths:
           description: Login required.
         '500':
           $ref: '#/components/responses/InternalError'
+  /v1/user/tfa:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Begin authenticator-app Second Factor setup or return its enabled state.}
+        '401': {description: Login required.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Enable Second Factor and return the one-time Recovery Code.}
+        '400': {description: Authenticator code is invalid.}
+        '401': {description: Login required.}
+        '409': {description: Second Factor is already enabled.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Disable Second Factor after code verification.}
+        '400': {description: Authenticator or Recovery Code is invalid.}
+        '401': {description: Login required.}
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/user/quota:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [profile:read]
       responses:
         '200':
           description: Current daily Usage Quota and its reset time for the authenticated User.
@@ -1093,6 +1246,38 @@ paths:
           description: Browser origin is not the configured Web app.
         '409':
           description: Another sign-in method is required before disconnecting Google.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/connect/apple:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '302':
+          description: Redirect to Apple consent to connect an identity.
+        '404':
+          description: Public API access is unavailable in Beta.
+        '401':
+          description: Login required.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/connect/apple/revoke:
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Disconnect Apple from the authenticated User.
+        '403':
+          description: Browser origin is not the configured Web app.
+        '404':
+          description: Public API access is unavailable in Beta.
+        '409':
+          description: Another sign-in method is required before disconnecting Apple.
         '401':
           description: Login required.
         '500':
@@ -1409,6 +1594,8 @@ paths:
     put:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       requestBody:
         required: true
         content:
@@ -1447,6 +1634,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       requestBody:
         required: true
         content:
@@ -1481,6 +1670,8 @@ paths:
     put:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       requestBody:
         required: true
         content:
@@ -1504,6 +1695,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       parameters:
         - in: path
           name: id
@@ -1541,6 +1734,8 @@ paths:
     put:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       parameters:
         - in: path
           name: id
@@ -1569,6 +1764,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       parameters:
         - in: path
           name: id
@@ -1588,6 +1785,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       parameters:
         - in: path
           name: id
@@ -1621,6 +1820,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       parameters:
         - in: path
           name: id
@@ -1640,6 +1841,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       parameters:
         - in: path
           name: id
@@ -1659,6 +1862,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       parameters:
         - in: path
           name: id
@@ -1682,6 +1887,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
       parameters:
         - in: path
           name: id
@@ -1696,6 +1903,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       parameters:
         - in: path
           name: id
@@ -1723,6 +1932,8 @@ paths:
     delete:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       parameters:
         - in: path
           name: id
@@ -1739,6 +1950,8 @@ paths:
     put:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       parameters:
         - in: path
           name: id
@@ -1769,6 +1982,8 @@ paths:
     delete:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       responses:
         '200': {description: Collaborator removed.}
         '401': {description: Login required.}
@@ -1779,6 +1994,8 @@ paths:
     patch:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       parameters:
         - in: path
           name: id
@@ -1844,6 +2061,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       parameters:
         - in: path
           name: id
@@ -1870,6 +2089,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
       responses:
         '200': {description: Published snapshot metadata.}
         '401': {description: Login required.}
@@ -1881,6 +2102,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       requestBody:
         required: true
         content:
@@ -1905,6 +2128,8 @@ paths:
     delete:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
       responses:
         '200': {description: Published snapshot revoked.}
         '401': {description: Login required.}
@@ -1916,6 +2141,8 @@ paths:
     post:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       responses:
         '200': {description: Cleared snapshot published to its Owner Collection.}
         '400': {description: Snapshot validation failed.}
@@ -1928,6 +2155,8 @@ paths:
     delete:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
       responses:
         '200': {description: Published snapshot revoked.}
         '401': {description: Login required.}
@@ -2246,6 +2475,193 @@ paths:
         '404': {description: Chat is not owned by the User.}
         '503': {description: AI history storage is temporarily unavailable.}
 
+  /v1/developer/tokens:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: User-owned Developer Tokens without secret values.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '201': {description: Developer Token created; the secret is returned once.}
+        '400': {description: Invalid name, scope, or expiry.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/developer/tokens/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    delete:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Developer Token revoked.}
+        '401': {description: Login required.}
+        '404': {description: Developer Token not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/clients:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: User-owned OAuth Clients without client secrets.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/connections:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: OAuth Clients with an active delegated connection.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client:
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '201': {description: OAuth Client created; client secret is returned once.}
+        '400': {description: Invalid client metadata or redirect URI.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    put:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: OAuth Client metadata updated.}
+        '400': {description: Invalid client metadata or redirect URI.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: OAuth Client removed.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client/{id}/revoke:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    put:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: OAuth Client and its access tokens revoked.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client/{id}/reset_secret:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    put:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Client secret rotated and returned once.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client/{id}/test_token:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Short-lived test bearer token issued.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Short-lived test bearer token issued.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/authorize:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '302': {description: Authorization code sent to the exact registered redirect URI.}
+        '400': {description: Invalid OAuth request or PKCE parameters.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '302': {description: Authorization code sent to the exact registered redirect URI.}
+        '400': {description: Invalid OAuth request or PKCE parameters.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/token:
+    post:
+      security: []
+      responses:
+        '200': {description: Short-lived OAuth bearer access token.}
+        '400': {description: Invalid, expired, reused, or PKCE-mismatched authorization code.}
+        '401': {description: Invalid client authentication.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/access_token:
+    post:
+      security: []
+      responses:
+        '200': {description: OAuth bearer access token or rotated refresh token.}
+        '400': {description: Invalid, expired, reused, or PKCE-mismatched authorization or refresh grant.}
+        '401': {description: Invalid client authentication.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /v1/auth/logout:
     get:
       security: []
@@ -2266,6 +2682,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [profile:read]
       responses:
         '200': {description: Authorized Bookmark counters for active, unsorted, and Recycle Bin items.}
         '401': {description: Login required.}
@@ -2305,6 +2723,8 @@ paths:
     get:
       security:
         - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
       responses:
         '200': {description: Capture Request status and its safe Background Task details.}
         '401': {description: Login required.}

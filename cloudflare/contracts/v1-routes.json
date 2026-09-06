@@ -339,6 +339,18 @@
         },
         {
             "method": "GET",
+            "path": "/v1/user/connect/apple",
+            "authentication": "required",
+            "responses": [302, 401, 404, 503, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/user/connect/apple/revoke",
+            "authentication": "required",
+            "responses": [200, 401, 403, 404, 409, 500]
+        },
+        {
+            "method": "GET",
             "path": "/v1/user/deletion",
             "authentication": "required",
             "responses": [200, 401, 500]
@@ -606,6 +618,156 @@
             "path": "/v1/raindrop/:id/attachments",
             "authentication": "required",
             "responses": [201, 400, 401, 403, 404, 413, 503, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/auth/apple",
+            "authentication": "none",
+            "responses": [302, 404, 503, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/auth/apple",
+            "authentication": "none",
+            "responses": [200, 403, 404, 503, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/auth/apple/callback",
+            "authentication": "none",
+            "responses": [303, 404, 503, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/auth/apple/callback",
+            "authentication": "none",
+            "responses": [303, 404, 503, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/auth/tfa/:token",
+            "authentication": "none",
+            "responses": [200, 401, 503, 500]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/auth/tfa/:token",
+            "authentication": "none",
+            "responses": [200, 401, 503, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/user/tfa",
+            "authentication": "required",
+            "responses": [200, 401, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/user/tfa",
+            "authentication": "required",
+            "responses": [200, 400, 401, 409, 500]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/user/tfa",
+            "authentication": "required",
+            "responses": [200, 400, 401, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/developer/tokens",
+            "authentication": "required",
+            "responses": [200, 401, 404, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/developer/tokens",
+            "authentication": "required",
+            "responses": [201, 400, 401, 404, 500]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/developer/tokens/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/oauth/clients",
+            "authentication": "required",
+            "responses": [200, 401, 404, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/oauth/connections",
+            "authentication": "required",
+            "responses": [200, 401, 404, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/oauth/client",
+            "authentication": "required",
+            "responses": [201, 400, 401, 404, 500]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/oauth/client/:id",
+            "authentication": "required",
+            "responses": [200, 400, 401, 404, 500]
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/oauth/client/:id",
+            "authentication": "required",
+            "responses": [200, 401, 404, 500]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/oauth/client/:id/revoke",
+            "authentication": "required",
+            "responses": [200, 401, 404, 500]
+        },
+        {
+            "method": "PUT",
+            "path": "/v1/oauth/client/:id/reset_secret",
+            "authentication": "required",
+            "responses": [200, 401, 404, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/oauth/client/:id/test_token",
+            "authentication": "required",
+            "responses": [200, 401, 404, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/oauth/client/:id/test_token",
+            "authentication": "required",
+            "responses": [200, 401, 404, 500]
+        },
+        {
+            "method": "GET",
+            "path": "/v1/oauth/authorize",
+            "authentication": "required",
+            "responses": [302, 400, 401, 404, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/oauth/authorize",
+            "authentication": "required",
+            "responses": [302, 400, 401, 404, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/oauth/token",
+            "authentication": "none",
+            "responses": [200, 400, 401, 404, 500]
+        },
+        {
+            "method": "POST",
+            "path": "/v1/oauth/access_token",
+            "authentication": "none",
+            "responses": [200, 400, 401, 404, 500]
         },
         {
             "method": "PATCH",

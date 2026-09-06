@@ -1577,6 +1577,66 @@
     },
     {
       "method": "GET",
+      "path": "/v1/user/connect/apple",
+      "request": {
+        "method": "GET",
+        "path": "/v1/user/connect/apple",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        }
+      },
+      "responses": [
+        302,
+        401,
+        404,
+        503,
+        500
+      ],
+      "cases": {
+        "success": 302,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/user/connect/apple/revoke",
+      "request": {
+        "method": "POST",
+        "path": "/v1/user/connect/apple/revoke",
+        "headers": {
+          "Cookie": "{{session-cookie}}",
+          "Content-Type": "application/json",
+          "Origin": "https://app.example.test"
+        },
+        "body": {}
+      },
+      "responses": [
+        200,
+        401,
+        403,
+        404,
+        409,
+        500
+      ],
+      "cases": {
+        "success": 200,
+        "authentication": 401,
+        "permission": {
+          "status": 404,
+          "error": "public_api_unavailable",
+          "mode": "resource"
+        },
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "GET",
       "path": "/v1/user/deletion",
       "request": {
         "method": "GET",
@@ -2886,6 +2946,634 @@
             "mode": "resource"
           }
         ],
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/auth/apple",
+      "request": {
+        "method": "GET",
+        "path": "/v1/auth/apple"
+      },
+      "responses": [
+        302,
+        404,
+        503,
+        500
+      ],
+      "cases": {
+        "success": 302,
+        "authentication": null,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/apple",
+      "request": {
+        "method": "POST",
+        "path": "/v1/auth/apple",
+        "body": {}
+      },
+      "responses": [
+        200,
+        403,
+        404,
+        503,
+        500
+      ],
+      "cases": {
+        "success": 200,
+        "authentication": null,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/auth/apple/callback",
+      "request": {
+        "method": "GET",
+        "path": "/v1/auth/apple/callback"
+      },
+      "responses": [
+        303,
+        404,
+        503,
+        500
+      ],
+      "cases": {
+        "success": 303,
+        "authentication": null,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/apple/callback",
+      "request": {
+        "method": "POST",
+        "path": "/v1/auth/apple/callback",
+        "body": {}
+      },
+      "responses": [
+        303,
+        404,
+        503,
+        500
+      ],
+      "cases": {
+        "success": 303,
+        "authentication": null,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/auth/tfa/:token",
+      "request": {
+        "method": "POST",
+        "path": "/v1/auth/tfa/:token",
+        "body": {}
+      },
+      "responses": [
+        200,
+        401,
+        503,
+        500
+      ],
+      "cases": {
+        "success": 401,
+        "authentication": null,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/auth/tfa/:token",
+      "request": {
+        "method": "DELETE",
+        "path": "/v1/auth/tfa/:token",
+        "body": {}
+      },
+      "responses": [
+        200,
+        401,
+        503,
+        500
+      ],
+      "cases": {
+        "success": 401,
+        "authentication": null,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/user/tfa",
+      "request": {
+        "method": "GET",
+        "path": "/v1/user/tfa",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        }
+      },
+      "responses": [
+        200,
+        401,
+        500
+      ],
+      "cases": {
+        "success": 200,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/user/tfa",
+      "request": {
+        "method": "POST",
+        "path": "/v1/user/tfa",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        200,
+        400,
+        401,
+        409,
+        500
+      ],
+      "cases": {
+        "success": 400,
+        "authentication": 401,
+        "permission": null,
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/user/tfa",
+      "request": {
+        "method": "DELETE",
+        "path": "/v1/user/tfa",
+        "headers": {
+          "Cookie": "{{session-cookie}}",
+          "Content-Type": "application/json"
+        },
+        "body": {}
+      },
+      "responses": [
+        200,
+        400,
+        401,
+        500
+      ],
+      "cases": {
+        "success": 400,
+        "authentication": 401,
+        "permission": null,
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/developer/tokens",
+      "request": {
+        "method": "GET",
+        "path": "/v1/developer/tokens",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        }
+      },
+      "responses": [
+        200,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 200,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/developer/tokens",
+      "request": {
+        "method": "POST",
+        "path": "/v1/developer/tokens",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        201,
+        400,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 400,
+        "authentication": 401,
+        "permission": null,
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/developer/tokens/:id",
+      "request": {
+        "method": "DELETE",
+        "path": "/v1/developer/tokens/:id",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        200,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 200,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/oauth/clients",
+      "request": {
+        "method": "GET",
+        "path": "/v1/oauth/clients",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        }
+      },
+      "responses": [
+        200,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 200,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/oauth/connections",
+      "request": {
+        "method": "GET",
+        "path": "/v1/oauth/connections",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        }
+      },
+      "responses": [
+        200,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 200,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/oauth/client",
+      "request": {
+        "method": "POST",
+        "path": "/v1/oauth/client",
+        "headers": {
+          "Cookie": "{{session-cookie}}",
+          "Content-Type": "application/json"
+        },
+        "body": {}
+      },
+      "responses": [
+        201,
+        400,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 400,
+        "authentication": 401,
+        "permission": null,
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/oauth/client/:id",
+      "request": {
+        "method": "PUT",
+        "path": "/v1/oauth/client/:id",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        200,
+        400,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 404,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/oauth/client/:id",
+      "request": {
+        "method": "DELETE",
+        "path": "/v1/oauth/client/:id",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        200,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 404,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/oauth/client/:id/revoke",
+      "request": {
+        "method": "PUT",
+        "path": "/v1/oauth/client/:id/revoke",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        200,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 404,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/oauth/client/:id/reset_secret",
+      "request": {
+        "method": "PUT",
+        "path": "/v1/oauth/client/:id/reset_secret",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        200,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 404,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/oauth/client/:id/test_token",
+      "request": {
+        "method": "GET",
+        "path": "/v1/oauth/client/:id/test_token",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        }
+      },
+      "responses": [
+        200,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 404,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/oauth/client/:id/test_token",
+      "request": {
+        "method": "POST",
+        "path": "/v1/oauth/client/:id/test_token",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        200,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 404,
+        "authentication": 401,
+        "permission": null,
+        "validation": null,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/oauth/authorize",
+      "request": {
+        "method": "GET",
+        "path": "/v1/oauth/authorize",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        }
+      },
+      "responses": [
+        302,
+        400,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 400,
+        "authentication": 401,
+        "permission": null,
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/oauth/authorize",
+      "request": {
+        "method": "POST",
+        "path": "/v1/oauth/authorize",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        302,
+        400,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 400,
+        "authentication": 401,
+        "permission": null,
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/oauth/token",
+      "request": {
+        "method": "POST",
+        "path": "/v1/oauth/token",
+        "body": {}
+      },
+      "responses": [
+        200,
+        400,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 400,
+        "authentication": null,
+        "permission": null,
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/oauth/access_token",
+      "request": {
+        "method": "POST",
+        "path": "/v1/oauth/access_token",
+        "body": {}
+      },
+      "responses": [
+        200,
+        400,
+        401,
+        404,
+        500
+      ],
+      "cases": {
+        "success": 400,
+        "authentication": null,
+        "permission": null,
         "validation": 400,
         "pagination": null,
         "sync": null

@@ -67,9 +67,13 @@ test('OpenAPI v1 paths and methods stay in lockstep with the route manifest', ()
         const path = normalizePath(route.path)
         const operation = openapi.paths[path]?.[route.method.toLowerCase()]
         assert.ok(operation, `missing OpenAPI operation for ${route.method} ${route.path}`)
-        if (route.authentication === 'required')
-            assert.deepEqual(operation.security, [{ SessionCookie: [] }], `OpenAPI ${route.method} ${path} must require the session cookie`)
-        else assert.deepEqual(operation.security, [], `OpenAPI ${route.method} ${path} must be explicitly public`)
+        if (route.authentication === 'required') {
+            assert.ok(operation.security.some(value => value.SessionCookie), `OpenAPI ${route.method} ${path} must require the session cookie`)
+            if (operation['x-bearer-scopes']) {
+                assert.ok(operation.security.some(value => value.BearerToken), `OpenAPI ${route.method} ${path} must document bearer access`)
+                assert.ok(operation['x-bearer-scopes'].length > 0, `OpenAPI ${route.method} ${path} must document bearer scopes`)
+            } else assert.deepEqual(operation.security, [{ SessionCookie: [] }], `OpenAPI ${route.method} ${path} must require only the session cookie`)
+        } else assert.deepEqual(operation.security, [], `OpenAPI ${route.method} ${path} must be explicitly public`)
         const responses = Object.keys(operation.responses || {}).map(Number)
         for (const status of route.responses)
             assert.ok(responses.includes(status), `OpenAPI ${route.method} ${path} omits ${status}`)
