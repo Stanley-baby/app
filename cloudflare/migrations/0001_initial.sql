@@ -1,0 +1,1 @@
+-- Initial schema is intentionally empty; service routes land in later phases.

@@ -6,9 +6,9 @@ export default function(url='') {
     if (!finalURL)
         return ''
 
-    if (finalURL.includes(WORKERS_BASE_URL) ||
-        finalURL.includes(LEGACY_WORKERS_BASE_URL))
+    if ((WORKERS_BASE_URL && finalURL.includes(WORKERS_BASE_URL)) ||
+        (LEGACY_WORKERS_BASE_URL && finalURL.includes(LEGACY_WORKERS_BASE_URL)))
         return finalURL.replace(/width=\d+/, 'a')
 
-    return RENDER_URL+'/'+encodeURIComponent(finalURL)
+    return RENDER_URL ? RENDER_URL+'/'+encodeURIComponent(finalURL) : finalURL
 }

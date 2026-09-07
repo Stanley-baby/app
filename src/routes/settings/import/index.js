@@ -13,6 +13,7 @@ import File from './file'
 // import Mode from './mode'
 import Parcel from './parcel'
 import Help from './help'
+import BetaMigration from './beta'
 
 export default function Import() {
 	const { pathname } = useLocation()
@@ -40,10 +41,12 @@ export default function Import() {
 
 			<Layout type='grid'>
 				<Helmet><title>{t.s('import')}</title></Helmet>
-		
-				<File />
-				{/* <Mode /> */}
-				<Parcel />
+
+				{process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' ? <BetaMigration /> : <>
+					<File />
+					{/* <Mode /> */}
+					<Parcel />
+				</>}
 			</Layout>
 		</>
 	)

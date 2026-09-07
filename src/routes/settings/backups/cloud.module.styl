@@ -1,17 +1,19 @@
-.default {
-    .icon {
-        color: var(--secondary-text-color)
-    }
-}
+.cloud
+    display grid
+    gap .75rem
 
-.enabled {
-    font-weight: 600
+.connection
+    display flex
+    align-items center
+    gap .75rem
 
-    .dropbox {
-        color: #0061FF !important
-    }
+    span
+        color var(--secondary-text-color)
 
-    .gdrive {
-        color: #FE2C25 !important
-    }
-}
+.form
+    display grid
+    gap .5rem
+
+    select
+        min-height 2.5rem
+        padding 0 .75rem

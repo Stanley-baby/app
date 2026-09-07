@@ -9,7 +9,7 @@ import Logo from '~assets/brand/icon_raw.svg?component'
 export default ()=>(
 	<Screen className={s.page} appSize='large'>
 		<div className={s.content}>
-			<a href='https://raindrop.io' target='_blank' tabIndex='-1'>
+			<a href={config.links.home} target='_blank' tabIndex='-1'>
 				<Logo className={s.logo} />
 			</a>
 

@@ -131,6 +131,7 @@ export const normalizeCollection = (item={})=>{
 		title: 		item.title||'',
 		description:item.description||'',
 		slug: 		item.slug,
+		publicLink: item.publicLink,
 		count: 		parseInt(item.count||0),
 		public: 	item.public||false,
 		expanded: 	item.expanded||false,

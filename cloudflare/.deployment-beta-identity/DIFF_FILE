@@ -1,0 +1,35 @@
+diff --git a/cloudflare/environments.json b/cloudflare/environments.json
+index cd61b4d3..8df17f43 100644
+--- a/cloudflare/environments.json
++++ b/cloudflare/environments.json
+@@ -58,11 +58,11 @@
+     "beta": {
+         "workerName": "raindrop-api-beta",
+         "apiOrigin": "https://raindrop-api-beta.shenyuan.workers.dev",
+-        "appOrigin": "https://beta.raindrop.io",
++        "appOrigin": "https://raindrop-beta.pages.dev",
+         "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
+-        "turnstileSiteKey": "",
++        "turnstileSiteKey": "0x4AAAAAAEgrWY2vz8wLYW8D",
+         "corsOrigins": [
+-            "https://beta.raindrop.io",
++            "https://raindrop-beta.pages.dev",
+             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+         ],
+         "resourceNames": {
+diff --git a/cloudflare/wrangler.toml b/cloudflare/wrangler.toml
+index c211f65b..06e42ecb 100644
+--- a/cloudflare/wrangler.toml
++++ b/cloudflare/wrangler.toml
+@@ -84,9 +84,9 @@ workers_dev = true
+ ENVIRONMENT = "beta"
+ VERSION = "0.1.0-beta"
+ API_ORIGIN = "https://raindrop-api-beta.shenyuan.workers.dev"
+-APP_ORIGIN = "https://beta.raindrop.io"
++APP_ORIGIN = "https://raindrop-beta.pages.dev"
+ AI_PAGE_ORIGIN = "https://beta-ai.raindrop.io/ai"
+-CORS_ORIGINS = "https://beta.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
++CORS_ORIGINS = "https://raindrop-beta.pages.dev chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+ MAIL_PROVIDER = "resend"
+ 
+ [[env.beta.d1_databases]]

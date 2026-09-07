@@ -27,7 +27,7 @@ export default function WebViewBrowser({ src, forwardedRef, className='', onErro
             {...etc}
             ref={forwardedRef}
             className={s.iframe + ' ' + className}
-            src={`${PREVIEW_URL}/web/${base64}`}
+            src={PREVIEW_URL ? `${PREVIEW_URL}/web/${base64}` : src}
             onError={onError} />
     )
 }

@@ -2,8 +2,8 @@ name: Publish GitHub Release
 
 on:
   push:
-    branches:
-    - release/production
+    tags:
+    - 'v*'
 
 jobs:
   build:
@@ -16,18 +16,16 @@ jobs:
     - name: Use Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: 24
+        node-version: 18.16.0
 
     - name: Install dependencies
       run: npm ci
 
-    - name: Make version.sh for xcode project executable
-      run: chmod +x build/xcode/Save\ to\ Raindrop.io/version.sh
+    - name: Build self-hosted clients
+      run: npm run build:selfhosted && npm run build:extension:selfhosted
 
-    - name: Build for all platforms
-      env:
-        SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-      run: npm run build && npm run build:extension && npm run build:electron
+    - name: Package Web client
+      run: cd dist/web && zip -r ../web-selfhosted.zip selfhosted
 
     - name: Read package json
       id: json

@@ -23,6 +23,7 @@ import {
 } from '../../helpers/bookmarks'
 
 import { isPro } from '../../selectors/user'
+import { independentService } from '~config/environment'
 
 //Requests
 export default function* () {
@@ -77,7 +78,7 @@ function* createBookmark({obj={}, ignore=false, draft, onSuccess, onFail}) {
 		let item = { ...obj }
 
 		//minimum info is already provided, grab all other in background on server
-		if (item.title)
+		if (item.title || independentService)
 			item.pleaseParse = { weight: 1 }
 		//parse bookmark otherwise
 		else {
@@ -385,7 +386,7 @@ function* suggestFields({ obj, ignore }) {
 	try{
 		const state = yield select()
 		const pro = isPro(state)
-		if (!pro) return
+		if (!pro && !independentService) return
 
 		const { item } = obj._id ?
 			yield call(Api.get, `raindrop/${obj._id}/suggest`) :

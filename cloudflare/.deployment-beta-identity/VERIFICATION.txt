@@ -1,0 +1,55 @@
+BRANCH: docs/add-repository-guidelines
+FIELD: Beta Pages origin and live identity deployment
+MODIFIED_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.deployment-beta-identity/MODIFIED_FILE
+DIFF_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.deployment-beta-identity/DIFF_FILE
+VERIFICATION_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.deployment-beta-identity/VERIFICATION.txt
+ROLLBACK_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.deployment-beta-identity/ROLLBACK.sh
+
+BASELINE
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: pre-Pages #3 implementation
+LITERAL_OUTPUT: # tests 7; # pass 7; # fail 0
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run build -- --env environment=beta
+INPUT: TURNSTILE_SITE_KEY=0x4AAAAAAEgrWY2vz8wLYW8D and Pages origin
+LITERAL_OUTPUT: webpack 5.105.4 compiled successfully
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler d1 migrations apply raindrop-db-beta --remote --config cloudflare/wrangler.toml --env beta
+INPUT: 0001_initial.sql, 0002_identity_sessions.sql
+LITERAL_OUTPUT: 0001_initial.sql ✅; 0002_identity_sessions.sql ✅
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler deploy --config cloudflare/wrangler.toml --env beta
+INPUT: Beta Worker
+LITERAL_OUTPUT: Current Version ID: f598a89b-bd1e-4384-be05-265f49896fbd
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler pages deploy dist/web/beta --project-name raindrop-beta --branch beta --commit-dirty=true
+INPUT: Beta Web build
+LITERAL_OUTPUT: Deployment complete! https://e17e869f.raindrop-beta.pages.dev
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: curl -H "Origin: https://raindrop-beta.pages.dev" https://raindrop-api-beta.shenyuan.workers.dev/v1/user
+INPUT: unauthenticated Beta Web request
+LITERAL_OUTPUT: HTTP 401; Access-Control-Allow-Origin: https://raindrop-beta.pages.dev; login: https://raindrop-beta.pages.dev/account/login
+RESULT: PASS
+EXIT_STATUS: 0
+
+ROLLBACK
+COMMAND: cloudflare/.deployment-beta-identity/ROLLBACK.sh TARGET_REPOSITORY
+INPUT: separate copy of changed environments.json and wrangler.toml
+LITERAL_OUTPUT: restored Beta Pages configuration
+RESULT: restored pre-Pages configuration
+EXIT_STATUS: 0; environment comparison 0; wrangler comparison 0

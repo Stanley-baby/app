@@ -1,0 +1,48 @@
+BRANCH: docs/add-repository-guidelines
+FIELD: TURNSTILE_ENABLED Beta registration switch
+MODIFIED_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.turnstile-removal/MODIFIED_FILE
+DIFF_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.turnstile-removal/DIFF_FILE
+VERIFICATION_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.turnstile-removal/VERIFICATION.txt
+ROLLBACK_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/.turnstile-removal/ROLLBACK.sh
+
+BASELINE
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: Turnstile-required Beta registration
+LITERAL_OUTPUT: # tests 8; # pass 8; # fail 0
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: TURNSTILE_ENABLED=false and true contract paths
+LITERAL_OUTPUT: # tests 8; # pass 8; # fail 0
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run build -- --env environment=beta
+INPUT: Beta Web with TURNSTILE_ENABLED=false
+LITERAL_OUTPUT: webpack 5.105.4 compiled successfully
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler deploy --config cloudflare/wrangler.toml --env beta
+INPUT: TURNSTILE_ENABLED=false
+LITERAL_OUTPUT: Current Version ID: 7138d77d-def0-4969-a097-f129f33fd81e
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler pages deploy dist/web/beta --project-name raindrop-beta --branch beta --commit-dirty=true
+INPUT: Beta Web without Turnstile widget
+LITERAL_OUTPUT: Production deployment c46c45fc-9473-4abf-9a07-c6c1482c6a3c
+RESULT: PASS
+EXIT_STATUS: 0
+
+ROLLBACK
+COMMAND: cloudflare/.turnstile-removal/ROLLBACK.sh TARGET_REPOSITORY
+INPUT: separate copy of switch-disabled files
+LITERAL_OUTPUT: restored Turnstile-enabled configuration (16 files)
+RESULT: restored pre-switch behavior and files
+EXIT_STATUS: 0; comparison exit 0

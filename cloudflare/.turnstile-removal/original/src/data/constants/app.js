@@ -1,0 +1,29 @@
+export const
+	APP_DOMAIN 			= 'raindrop.io'
+
+export const
+	APP_BASE_URL 		= `https://${APP_DOMAIN}`,
+	WORKERS_BASE_URL	= 'https://rdl.ink',
+	LEGACY_WORKERS_BASE_URL=`https://stella.${APP_DOMAIN}`
+
+const defaultApiOrigin = process.env.NODE_ENV == 'production' || RAINDROP_ENVIRONMENT == 'react-native' ? 'https://api.raindrop.io' : 'http://localhost:8787'
+const defaultAiPageOrigin = process.env.NODE_ENV == 'production' ? 'https://ai.raindrop.io/ai' : 'http://localhost:5173/ai'
+const trimTrailingSlash = value => String(value || '').replace(/\/+$/, '')
+export const
+	API_ORIGIN = trimTrailingSlash(process.env.API_ORIGIN || defaultApiOrigin),
+	AI_PAGE_ORIGIN = trimTrailingSlash(process.env.AI_PAGE_ORIGIN || defaultAiPageOrigin)
+
+export const
+	RECAPTCHA_SITE_KEY = '6LfB38wUAAAAAMX3VuFcriTz-Tb-qw7MD966XNnk'
+
+export const
+	TURNSTILE_SITE_KEY	= process.env.TURNSTILE_SITE_KEY || ''
+
+export const
+	API_ENDPOINT_URL 	= `${API_ORIGIN}/v1/`,
+	API_RETRIES 		= 3,
+	API_TIMEOUT 		= 30000,
+	FAVICON_URL 		= `${WORKERS_BASE_URL}/favicon`,
+	RENDER_URL 			= `${WORKERS_BASE_URL}/render`,
+	PREVIEW_URL			= 'https://preview.systems',
+	BETA_AI_URL			= AI_PAGE_ORIGIN

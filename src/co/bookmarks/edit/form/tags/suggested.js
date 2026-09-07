@@ -4,6 +4,7 @@ import t from '~t'
 import { useSelector } from 'react-redux'
 import { makeSuggestedFields } from '~data/selectors/bookmarks'
 import { isPro } from '~data/selectors/user'
+import { independentService } from '~config/environment'
 
 import Icon from '~co/common/icon'
 import Button from '~co/common/button'
@@ -41,7 +42,7 @@ export default function BookmarkEditFormTagsSuggested({ item, onTagClick }) {
         onTagClick(tag)
     }, [onTagClick])
 
-    if (!enabled || !pro)
+    if (!enabled || !pro && !independentService)
         return null
 
     return (

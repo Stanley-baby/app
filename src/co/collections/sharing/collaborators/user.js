@@ -46,10 +46,11 @@ export default class CollectionSharingCollaboratorsUser extends React.PureCompon
                     <ItemActions>
                         <Select 
                             variant='link'
-                            value={role} 
+                            value={role == 'editor' ? 'editor' : role}
                             data-userid={_id} 
                             onChange={this.onChangeRole}>
                             {role=='owner' ? <option value='owner'>{t.s('role_owner')}</option> : null}
+                            <option value='editor'>{t.s('role_member')}</option>
                             <option value='member'>{t.s('role_member')}</option>
                             <option value='viewer'>{t.s('role_viewer')}</option>
                         </Select>

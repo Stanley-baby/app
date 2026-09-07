@@ -1,0 +1,72 @@
+diff --git a/cloudflare/src/index.js b/cloudflare/src/index.js
+index 81671e94..dd458781 100644
+--- a/cloudflare/src/index.js
++++ b/cloudflare/src/index.js
+@@ -5,12 +5,7 @@ const passwordIterations = 310000
+ 
+ const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
+ 
+-const json = (body, status, request, env, extraHeaders = {}) => {
+-    const headers = new Headers({
+-        'Content-Type': 'application/json; charset=utf-8',
+-        'X-Request-ID': requestId(request),
+-        ...extraHeaders
+-    })
++const addCorsHeaders = (headers, request, env) => {
+     const origin = request.headers.get('Origin')
+     const allowedOrigins = String(env.CORS_ORIGINS || '').split(/\s+/).filter(Boolean)
+ 
+@@ -23,6 +18,16 @@ const json = (body, status, request, env, extraHeaders = {}) => {
+         headers.set('Vary', 'Origin')
+     }
+ 
++    return headers
++}
++
++const json = (body, status, request, env, extraHeaders = {}) => {
++    const headers = addCorsHeaders(new Headers({
++        'Content-Type': 'application/json; charset=utf-8',
++        'X-Request-ID': requestId(request),
++        ...extraHeaders
++    }), request, env)
++
+     return new Response(JSON.stringify(body), { status, headers })
+ }
+ 
+@@ -30,8 +35,9 @@ const error = (code, status, request, env, errorMessage = code) =>
+     json({ result: false, error: code, errorMessage }, status, request, env)
+ 
+ const cors = (request, env) => {
+-    const headers = json({}, 204, request, env).headers
+-    headers.delete('Content-Type')
++    const headers = addCorsHeaders(new Headers({
++        'X-Request-ID': requestId(request)
++    }), request, env)
+     headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
+     headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID, X-Device-Name')
+     headers.set('Access-Control-Max-Age', '600')
+diff --git a/cloudflare/test/contract.test.js b/cloudflare/test/contract.test.js
+index f75fb91d..f1bd5261 100644
+--- a/cloudflare/test/contract.test.js
++++ b/cloudflare/test/contract.test.js
+@@ -89,3 +89,20 @@ test('configured extension origins receive credentialed CORS headers', async ()
+     assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'chrome-extension://local-dev')
+     assert.equal(response.headers.get('Access-Control-Allow-Credentials'), 'true')
+ })
++
++test('preflight returns credentialed CORS headers without a response body', async () => {
++    const response = await worker.fetch(new Request('http://localhost/v1/auth/email/signup', {
++        method: 'OPTIONS',
++        headers: {
++            Origin: 'http://localhost:2000',
++            'Access-Control-Request-Method': 'POST',
++            'Access-Control-Request-Headers': 'Content-Type'
++        }
++    }), env)
++
++    assert.equal(response.status, 204)
++    assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'http://localhost:2000')
++    assert.equal(response.headers.get('Access-Control-Allow-Credentials'), 'true')
++    assert.equal(response.headers.get('Access-Control-Allow-Methods'), 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
++    assert.equal(response.headers.get('Access-Control-Allow-Headers'), 'Content-Type, X-Request-ID, X-Device-Name')
++})

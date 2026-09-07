@@ -4,7 +4,7 @@ import t from '~t'
 import Preloader from '~co/common/preloader'
 import Button, { ButtonsGroup } from '~co/common/button'
 
-export default function BookmarkEditFormActionMain({ status, onRemove }) {
+export default function BookmarkEditFormActionMain({ status, onRemove, onRecover }) {
     switch(status){
         case 'saving':
         case 'loading':
@@ -28,12 +28,20 @@ export default function BookmarkEditFormActionMain({ status, onRemove }) {
 
         case 'removed':
             return (
-                <Button 
-                    variant='link'
-                    accent='danger'
-                    onClick={onRemove}>
-                    {t.s('removeFromTrash')}
-                </Button>
+                <ButtonsGroup>
+                    <Button
+                        variant='link'
+                        onClick={onRecover}>
+                        {t.s('restore')}
+                    </Button>
+
+                    <Button
+                        variant='link'
+                        accent='danger'
+                        onClick={onRemove}>
+                        {t.s('removeFromTrash')}
+                    </Button>
+                </ButtonsGroup>
             )
 
         case 'idle':

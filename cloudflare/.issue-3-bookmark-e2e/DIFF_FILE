@@ -1,0 +1,6 @@
+BRANCH: docs/add-repository-guidelines
+cloudflare/migrations/0003_bookmark_lifecycle.sql: add per-user collections and bookmark collection/tags/recycle-bin fields
+cloudflare/src/index.js: add collection/bookmark lifecycle routes, stats/list/search, browser form error page
+cloudflare/test/identity.test.js: cover collection, create/list/update/delete/restore, batch create, repeated/invalid confirmation, form error
+cloudflare/test/build-config.test.js: require Pages SPA fallback
+src/assets/_redirects: serve client-side routes from index.html

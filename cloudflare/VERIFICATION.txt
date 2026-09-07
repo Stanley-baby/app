@@ -1,0 +1,63 @@
+BRANCH: docs/add-repository-guidelines
+FIELD: Beta identity, email verification, and device sessions
+MODIFIED_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/MODIFIED_FILE
+DIFF_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/DIFF_FILE
+VERIFICATION_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/VERIFICATION.txt
+ROLLBACK_FILE: /Users/xx/Downloads/插件项目/raindrop-app/cloudflare/ROLLBACK.sh
+
+BASELINE
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: pre-#3 checkout
+LITERAL_OUTPUT:
+# tests 6
+# pass 6
+# fail 0
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run test:contract
+INPUT: Beta signup, Turnstile rejection, email confirmation, basic Bookmark, and session revoke fixtures
+LITERAL_OUTPUT:
+# tests 7
+# pass 7
+# fail 0
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler d1 migrations apply raindrop-db-local --local --persist-to cloudflare/.issue-3/d1-test --config cloudflare/wrangler.toml
+INPUT: 0001_initial.sql, 0002_identity_sessions.sql
+LITERAL_OUTPUT:
+│ 0001_initial.sql           │ ✅ │
+│ 0002_identity_sessions.sql │ ✅ │
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run build -- --env environment=beta
+INPUT: Beta Web build
+LITERAL_OUTPUT: webpack 5.105.4 compiled successfully
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npm run build:extension:chrome -- --env environment=beta
+INPUT: Beta Chrome build
+LITERAL_OUTPUT: webpack 5.105.4 compiled successfully
+RESULT: PASS
+EXIT_STATUS: 0
+
+MODIFIED
+COMMAND: PATH="$(brew --prefix node@18)/bin:$PATH" rtk npx wrangler deploy --dry-run --config cloudflare/wrangler.toml --env beta
+INPUT: Beta Worker configuration
+LITERAL_OUTPUT: --dry-run: exiting now.
+RESULT: PASS
+EXIT_STATUS: 0
+
+ROLLBACK
+COMMAND: target="$(rtk proxy mktemp -d)"; rtk mkdir -p "$target/cloudflare/src"; rtk cp cloudflare/src/index.js "$target/cloudflare/src/index.js"; rtk printf '%s\n' 'mutated copy' > "$target/cloudflare/src/index.js"; rtk ./cloudflare/ROLLBACK.sh "$target"
+INPUT: separate mutated copy of cloudflare/src/index.js
+LITERAL_OUTPUT: restored cloudflare/src/index.js 6efbddb21a9fe654701c2169551cc33f502c673f75e371714bb94fca5f90246f
+RESULT: restored pre-#3 Worker source hash
+EXIT_STATUS: 0

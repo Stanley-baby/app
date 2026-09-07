@@ -1,0 +1,1676 @@
+diff --git a/build/common.js b/build/common.js
+index 5edf1095..076188a7 100644
+--- a/build/common.js
++++ b/build/common.js
+@@ -116,6 +116,7 @@ module.exports = (options={}) => {
+ 			'process.env.API_ORIGIN': JSON.stringify(buildEnvironment.apiOrigin),
+ 			'process.env.AI_PAGE_ORIGIN': JSON.stringify(buildEnvironment.aiPageOrigin),
+ 			'process.env.APP_ORIGIN': JSON.stringify(buildEnvironment.appOrigin),
++			'process.env.TURNSTILE_SITE_KEY': JSON.stringify(buildEnvironment.turnstileSiteKey),
+ 			'process.env.RAINDROP_BUILD_ENVIRONMENT': JSON.stringify(buildEnvironment.name),
+ 			RAINDROP_ENVIRONMENT: JSON.stringify('browser'),
+ 			'process.env.SENTRY_RELEASE': JSON.stringify(production && !sentry?.disabled? process.env.SENTRY_RELEASE : undefined)
+@@ -128,7 +129,8 @@ module.exports = (options={}) => {
+ 			templateParameters: {
+ 				apiOrigin: buildEnvironment.apiOrigin,
+ 				aiPageOrigin: buildEnvironment.aiPageOrigin,
+-				appOrigin: buildEnvironment.appOrigin
++				appOrigin: buildEnvironment.appOrigin,
++				turnstileSiteKey: buildEnvironment.turnstileSiteKey
+ 			},
+ 			scriptLoading: 'blocking',
+ 			inject: 'body',
+diff --git a/build/environments.js b/build/environments.js
+index 2dc9131b..ea9313bd 100644
+--- a/build/environments.js
++++ b/build/environments.js
+@@ -14,7 +14,8 @@ const resolveEnvironment = (options={}) => {
+         name,
+         apiOrigin: trimTrailingSlash(options.apiOrigin || process.env.API_ORIGIN || profile.apiOrigin),
+         appOrigin: trimTrailingSlash(options.appOrigin || process.env.APP_ORIGIN || profile.appOrigin),
+-        aiPageOrigin: trimTrailingSlash(options.aiPageOrigin || process.env.AI_PAGE_ORIGIN || profile.aiPageOrigin)
++        aiPageOrigin: trimTrailingSlash(options.aiPageOrigin || process.env.AI_PAGE_ORIGIN || profile.aiPageOrigin),
++        turnstileSiteKey: options.turnstileSiteKey || process.env.TURNSTILE_SITE_KEY || profile.turnstileSiteKey || ''
+     }
+ }
+ 
+diff --git a/build/extension.js b/build/extension.js
+index 3b71c415..164a650b 100644
+--- a/build/extension.js
++++ b/build/extension.js
+@@ -70,9 +70,10 @@ module.exports = (env={}, args={}) => {
+                     title: 'Raindrop.io',
+                     template: './index.ejs',
+                     templateParameters: {
+-                        apiOrigin: buildEnvironment.apiOrigin,
+-                        aiPageOrigin: buildEnvironment.aiPageOrigin,
+-                        appOrigin: buildEnvironment.appOrigin
++						apiOrigin: buildEnvironment.apiOrigin,
++						aiPageOrigin: buildEnvironment.aiPageOrigin,
++						appOrigin: buildEnvironment.appOrigin,
++						turnstileSiteKey: buildEnvironment.turnstileSiteKey
+                     },
+                     filename: 'sidepanel.html',
+                     scriptLoading: 'blocking',
+diff --git a/cloudflare/.issue-3/index.before.js b/cloudflare/.issue-3/index.before.js
+new file mode 100644
+index 00000000..7f9fe6be
+--- /dev/null
++++ b/cloudflare/.issue-3/index.before.js
+@@ -0,0 +1,62 @@
++const json = (body, status, request, env) => {
++    const headers = new Headers({
++        'Content-Type': 'application/json; charset=utf-8',
++        'X-Request-ID': request.headers.get('X-Request-ID') || `${Date.now()}-${Math.random()}`
++    })
++    const origin = request.headers.get('Origin')
++    const allowedOrigins = String(env.CORS_ORIGINS || '').split(/\s+/).filter(Boolean)
++
++    const isAllowedOrigin = origin && allowedOrigins.some(allowed =>
++        allowed === origin || allowed.endsWith('*') && origin.startsWith(allowed.slice(0, -1)))
++
++    if (isAllowedOrigin) {
++        headers.set('Access-Control-Allow-Origin', origin)
++        headers.set('Access-Control-Allow-Credentials', 'true')
++        headers.set('Vary', 'Origin')
++    }
++
++    return new Response(JSON.stringify(body), { status, headers })
++}
++
++const cors = (request, env) => {
++    const headers = json({}, 204, request, env).headers
++    headers.delete('Content-Type')
++    headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
++    headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID')
++    headers.set('Access-Control-Max-Age', '600')
++    return new Response(null, { status: 204, headers })
++}
++
++const hasSession = request => Boolean(request.headers.get('Cookie')?.match(/(?:^|;\s*)rd_session=/))
++
++const version = env => env.VERSION || '0.1.0'
++
++export default {
++    async fetch(request, env) {
++        const url = new URL(request.url)
++
++        if (request.method === 'OPTIONS')
++            return cors(request, env)
++
++        if (url.pathname === '/health')
++            return json({ result: true, status: 'ok', environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
++
++        if (url.pathname === '/version')
++            return json({ result: true, environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
++
++        if (url.pathname === '/v1' || url.pathname.startsWith('/v1/')) {
++            if (!hasSession(request))
++                return json({
++                    result: false,
++                    auth: false,
++                    error: 'auth_required',
++                    errorMessage: 'Login is required',
++                    login: `${env.APP_ORIGIN}/account/login`
++                }, 401, request, env)
++
++            return json({ result: false, error: 'route_not_implemented' }, 404, request, env)
++        }
++
++        return json({ result: false, error: 'not_found' }, 404, request, env)
++    }
++}
+diff --git a/cloudflare/.issue-3/original.sha256 b/cloudflare/.issue-3/original.sha256
+new file mode 100644
+index 00000000..cb8debdb
+--- /dev/null
++++ b/cloudflare/.issue-3/original.sha256
+@@ -0,0 +1,3 @@
++6efbddb21a9fe654701c2169551cc33f502c673f75e371714bb94fca5f90246f  cloudflare/src/index.js
++a8355113bbc0ee7f1a56f1179331bcc27c5febc6dc4c37d1de02dd1f9d111acb  cloudflare/migrations/0001_initial.sql
++55ca2cdd189cbd1e389cfe95459e6266f26f0af5fbab1ad46b1d9ef523ca9555  cloudflare/wrangler.toml
+diff --git a/cloudflare/MODIFIED_FILE b/cloudflare/MODIFIED_FILE
+new file mode 100644
+index 00000000..81671e94
+--- /dev/null
++++ b/cloudflare/MODIFIED_FILE
+@@ -0,0 +1,386 @@
++const encoder = new TextEncoder()
++const sessionDays = 30
++const verificationHours = 24
++const passwordIterations = 310000
++
++const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
++
++const json = (body, status, request, env, extraHeaders = {}) => {
++    const headers = new Headers({
++        'Content-Type': 'application/json; charset=utf-8',
++        'X-Request-ID': requestId(request),
++        ...extraHeaders
++    })
++    const origin = request.headers.get('Origin')
++    const allowedOrigins = String(env.CORS_ORIGINS || '').split(/\s+/).filter(Boolean)
++
++    const isAllowedOrigin = origin && allowedOrigins.some(allowed =>
++        allowed === origin || allowed.endsWith('*') && origin.startsWith(allowed.slice(0, -1)))
++
++    if (isAllowedOrigin) {
++        headers.set('Access-Control-Allow-Origin', origin)
++        headers.set('Access-Control-Allow-Credentials', 'true')
++        headers.set('Vary', 'Origin')
++    }
++
++    return new Response(JSON.stringify(body), { status, headers })
++}
++
++const error = (code, status, request, env, errorMessage = code) =>
++    json({ result: false, error: code, errorMessage }, status, request, env)
++
++const cors = (request, env) => {
++    const headers = json({}, 204, request, env).headers
++    headers.delete('Content-Type')
++    headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
++    headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID, X-Device-Name')
++    headers.set('Access-Control-Max-Age', '600')
++    return new Response(null, { status: 204, headers })
++}
++
++const bytesToBase64url = bytes => btoa(String.fromCharCode(...bytes))
++    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
++
++const base64urlToBytes = value => Uint8Array.from(
++    atob(String(value).replace(/-/g, '+').replace(/_/g, '/')),
++    char => char.charCodeAt(0)
++)
++
++const randomToken = size => {
++    const bytes = new Uint8Array(size)
++    crypto.getRandomValues(bytes)
++    return bytesToBase64url(bytes)
++}
++
++const equal = (a, b) => {
++    const left = encoder.encode(String(a))
++    const right = encoder.encode(String(b))
++    if (left.length !== right.length) return false
++    let difference = 0
++    for (let index = 0; index < left.length; index++) difference |= left[index] ^ right[index]
++    return difference === 0
++}
++
++const hmac = async (value, secret) => {
++    const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
++    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(value))
++    return bytesToBase64url(new Uint8Array(signature))
++}
++
++const passwordHash = async (password, salt) => {
++    const key = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits'])
++    const hash = await crypto.subtle.deriveBits({
++        name: 'PBKDF2',
++        hash: 'SHA-256',
++        salt,
++        iterations: passwordIterations
++    }, key, 256)
++    return bytesToBase64url(new Uint8Array(hash))
++}
++
++const validEmail = value => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
++
++const readBody = async request => {
++    const contentType = request.headers.get('Content-Type') || ''
++    try {
++        if (contentType.includes('application/json'))
++            return { data: await request.json(), form: false }
++
++        return { data: Object.fromEntries((await request.formData()).entries()), form: true }
++    } catch {
++        return { data: {}, form: false }
++    }
++}
++
++const cookieValue = (request, name) => {
++    const prefix = name + '='
++    return (request.headers.get('Cookie') || '').split(/;\s*/).find(value => value.startsWith(prefix))?.slice(prefix.length)
++}
++
++const sessionCookie = token =>
++    'rd_session=' + token + '; Path=/; Max-Age=' + sessionDays * 86400 + '; HttpOnly; Secure; SameSite=None'
++
++const expiredSessionCookie = 'rd_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=None'
++
++const publicUser = user => ({
++    _id: String(user.id || user.user_id),
++    email: user.email,
++    name: user.name,
++    email_verified: Boolean(user.email_verified_at)
++})
++
++const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
++
++const configurationError = (request, env) =>
++    error('auth_configuration_missing', 503, request, env, 'Authentication is not configured')
++
++const createSession = async (request, env, userId) => {
++    const token = randomToken(32)
++    const id = randomToken(16)
++    const now = Date.now()
++    const deviceName = (request.headers.get('X-Device-Name') || request.headers.get('User-Agent') || 'Unknown device').slice(0, 200)
++
++    await env.DB.prepare('INSERT INTO sessions (id, user_id, token_hash, device_name, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
++        .bind(id, userId, await hmac(token, env.SESSION_SECRET), deviceName, now, now, now + sessionDays * 86400 * 1000).run()
++
++    return { id, token }
++}
++
++const getSession = async (request, env) => {
++    const token = cookieValue(request, 'rd_session')
++    if (!token || !authReady(env)) return null
++
++    const now = Date.now()
++    const session = await env.DB.prepare('SELECT s.id AS session_id, s.user_id, s.device_name, s.created_at, s.last_seen_at, s.expires_at, u.id, u.email, u.name, u.email_verified_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?')
++        .bind(await hmac(token, env.SESSION_SECRET), now).first()
++
++    if (!session) return null
++    await env.DB.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').bind(now, session.session_id).run()
++    return { ...session, token }
++}
++
++const verifyTurnstile = async (request, env, token) => {
++    if (!env.TURNSTILE_SECRET_KEY) return null
++    if (!token || String(token).length > 2048) return false
++
++    const body = new URLSearchParams({
++        secret: env.TURNSTILE_SECRET_KEY,
++        response: String(token)
++    })
++    const remoteIp = request.headers.get('CF-Connecting-IP')
++    if (remoteIp) body.set('remoteip', remoteIp)
++
++    try {
++        const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
++            method: 'POST',
++            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
++            body
++        })
++        return response.ok && (await response.json()).success === true
++    } catch {
++        return false
++    }
++}
++
++const createVerification = async (env, userId) => {
++    const token = randomToken(32)
++    await env.DB.prepare('INSERT INTO email_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
++        .bind(await hmac(token, env.SESSION_SECRET), userId, Date.now() + verificationHours * 60 * 60 * 1000).run()
++    return token
++}
++
++const sendVerification = async (env, email, token) => {
++    if (env.MAIL_PROVIDER !== 'resend' || !env.RESEND_API_KEY || !env.MAIL_FROM)
++        return false
++
++    const confirmationUrl = new URL('/account/confirm/' + token, env.APP_ORIGIN).toString()
++    const response = await fetch('https://api.resend.com/emails', {
++        method: 'POST',
++        headers: {
++            Authorization: 'Bearer ' + env.RESEND_API_KEY,
++            'Content-Type': 'application/json'
++        },
++        body: JSON.stringify({
++            from: env.MAIL_FROM,
++            to: [email],
++            subject: 'Confirm your Raindrop Beta email',
++            html: '<p>Confirm your email to finish setting up Raindrop Beta.</p><p><a href="' + confirmationUrl + '">Confirm email</a></p>'
++        })
++    })
++
++    return response.ok
++}
++
++const requiresVerification = pathname =>
++    pathname.startsWith('/v1/oauth/') ||
++    pathname.startsWith('/v1/developer/') ||
++    pathname.includes('/sharing') ||
++    pathname.startsWith('/v1/backups') ||
++    pathname.startsWith('/v1/import/')
++
++const redirect = (request, env, location, token) => {
++    const appOrigin = new URL(env.APP_ORIGIN)
++    const target = new URL(location || '/', appOrigin)
++    const safeLocation = target.origin === appOrigin.origin ? target.toString() : appOrigin.toString()
++    const headers = new Headers({
++        Location: safeLocation,
++        'Set-Cookie': sessionCookie(token),
++        'X-Request-ID': requestId(request)
++    })
++    return new Response(null, { status: 303, headers })
++}
++
++const version = env => env.VERSION || '0.1.0'
++
++export default {
++    async fetch(request, env) {
++        const url = new URL(request.url)
++
++        if (request.method === 'OPTIONS')
++            return cors(request, env)
++
++        if (url.pathname === '/health')
++            return json({ result: true, status: 'ok', environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
++
++        if (url.pathname === '/version')
++            return json({ result: true, environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
++
++        if (url.pathname === '/v1/auth/email/signup' && request.method === 'POST') {
++            if (!authReady(env)) return configurationError(request, env)
++            if (!env.TURNSTILE_SECRET_KEY || env.MAIL_PROVIDER !== 'resend' || !env.RESEND_API_KEY || !env.MAIL_FROM)
++                return configurationError(request, env)
++
++            const { data } = await readBody(request)
++            const email = String(data.email || '').trim().toLowerCase()
++            const name = String(data.name || '').trim()
++            const password = String(data.password || '')
++            const accessPassword = String(data.betaAccessPassword || data.beta_access_password || '')
++            const turnstileToken = data.turnstileToken || data['cf-turnstile-response'] || data.recaptcha
++
++            if (!validEmail(email) || !name || name.length > 100 || password.length < 12 || password.length > 256)
++                return error('validation_failed', 400, request, env, 'Enter a valid email, name, and password of at least 12 characters')
++
++            if (env.ENVIRONMENT === 'beta' && (!env.BETA_ACCESS_PASSWORD || !equal(accessPassword, env.BETA_ACCESS_PASSWORD)))
++                return error('beta_access_denied', 403, request, env, 'Beta access password is invalid')
++
++            const turnstile = await verifyTurnstile(request, env, turnstileToken)
++            if (!turnstile)
++                return error('turnstile_failed', 400, request, env, 'Turnstile verification failed')
++
++            const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first()
++            if (existing)
++                return error('email_in_use', 409, request, env, 'Email is already registered')
++
++            const salt = new Uint8Array(16)
++            crypto.getRandomValues(salt)
++            const inserted = await env.DB.prepare('INSERT INTO users (email, name, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?, ?)')
++                .bind(email, name, await passwordHash(password, salt), bytesToBase64url(salt), Date.now()).run()
++            const userId = Number(inserted.meta.last_row_id)
++            const token = await createVerification(env, userId)
++
++            if (!await sendVerification(env, email, token)) {
++                await env.DB.prepare('DELETE FROM email_tokens WHERE user_id = ?').bind(userId).run()
++                await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId).run()
++                return error('email_delivery_failed', 502, request, env, 'Could not send confirmation email')
++            }
++
++            return json({ result: true, email, verified: false }, 201, request, env)
++        }
++
++        if (url.pathname === '/v1/auth/email/login' && request.method === 'POST') {
++            if (!authReady(env)) return configurationError(request, env)
++            const { data, form } = await readBody(request)
++            const email = String(data.email || '').trim().toLowerCase()
++            const password = String(data.password || '')
++            const user = await env.DB.prepare('SELECT id, email, name, password_hash, password_salt, email_verified_at FROM users WHERE email = ?').bind(email).first()
++
++            const validPassword = user && equal(await passwordHash(password, base64urlToBytes(user.password_salt)), user.password_hash)
++            if (!validPassword)
++                return error('invalid_credentials', 401, request, env, 'Email or password is invalid')
++
++            const session = await createSession(request, env, user.id)
++            if (form) return redirect(request, env, data.redirect, session.token)
++            return json({ result: true, user: publicUser(user) }, 200, request, env, { 'Set-Cookie': sessionCookie(session.token) })
++        }
++
++        if (url.pathname === '/v1/auth/email/confirm' && request.method === 'POST') {
++            if (!authReady(env)) return configurationError(request, env)
++            const { data } = await readBody(request)
++            const now = Date.now()
++            const hash = await hmac(String(data.token || ''), env.SESSION_SECRET)
++            const token = await env.DB.prepare('SELECT user_id FROM email_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?').bind(hash, now).first()
++            if (!token)
++                return error('confirmation_invalid', 400, request, env, 'Confirmation link is invalid or expired')
++
++            await env.DB.prepare('UPDATE users SET email_verified_at = ? WHERE id = ?').bind(now, token.user_id).run()
++            await env.DB.prepare('UPDATE email_tokens SET used_at = ? WHERE token_hash = ?').bind(now, hash).run()
++            return json({ result: true }, 200, request, env)
++        }
++
++        if (url.pathname === '/v1/auth/logout') {
++            const session = await getSession(request, env)
++            if (session) {
++                const all = url.searchParams.has('all')
++                const query = all
++                    ? 'UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL'
++                    : 'UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND id = ? AND revoked_at IS NULL'
++                const values = all ? [Date.now(), session.user_id] : [Date.now(), session.user_id, session.session_id]
++                await env.DB.prepare(query).bind(...values).run()
++            }
++            return json({ result: true }, 200, request, env, { 'Set-Cookie': expiredSessionCookie })
++        }
++
++        if (url.pathname === '/v1' || url.pathname.startsWith('/v1/')) {
++            if (!authReady(env)) return configurationError(request, env)
++            const session = await getSession(request, env)
++            if (!session)
++                return json({
++                    result: false,
++                    auth: false,
++                    error: 'auth_required',
++                    errorMessage: 'Login is required',
++                    login: env.APP_ORIGIN + '/account/login'
++                }, 401, request, env)
++
++            if (requiresVerification(url.pathname) && !session.email_verified_at)
++                return error('email_verification_required', 403, request, env, 'Confirm your email before this action')
++
++            if (url.pathname === '/v1/user' && request.method === 'GET')
++                return json({ result: true, user: publicUser(session) }, 200, request, env)
++
++            if (url.pathname === '/v1/raindrop' && request.method === 'POST') {
++                const { data } = await readBody(request)
++                const bookmarkUrl = String(data.link || data.url || '').trim()
++                const title = String(data.title || '').trim()
++                let protocol
++                try {
++                    protocol = new URL(bookmarkUrl).protocol
++                } catch {
++                    protocol = ''
++                }
++                if (!['http:', 'https:'].includes(protocol) || title.length > 500)
++                    return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL and a title under 500 characters')
++
++                const now = Date.now()
++                const inserted = await env.DB.prepare('INSERT INTO bookmarks (user_id, url, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
++                    .bind(session.user_id, bookmarkUrl, title, now, now).run()
++                return json({
++                    result: true,
++                    item: { _id: String(inserted.meta.last_row_id), link: bookmarkUrl, title }
++                }, 201, request, env)
++            }
++
++            if (url.pathname === '/v1/user/send_email_confirm' && request.method === 'POST') {
++                if (session.email_verified_at)
++                    return json({ result: true, verified: true }, 200, request, env)
++
++                const token = await createVerification(env, session.user_id)
++                if (!await sendVerification(env, session.email, token))
++                    return error('email_delivery_failed', 502, request, env, 'Could not send confirmation email')
++                return json({ result: true }, 200, request, env)
++            }
++
++            if (url.pathname === '/v1/sessions' && request.method === 'GET') {
++                const records = await env.DB.prepare('SELECT id, device_name, created_at, last_seen_at, expires_at FROM sessions WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? ORDER BY last_seen_at DESC')
++                    .bind(session.user_id, Date.now()).all()
++                return json({
++                    result: true,
++                    items: records.results.map(item => ({ ...item, current: item.id === session.session_id }))
++                }, 200, request, env)
++            }
++
++            const sessionId = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/)?.[1]
++            if (sessionId && request.method === 'DELETE') {
++                const result = await env.DB.prepare('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND id = ? AND revoked_at IS NULL')
++                    .bind(Date.now(), session.user_id, sessionId).run()
++                if (!result.meta.changes)
++                    return error('session_not_found', 404, request, env, 'Session was not found')
++                return json({ result: true }, 200, request, env, sessionId === session.session_id ? { 'Set-Cookie': expiredSessionCookie } : {})
++            }
++
++            return error('route_not_implemented', 404, request, env)
++        }
++
++        return error('not_found', 404, request, env)
++    }
++}
+diff --git a/cloudflare/README.md b/cloudflare/README.md
+index a4996fa6..b98eef82 100644
+--- a/cloudflare/README.md
++++ b/cloudflare/README.md
+@@ -16,8 +16,10 @@ wrangler secret put SESSION_SECRET --config cloudflare/wrangler.toml --env beta
+ 
+ Before each remote deploy, create the environment's D1/R2/Queue resources,
+ put the actual D1 ID in the matching block, and set each secret with the same
+-`--env` value. The repository intentionally contains no resource IDs or
+-secret values.
++`--env` value. Identity deployments require `BETA_ACCESS_PASSWORD`,
++`SESSION_SECRET`, `TURNSTILE_SECRET_KEY`, `RESEND_API_KEY`, and
++`MAIL_FROM`; the matching public `TURNSTILE_SITE_KEY` is supplied only to
++the Web build. Apply the D1 migrations before deploying the Worker.
+ 
+ The client build selects the same profiles with `--env environment=preview`.
+ The contract test skeleton runs with `npm run test:contract`.
+diff --git a/cloudflare/ROLLBACK.sh b/cloudflare/ROLLBACK.sh
+index 44e0bbd2..b418a1c1 100755
+--- a/cloudflare/ROLLBACK.sh
++++ b/cloudflare/ROLLBACK.sh
+@@ -1,46 +1,14 @@
+ #!/bin/sh
+ set -eu
+ 
+-ROOT=${1:?usage: ROLLBACK.sh <copy-root>}
+-case "$ROOT" in
+-    /|/*/..|*/../*) echo 'refusing unsafe root' >&2; exit 2 ;;
+-esac
++[ "$#" -eq 1 ] || { echo "usage: $0 TARGET_REPOSITORY" >&2; exit 64; }
+ 
+-restore_or_remove() {
+-    path=$1
+-    if [ -f "$ROOT/$path.orig" ]; then
+-        /bin/mv "$ROOT/$path.orig" "$ROOT/$path"
+-    elif /usr/bin/git -C "$ROOT" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+-        /usr/bin/git -C "$ROOT" checkout -- "$path"
+-    else
+-        /bin/rm -f "$ROOT/$path"
+-    fi
+-}
++artifact_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
++target=$1
++expected=$(awk '$2 == "cloudflare/src/index.js" { print $1 }' "$artifact_dir/.issue-3/original.sha256")
++[ -n "$expected" ] || { echo "missing original source hash" >&2; exit 65; }
+ 
+-for path in \
+-    build/common.js \
+-    build/extension.js \
+-    build/web.js \
+-    .gitignore \
+-    package.json \
+-    src/data/constants/app.js \
+-    src/index.ejs \
+-    src/target/extension/manifest/index.js \
+-    build/environments.js \
+-    cloudflare/environments.json \
+-    cloudflare/package.json \
+-    cloudflare/src/index.js \
+-    cloudflare/contracts/v1-routes.json \
+-    cloudflare/contracts/openapi.yaml \
+-    cloudflare/test/contract.test.js \
+-    cloudflare/test/build-config.test.js \
+-    cloudflare/.dev.vars.example \
+-    cloudflare/README.md \
+-    cloudflare/migrations/0001_initial.sql \
+-    cloudflare/wrangler.toml \
+-    cloudflare/CF_ENVIRONMENT.diff \
+-    cloudflare/VERIFICATION.txt \
+-    cloudflare/ROLLBACK.sh
+-do
+-    restore_or_remove "$path"
+-done
++cp "$artifact_dir/.issue-3/index.before.js" "$target/cloudflare/src/index.js"
++actual=$(shasum -a 256 "$target/cloudflare/src/index.js" | awk '{ print $1 }')
++[ "$actual" = "$expected" ] || { echo "rollback hash mismatch" >&2; exit 1; }
++printf 'restored cloudflare/src/index.js %s\n' "$actual"
+diff --git a/cloudflare/contracts/openapi.yaml b/cloudflare/contracts/openapi.yaml
+index f3c9de06..6c8a7ca2 100644
+--- a/cloudflare/contracts/openapi.yaml
++++ b/cloudflare/contracts/openapi.yaml
+@@ -15,6 +15,41 @@ paths:
+       responses:
+         '200':
+           description: Deployed Worker version.
++  /v1/auth/email/signup:
++    post:
++      responses:
++        '201':
++          description: Unverified User created and confirmation email sent.
++        '400':
++          description: Validation or Turnstile failure.
++        '403':
++          description: Beta Access Password rejected.
++  /v1/auth/email/login:
++    post:
++      responses:
++        '200':
++          description: Device session cookie created.
++        '401':
++          description: Invalid credentials.
++  /v1/auth/email/confirm:
++    post:
++      responses:
++        '200':
++          description: Email verified.
++  /v1/sessions:
++    get:
++      responses:
++        '200':
++          description: Current User device sessions.
++        '401':
++          description: Login required.
++  /v1/raindrop:
++    post:
++      responses:
++        '201':
++          description: Basic Bookmark created for the signed-in User.
++        '401':
++          description: Login required.
+   /v1/user:
+     get:
+       responses:
+diff --git a/cloudflare/contracts/v1-routes.json b/cloudflare/contracts/v1-routes.json
+index 6917b35d..3a2b66d3 100644
+--- a/cloudflare/contracts/v1-routes.json
++++ b/cloudflare/contracts/v1-routes.json
+@@ -1,6 +1,42 @@
+ {
+     "version": "1.0.0",
+     "routes": [
++        {
++            "method": "POST",
++            "path": "/v1/auth/email/signup",
++            "authentication": "none",
++            "responses": [201, 400, 403, 409, 502, 503]
++        },
++        {
++            "method": "POST",
++            "path": "/v1/auth/email/login",
++            "authentication": "none",
++            "responses": [200, 401, 503]
++        },
++        {
++            "method": "POST",
++            "path": "/v1/auth/email/confirm",
++            "authentication": "none",
++            "responses": [200, 400, 503]
++        },
++        {
++            "method": "GET",
++            "path": "/v1/sessions",
++            "authentication": "required",
++            "responses": [200, 401]
++        },
++        {
++            "method": "POST",
++            "path": "/v1/raindrop",
++            "authentication": "required",
++            "responses": [201, 400, 401]
++        },
++        {
++            "method": "DELETE",
++            "path": "/v1/sessions/:id",
++            "authentication": "required",
++            "responses": [200, 401, 404]
++        },
+         {
+             "method": "GET",
+             "path": "/v1/user",
+diff --git a/cloudflare/environments.json b/cloudflare/environments.json
+index 8699be7b..cd61b4d3 100644
+--- a/cloudflare/environments.json
++++ b/cloudflare/environments.json
+@@ -4,6 +4,7 @@
+         "apiOrigin": "http://localhost:8787",
+         "appOrigin": "http://localhost:2000",
+         "aiPageOrigin": "http://localhost:5173/ai",
++        "turnstileSiteKey": "1x00000000000000000000AA",
+         "corsOrigins": [
+             "http://localhost:2000",
+             "http://127.0.0.1:2000",
+@@ -21,7 +22,10 @@
+         "secrets": [
+             "BETA_ACCESS_PASSWORD",
+             "SESSION_SECRET",
+-            "ENCRYPTION_KEY"
++            "ENCRYPTION_KEY",
++            "TURNSTILE_SECRET_KEY",
++            "RESEND_API_KEY",
++            "MAIL_FROM"
+         ]
+     },
+     "preview": {
+@@ -29,6 +33,7 @@
+         "apiOrigin": "https://raindrop-api-preview.shenyuan.workers.dev",
+         "appOrigin": "https://preview.raindrop.io",
+         "aiPageOrigin": "https://ai-preview.raindrop.io/ai",
++        "turnstileSiteKey": "",
+         "corsOrigins": [
+             "https://preview.raindrop.io",
+             "chrome-extension://*"
+@@ -44,7 +49,10 @@
+         "secrets": [
+             "BETA_ACCESS_PASSWORD",
+             "SESSION_SECRET",
+-            "ENCRYPTION_KEY"
++            "ENCRYPTION_KEY",
++            "TURNSTILE_SECRET_KEY",
++            "RESEND_API_KEY",
++            "MAIL_FROM"
+         ]
+     },
+     "beta": {
+@@ -52,6 +60,7 @@
+         "apiOrigin": "https://raindrop-api-beta.shenyuan.workers.dev",
+         "appOrigin": "https://beta.raindrop.io",
+         "aiPageOrigin": "https://beta-ai.raindrop.io/ai",
++        "turnstileSiteKey": "",
+         "corsOrigins": [
+             "https://beta.raindrop.io",
+             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+@@ -67,7 +76,10 @@
+         "secrets": [
+             "BETA_ACCESS_PASSWORD",
+             "SESSION_SECRET",
+-            "ENCRYPTION_KEY"
++            "ENCRYPTION_KEY",
++            "TURNSTILE_SECRET_KEY",
++            "RESEND_API_KEY",
++            "MAIL_FROM"
+         ]
+     },
+     "production": {
+@@ -75,6 +87,7 @@
+         "apiOrigin": "https://api.raindrop.io",
+         "appOrigin": "https://app.raindrop.io",
+         "aiPageOrigin": "https://ai.raindrop.io/ai",
++        "turnstileSiteKey": "",
+         "corsOrigins": [
+             "https://app.raindrop.io",
+             "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+@@ -90,7 +103,10 @@
+         "secrets": [
+             "BETA_ACCESS_PASSWORD",
+             "SESSION_SECRET",
+-            "ENCRYPTION_KEY"
++            "ENCRYPTION_KEY",
++            "TURNSTILE_SECRET_KEY",
++            "RESEND_API_KEY",
++            "MAIL_FROM"
+         ]
+     }
+ }
+diff --git a/cloudflare/migrations/0002_identity_sessions.sql b/cloudflare/migrations/0002_identity_sessions.sql
+new file mode 100644
+index 00000000..f7b2c44f
+--- /dev/null
++++ b/cloudflare/migrations/0002_identity_sessions.sql
+@@ -0,0 +1,43 @@
++CREATE TABLE users (
++    id INTEGER PRIMARY KEY,
++    email TEXT NOT NULL UNIQUE,
++    name TEXT NOT NULL,
++    password_hash TEXT NOT NULL,
++    password_salt TEXT NOT NULL,
++    email_verified_at INTEGER,
++    created_at INTEGER NOT NULL
++);
++
++CREATE TABLE sessions (
++    id TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL,
++    token_hash TEXT NOT NULL UNIQUE,
++    device_name TEXT NOT NULL,
++    created_at INTEGER NOT NULL,
++    last_seen_at INTEGER NOT NULL,
++    expires_at INTEGER NOT NULL,
++    revoked_at INTEGER,
++    FOREIGN KEY (user_id) REFERENCES users(id)
++);
++
++CREATE INDEX sessions_user_active ON sessions(user_id, revoked_at, expires_at);
++
++CREATE TABLE email_tokens (
++    token_hash TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL,
++    expires_at INTEGER NOT NULL,
++    used_at INTEGER,
++    FOREIGN KEY (user_id) REFERENCES users(id)
++);
++
++CREATE TABLE bookmarks (
++    id INTEGER PRIMARY KEY,
++    user_id INTEGER NOT NULL,
++    url TEXT NOT NULL,
++    title TEXT NOT NULL DEFAULT '',
++    created_at INTEGER NOT NULL,
++    updated_at INTEGER NOT NULL,
++    FOREIGN KEY (user_id) REFERENCES users(id)
++);
++
++CREATE INDEX bookmarks_user_created ON bookmarks(user_id, created_at DESC);
+diff --git a/cloudflare/src/index.js b/cloudflare/src/index.js
+index 7f9fe6be..81671e94 100644
+--- a/cloudflare/src/index.js
++++ b/cloudflare/src/index.js
+@@ -1,7 +1,15 @@
+-const json = (body, status, request, env) => {
++const encoder = new TextEncoder()
++const sessionDays = 30
++const verificationHours = 24
++const passwordIterations = 310000
++
++const requestId = request => request.headers.get('X-Request-ID') || String(Date.now()) + '-' + Math.random()
++
++const json = (body, status, request, env, extraHeaders = {}) => {
+     const headers = new Headers({
+         'Content-Type': 'application/json; charset=utf-8',
+-        'X-Request-ID': request.headers.get('X-Request-ID') || `${Date.now()}-${Math.random()}`
++        'X-Request-ID': requestId(request),
++        ...extraHeaders
+     })
+     const origin = request.headers.get('Origin')
+     const allowedOrigins = String(env.CORS_ORIGINS || '').split(/\s+/).filter(Boolean)
+@@ -18,16 +26,189 @@ const json = (body, status, request, env) => {
+     return new Response(JSON.stringify(body), { status, headers })
+ }
+ 
++const error = (code, status, request, env, errorMessage = code) =>
++    json({ result: false, error: code, errorMessage }, status, request, env)
++
+ const cors = (request, env) => {
+     const headers = json({}, 204, request, env).headers
+     headers.delete('Content-Type')
+     headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
+-    headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID')
++    headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID, X-Device-Name')
+     headers.set('Access-Control-Max-Age', '600')
+     return new Response(null, { status: 204, headers })
+ }
+ 
+-const hasSession = request => Boolean(request.headers.get('Cookie')?.match(/(?:^|;\s*)rd_session=/))
++const bytesToBase64url = bytes => btoa(String.fromCharCode(...bytes))
++    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
++
++const base64urlToBytes = value => Uint8Array.from(
++    atob(String(value).replace(/-/g, '+').replace(/_/g, '/')),
++    char => char.charCodeAt(0)
++)
++
++const randomToken = size => {
++    const bytes = new Uint8Array(size)
++    crypto.getRandomValues(bytes)
++    return bytesToBase64url(bytes)
++}
++
++const equal = (a, b) => {
++    const left = encoder.encode(String(a))
++    const right = encoder.encode(String(b))
++    if (left.length !== right.length) return false
++    let difference = 0
++    for (let index = 0; index < left.length; index++) difference |= left[index] ^ right[index]
++    return difference === 0
++}
++
++const hmac = async (value, secret) => {
++    const key = await crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
++    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(value))
++    return bytesToBase64url(new Uint8Array(signature))
++}
++
++const passwordHash = async (password, salt) => {
++    const key = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits'])
++    const hash = await crypto.subtle.deriveBits({
++        name: 'PBKDF2',
++        hash: 'SHA-256',
++        salt,
++        iterations: passwordIterations
++    }, key, 256)
++    return bytesToBase64url(new Uint8Array(hash))
++}
++
++const validEmail = value => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
++
++const readBody = async request => {
++    const contentType = request.headers.get('Content-Type') || ''
++    try {
++        if (contentType.includes('application/json'))
++            return { data: await request.json(), form: false }
++
++        return { data: Object.fromEntries((await request.formData()).entries()), form: true }
++    } catch {
++        return { data: {}, form: false }
++    }
++}
++
++const cookieValue = (request, name) => {
++    const prefix = name + '='
++    return (request.headers.get('Cookie') || '').split(/;\s*/).find(value => value.startsWith(prefix))?.slice(prefix.length)
++}
++
++const sessionCookie = token =>
++    'rd_session=' + token + '; Path=/; Max-Age=' + sessionDays * 86400 + '; HttpOnly; Secure; SameSite=None'
++
++const expiredSessionCookie = 'rd_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=None'
++
++const publicUser = user => ({
++    _id: String(user.id || user.user_id),
++    email: user.email,
++    name: user.name,
++    email_verified: Boolean(user.email_verified_at)
++})
++
++const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
++
++const configurationError = (request, env) =>
++    error('auth_configuration_missing', 503, request, env, 'Authentication is not configured')
++
++const createSession = async (request, env, userId) => {
++    const token = randomToken(32)
++    const id = randomToken(16)
++    const now = Date.now()
++    const deviceName = (request.headers.get('X-Device-Name') || request.headers.get('User-Agent') || 'Unknown device').slice(0, 200)
++
++    await env.DB.prepare('INSERT INTO sessions (id, user_id, token_hash, device_name, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
++        .bind(id, userId, await hmac(token, env.SESSION_SECRET), deviceName, now, now, now + sessionDays * 86400 * 1000).run()
++
++    return { id, token }
++}
++
++const getSession = async (request, env) => {
++    const token = cookieValue(request, 'rd_session')
++    if (!token || !authReady(env)) return null
++
++    const now = Date.now()
++    const session = await env.DB.prepare('SELECT s.id AS session_id, s.user_id, s.device_name, s.created_at, s.last_seen_at, s.expires_at, u.id, u.email, u.name, u.email_verified_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?')
++        .bind(await hmac(token, env.SESSION_SECRET), now).first()
++
++    if (!session) return null
++    await env.DB.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').bind(now, session.session_id).run()
++    return { ...session, token }
++}
++
++const verifyTurnstile = async (request, env, token) => {
++    if (!env.TURNSTILE_SECRET_KEY) return null
++    if (!token || String(token).length > 2048) return false
++
++    const body = new URLSearchParams({
++        secret: env.TURNSTILE_SECRET_KEY,
++        response: String(token)
++    })
++    const remoteIp = request.headers.get('CF-Connecting-IP')
++    if (remoteIp) body.set('remoteip', remoteIp)
++
++    try {
++        const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
++            method: 'POST',
++            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
++            body
++        })
++        return response.ok && (await response.json()).success === true
++    } catch {
++        return false
++    }
++}
++
++const createVerification = async (env, userId) => {
++    const token = randomToken(32)
++    await env.DB.prepare('INSERT INTO email_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
++        .bind(await hmac(token, env.SESSION_SECRET), userId, Date.now() + verificationHours * 60 * 60 * 1000).run()
++    return token
++}
++
++const sendVerification = async (env, email, token) => {
++    if (env.MAIL_PROVIDER !== 'resend' || !env.RESEND_API_KEY || !env.MAIL_FROM)
++        return false
++
++    const confirmationUrl = new URL('/account/confirm/' + token, env.APP_ORIGIN).toString()
++    const response = await fetch('https://api.resend.com/emails', {
++        method: 'POST',
++        headers: {
++            Authorization: 'Bearer ' + env.RESEND_API_KEY,
++            'Content-Type': 'application/json'
++        },
++        body: JSON.stringify({
++            from: env.MAIL_FROM,
++            to: [email],
++            subject: 'Confirm your Raindrop Beta email',
++            html: '<p>Confirm your email to finish setting up Raindrop Beta.</p><p><a href="' + confirmationUrl + '">Confirm email</a></p>'
++        })
++    })
++
++    return response.ok
++}
++
++const requiresVerification = pathname =>
++    pathname.startsWith('/v1/oauth/') ||
++    pathname.startsWith('/v1/developer/') ||
++    pathname.includes('/sharing') ||
++    pathname.startsWith('/v1/backups') ||
++    pathname.startsWith('/v1/import/')
++
++const redirect = (request, env, location, token) => {
++    const appOrigin = new URL(env.APP_ORIGIN)
++    const target = new URL(location || '/', appOrigin)
++    const safeLocation = target.origin === appOrigin.origin ? target.toString() : appOrigin.toString()
++    const headers = new Headers({
++        Location: safeLocation,
++        'Set-Cookie': sessionCookie(token),
++        'X-Request-ID': requestId(request)
++    })
++    return new Response(null, { status: 303, headers })
++}
+ 
+ const version = env => env.VERSION || '0.1.0'
+ 
+@@ -44,19 +225,162 @@ export default {
+         if (url.pathname === '/version')
+             return json({ result: true, environment: env.ENVIRONMENT, version: version(env) }, 200, request, env)
+ 
++        if (url.pathname === '/v1/auth/email/signup' && request.method === 'POST') {
++            if (!authReady(env)) return configurationError(request, env)
++            if (!env.TURNSTILE_SECRET_KEY || env.MAIL_PROVIDER !== 'resend' || !env.RESEND_API_KEY || !env.MAIL_FROM)
++                return configurationError(request, env)
++
++            const { data } = await readBody(request)
++            const email = String(data.email || '').trim().toLowerCase()
++            const name = String(data.name || '').trim()
++            const password = String(data.password || '')
++            const accessPassword = String(data.betaAccessPassword || data.beta_access_password || '')
++            const turnstileToken = data.turnstileToken || data['cf-turnstile-response'] || data.recaptcha
++
++            if (!validEmail(email) || !name || name.length > 100 || password.length < 12 || password.length > 256)
++                return error('validation_failed', 400, request, env, 'Enter a valid email, name, and password of at least 12 characters')
++
++            if (env.ENVIRONMENT === 'beta' && (!env.BETA_ACCESS_PASSWORD || !equal(accessPassword, env.BETA_ACCESS_PASSWORD)))
++                return error('beta_access_denied', 403, request, env, 'Beta access password is invalid')
++
++            const turnstile = await verifyTurnstile(request, env, turnstileToken)
++            if (!turnstile)
++                return error('turnstile_failed', 400, request, env, 'Turnstile verification failed')
++
++            const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first()
++            if (existing)
++                return error('email_in_use', 409, request, env, 'Email is already registered')
++
++            const salt = new Uint8Array(16)
++            crypto.getRandomValues(salt)
++            const inserted = await env.DB.prepare('INSERT INTO users (email, name, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?, ?)')
++                .bind(email, name, await passwordHash(password, salt), bytesToBase64url(salt), Date.now()).run()
++            const userId = Number(inserted.meta.last_row_id)
++            const token = await createVerification(env, userId)
++
++            if (!await sendVerification(env, email, token)) {
++                await env.DB.prepare('DELETE FROM email_tokens WHERE user_id = ?').bind(userId).run()
++                await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId).run()
++                return error('email_delivery_failed', 502, request, env, 'Could not send confirmation email')
++            }
++
++            return json({ result: true, email, verified: false }, 201, request, env)
++        }
++
++        if (url.pathname === '/v1/auth/email/login' && request.method === 'POST') {
++            if (!authReady(env)) return configurationError(request, env)
++            const { data, form } = await readBody(request)
++            const email = String(data.email || '').trim().toLowerCase()
++            const password = String(data.password || '')
++            const user = await env.DB.prepare('SELECT id, email, name, password_hash, password_salt, email_verified_at FROM users WHERE email = ?').bind(email).first()
++
++            const validPassword = user && equal(await passwordHash(password, base64urlToBytes(user.password_salt)), user.password_hash)
++            if (!validPassword)
++                return error('invalid_credentials', 401, request, env, 'Email or password is invalid')
++
++            const session = await createSession(request, env, user.id)
++            if (form) return redirect(request, env, data.redirect, session.token)
++            return json({ result: true, user: publicUser(user) }, 200, request, env, { 'Set-Cookie': sessionCookie(session.token) })
++        }
++
++        if (url.pathname === '/v1/auth/email/confirm' && request.method === 'POST') {
++            if (!authReady(env)) return configurationError(request, env)
++            const { data } = await readBody(request)
++            const now = Date.now()
++            const hash = await hmac(String(data.token || ''), env.SESSION_SECRET)
++            const token = await env.DB.prepare('SELECT user_id FROM email_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?').bind(hash, now).first()
++            if (!token)
++                return error('confirmation_invalid', 400, request, env, 'Confirmation link is invalid or expired')
++
++            await env.DB.prepare('UPDATE users SET email_verified_at = ? WHERE id = ?').bind(now, token.user_id).run()
++            await env.DB.prepare('UPDATE email_tokens SET used_at = ? WHERE token_hash = ?').bind(now, hash).run()
++            return json({ result: true }, 200, request, env)
++        }
++
++        if (url.pathname === '/v1/auth/logout') {
++            const session = await getSession(request, env)
++            if (session) {
++                const all = url.searchParams.has('all')
++                const query = all
++                    ? 'UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL'
++                    : 'UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND id = ? AND revoked_at IS NULL'
++                const values = all ? [Date.now(), session.user_id] : [Date.now(), session.user_id, session.session_id]
++                await env.DB.prepare(query).bind(...values).run()
++            }
++            return json({ result: true }, 200, request, env, { 'Set-Cookie': expiredSessionCookie })
++        }
++
+         if (url.pathname === '/v1' || url.pathname.startsWith('/v1/')) {
+-            if (!hasSession(request))
++            if (!authReady(env)) return configurationError(request, env)
++            const session = await getSession(request, env)
++            if (!session)
+                 return json({
+                     result: false,
+                     auth: false,
+                     error: 'auth_required',
+                     errorMessage: 'Login is required',
+-                    login: `${env.APP_ORIGIN}/account/login`
++                    login: env.APP_ORIGIN + '/account/login'
+                 }, 401, request, env)
+ 
+-            return json({ result: false, error: 'route_not_implemented' }, 404, request, env)
++            if (requiresVerification(url.pathname) && !session.email_verified_at)
++                return error('email_verification_required', 403, request, env, 'Confirm your email before this action')
++
++            if (url.pathname === '/v1/user' && request.method === 'GET')
++                return json({ result: true, user: publicUser(session) }, 200, request, env)
++
++            if (url.pathname === '/v1/raindrop' && request.method === 'POST') {
++                const { data } = await readBody(request)
++                const bookmarkUrl = String(data.link || data.url || '').trim()
++                const title = String(data.title || '').trim()
++                let protocol
++                try {
++                    protocol = new URL(bookmarkUrl).protocol
++                } catch {
++                    protocol = ''
++                }
++                if (!['http:', 'https:'].includes(protocol) || title.length > 500)
++                    return error('validation_failed', 400, request, env, 'Enter an HTTP(S) bookmark URL and a title under 500 characters')
++
++                const now = Date.now()
++                const inserted = await env.DB.prepare('INSERT INTO bookmarks (user_id, url, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
++                    .bind(session.user_id, bookmarkUrl, title, now, now).run()
++                return json({
++                    result: true,
++                    item: { _id: String(inserted.meta.last_row_id), link: bookmarkUrl, title }
++                }, 201, request, env)
++            }
++
++            if (url.pathname === '/v1/user/send_email_confirm' && request.method === 'POST') {
++                if (session.email_verified_at)
++                    return json({ result: true, verified: true }, 200, request, env)
++
++                const token = await createVerification(env, session.user_id)
++                if (!await sendVerification(env, session.email, token))
++                    return error('email_delivery_failed', 502, request, env, 'Could not send confirmation email')
++                return json({ result: true }, 200, request, env)
++            }
++
++            if (url.pathname === '/v1/sessions' && request.method === 'GET') {
++                const records = await env.DB.prepare('SELECT id, device_name, created_at, last_seen_at, expires_at FROM sessions WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? ORDER BY last_seen_at DESC')
++                    .bind(session.user_id, Date.now()).all()
++                return json({
++                    result: true,
++                    items: records.results.map(item => ({ ...item, current: item.id === session.session_id }))
++                }, 200, request, env)
++            }
++
++            const sessionId = url.pathname.match(/^\/v1\/sessions\/([^/]+)$/)?.[1]
++            if (sessionId && request.method === 'DELETE') {
++                const result = await env.DB.prepare('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND id = ? AND revoked_at IS NULL')
++                    .bind(Date.now(), session.user_id, sessionId).run()
++                if (!result.meta.changes)
++                    return error('session_not_found', 404, request, env, 'Session was not found')
++                return json({ result: true }, 200, request, env, sessionId === session.session_id ? { 'Set-Cookie': expiredSessionCookie } : {})
++            }
++
++            return error('route_not_implemented', 404, request, env)
+         }
+ 
+-        return json({ result: false, error: 'not_found' }, 404, request, env)
++        return error('not_found', 404, request, env)
+     }
+ }
+diff --git a/cloudflare/test/build-config.test.js b/cloudflare/test/build-config.test.js
+index 9029e83f..3f1ae2f2 100644
+--- a/cloudflare/test/build-config.test.js
++++ b/cloudflare/test/build-config.test.js
+@@ -26,6 +26,7 @@ test('Web and Chrome development profiles inject matching origins and API host p
+             assert.equal(valueFor(definitions, 'API_ORIGIN'), profile.apiOrigin)
+             assert.equal(valueFor(definitions, 'AI_PAGE_ORIGIN'), profile.aiPageOrigin)
+             assert.equal(valueFor(definitions, 'APP_ORIGIN'), profile.appOrigin)
++            assert.equal(valueFor(definitions, 'TURNSTILE_SITE_KEY'), profile.turnstileSiteKey)
+             assert.equal(valueFor(definitions, 'RAINDROP_BUILD_ENVIRONMENT'), name)
+         }
+ 
+diff --git a/cloudflare/test/contract.test.js b/cloudflare/test/contract.test.js
+index 5d9ef658..f75fb91d 100644
+--- a/cloudflare/test/contract.test.js
++++ b/cloudflare/test/contract.test.js
+@@ -7,10 +7,12 @@ const require = createRequire(import.meta.url)
+ const manifest = require('../contracts/v1-routes.json')
+ const environments = require('../environments.json')
+ const env = {
++    DB: {},
+     ENVIRONMENT: 'local',
+     VERSION: '0.1.0-local',
+     APP_ORIGIN: 'http://localhost:2000',
+-    CORS_ORIGINS: 'http://localhost:2000 http://127.0.0.1:2000 chrome-extension://*'
++    CORS_ORIGINS: 'http://localhost:2000 http://127.0.0.1:2000 chrome-extension://*',
++    SESSION_SECRET: 'test-session-secret'
+ }
+ 
+ test('environment profiles keep origins, resources, and secret scopes separate', () => {
+@@ -31,8 +33,9 @@ test('contract manifest entries describe response cases', () => {
+     assert.ok(manifest.routes.length > 0)
+     for (const route of manifest.routes) {
+         assert.match(route.path, /^\/v1\//)
+-        assert.equal(route.authentication, 'required')
+-        assert.ok(route.responses.includes(401))
++        assert.ok(['required', 'none'].includes(route.authentication))
++        if (route.authentication === 'required')
++            assert.ok(route.responses.includes(401))
+     }
+ })
+ 
+diff --git a/cloudflare/test/identity.test.js b/cloudflare/test/identity.test.js
+new file mode 100644
+index 00000000..a32b7c88
+--- /dev/null
++++ b/cloudflare/test/identity.test.js
+@@ -0,0 +1,194 @@
++import assert from 'node:assert/strict'
++import { webcrypto } from 'node:crypto'
++import test from 'node:test'
++import worker from '../src/index.js'
++
++globalThis.crypto ||= webcrypto
++
++class MemoryDatabase {
++    constructor() {
++        this.users = []
++        this.sessions = []
++        this.tokens = []
++        this.bookmarks = []
++    }
++
++    prepare(sql) {
++        let values = []
++        const first = async () => {
++            if (sql.includes('FROM users WHERE email'))
++                return this.users.find(user => user.email === values[0]) || null
++
++            if (sql.includes('FROM sessions s')) {
++                const session = this.sessions.find(item => item.token_hash === values[0] && !item.revoked_at && item.expires_at > values[1])
++                if (!session) return null
++                const user = this.users.find(item => item.id === session.user_id)
++                return user && { ...session, session_id: session.id, ...user }
++            }
++
++            if (sql.includes('FROM email_tokens'))
++                return this.tokens.find(token => token.token_hash === values[0] && !token.used_at && token.expires_at > values[1]) || null
++
++            return null
++        }
++        const run = async () => {
++            if (sql.includes('INSERT INTO users')) {
++                const user = { id: this.users.length + 1, email: values[0], name: values[1], password_hash: values[2], password_salt: values[3], email_verified_at: null }
++                this.users.push(user)
++                return { meta: { last_row_id: user.id, changes: 1 } }
++            }
++            if (sql.includes('INSERT INTO sessions')) {
++                this.sessions.push({ id: values[0], user_id: values[1], token_hash: values[2], device_name: values[3], created_at: values[4], last_seen_at: values[5], expires_at: values[6], revoked_at: null })
++                return { meta: { changes: 1 } }
++            }
++            if (sql.includes('INSERT INTO email_tokens')) {
++                this.tokens.push({ token_hash: values[0], user_id: values[1], expires_at: values[2], used_at: null })
++                return { meta: { changes: 1 } }
++            }
++            if (sql.includes('INSERT INTO bookmarks')) {
++                const bookmark = { id: this.bookmarks.length + 1, user_id: values[0], url: values[1], title: values[2] }
++                this.bookmarks.push(bookmark)
++                return { meta: { last_row_id: bookmark.id, changes: 1 } }
++            }
++            if (sql.includes('UPDATE users SET email_verified_at')) {
++                const user = this.users.find(item => item.id === values[1])
++                user.email_verified_at = values[0]
++                return { meta: { changes: 1 } }
++            }
++            if (sql.includes('UPDATE email_tokens SET used_at')) {
++                const token = this.tokens.find(item => item.token_hash === values[1] && !item.used_at)
++                if (!token) return { meta: { changes: 0 } }
++                token.used_at = values[0]
++                return { meta: { changes: 1 } }
++            }
++            if (sql.includes('UPDATE sessions SET revoked_at')) {
++                let matches = this.sessions.filter(item => item.user_id === values[1] && !item.revoked_at)
++                if (sql.includes('AND id = ?')) matches = matches.filter(item => item.id === values[2])
++                for (const session of matches) session.revoked_at = values[0]
++                return { meta: { changes: matches.length } }
++            }
++            return { meta: { changes: 1 } }
++        }
++        const all = async () => {
++            if (sql.includes('FROM sessions WHERE user_id'))
++                return {
++                    results: this.sessions
++                        .filter(item => item.user_id === values[0] && !item.revoked_at && item.expires_at > values[1])
++                        .map(item => ({ ...item }))
++                }
++            return { results: [] }
++        }
++        return {
++            bind: (...next) => {
++                values = next
++                return { first, run, all }
++            }
++        }
++    }
++}
++
++const request = (path, body, headers = {}) => new Request(`https://api.example.test${path}`, {
++    method: body ? 'POST' : 'GET',
++    headers: body ? { 'Content-Type': 'application/json', ...headers } : headers,
++    ...(body ? { body: JSON.stringify(body) } : {})
++})
++
++const env = db => ({
++    DB: db,
++    ENVIRONMENT: 'beta',
++    VERSION: '0.1.0-beta',
++    APP_ORIGIN: 'https://beta.example.test',
++    CORS_ORIGINS: 'https://beta.example.test',
++    BETA_ACCESS_PASSWORD: 'invite-only',
++    SESSION_SECRET: 'session-secret',
++    TURNSTILE_SECRET_KEY: 'turnstile-secret',
++    RESEND_API_KEY: 'resend-secret',
++    MAIL_PROVIDER: 'resend',
++    MAIL_FROM: 'Raindrop Beta <beta@example.test>'
++})
++
++test('beta signup verifies Turnstile, keeps credentials private, and creates revocable device sessions', async t => {
++    const db = new MemoryDatabase()
++    let confirmationUrl
++    let turnstileValid = true
++    const originalFetch = globalThis.fetch
++    globalThis.fetch = async (url, options) => {
++        if (url === 'https://challenges.cloudflare.com/turnstile/v0/siteverify')
++            return Response.json({ success: turnstileValid })
++        if (url === 'https://api.resend.com/emails') {
++            const email = JSON.parse(options.body)
++            confirmationUrl = email.html.match(/href="([^"]+)"/)[1]
++            return Response.json({ id: 'email_1' })
++        }
++        return originalFetch(url, options)
++    }
++    t.after(() => { globalThis.fetch = originalFetch })
++
++    const invalid = await worker.fetch(request('/v1/auth/email/signup', {
++        name: 'Beta User', email: 'beta.user@enterprise.example', password: 'correct horse battery staple', betaAccessPassword: 'wrong', turnstileToken: 'token'
++    }), env(db))
++    assert.equal(invalid.status, 403)
++    assert.equal(db.users.length, 0)
++
++    turnstileValid = false
++    const rejected = await worker.fetch(request('/v1/auth/email/signup', {
++        name: 'Beta User', email: 'beta.user@enterprise.example', password: 'correct horse battery staple', betaAccessPassword: 'invite-only', turnstileToken: 'token'
++    }), env(db))
++    assert.equal(rejected.status, 400)
++    assert.equal((await rejected.json()).error, 'turnstile_failed')
++    assert.equal(db.users.length, 0)
++    turnstileValid = true
++
++    const signup = await worker.fetch(request('/v1/auth/email/signup', {
++        name: 'Beta User', email: 'beta.user@enterprise.example', password: 'correct horse battery staple', betaAccessPassword: 'invite-only', turnstileToken: 'token'
++    }), env(db))
++    assert.equal(signup.status, 201)
++    assert.deepEqual(await signup.json(), { result: true, email: 'beta.user@enterprise.example', verified: false })
++    assert.notEqual(db.users[0].password_hash, 'correct horse battery staple')
++    assert.ok(confirmationUrl.includes('/account/confirm/'))
++
++    const login = await worker.fetch(request('/v1/auth/email/login', {
++        email: 'beta.user@enterprise.example', password: 'correct horse battery staple'
++    }, { 'User-Agent': 'Beta browser' }), env(db))
++    assert.equal(login.status, 200)
++    assert.match(login.headers.get('Set-Cookie'), /HttpOnly; Secure; SameSite=None/)
++    const cookie = login.headers.get('Set-Cookie').split(';')[0]
++
++    const user = await worker.fetch(request('/v1/user', null, { Cookie: cookie }), env(db))
++    assert.deepEqual(await user.json(), {
++        result: true,
++        user: { _id: '1', email: 'beta.user@enterprise.example', name: 'Beta User', email_verified: false }
++    })
++
++    const blocked = await worker.fetch(request('/v1/oauth/connections', null, { Cookie: cookie }), env(db))
++    assert.equal(blocked.status, 403)
++    assert.equal((await blocked.json()).error, 'email_verification_required')
++
++    const bookmark = await worker.fetch(request('/v1/raindrop', {
++        link: 'https://example.com/read-later',
++        title: 'Read later'
++    }, { Cookie: cookie }), env(db))
++    assert.equal(bookmark.status, 201)
++    assert.deepEqual(await bookmark.json(), {
++        result: true,
++        item: { _id: '1', link: 'https://example.com/read-later', title: 'Read later' }
++    })
++
++    const confirmation = new URL(confirmationUrl).pathname.split('/').pop()
++    const confirmed = await worker.fetch(request('/v1/auth/email/confirm', { token: confirmation }), env(db))
++    assert.equal(confirmed.status, 200)
++
++    const sessions = await worker.fetch(request('/v1/sessions', null, { Cookie: cookie }), env(db))
++    const session = (await sessions.json()).items[0]
++    assert.equal(session.current, true)
++
++    const removed = await worker.fetch(new Request(`https://api.example.test/v1/sessions/${session.id}`, {
++        method: 'DELETE',
++        headers: { Cookie: cookie }
++    }), env(db))
++    assert.equal(removed.status, 200)
++    assert.match(removed.headers.get('Set-Cookie'), /Max-Age=0/)
++
++    const loggedOut = await worker.fetch(request('/v1/user', null, { Cookie: cookie }), env(db))
++    assert.equal(loggedOut.status, 401)
++})
+diff --git a/cloudflare/wrangler.toml b/cloudflare/wrangler.toml
+index 0201db63..c211f65b 100644
+--- a/cloudflare/wrangler.toml
++++ b/cloudflare/wrangler.toml
+@@ -11,6 +11,7 @@ API_ORIGIN = "http://localhost:8787"
+ APP_ORIGIN = "http://localhost:2000"
+ AI_PAGE_ORIGIN = "http://localhost:5173/ai"
+ CORS_ORIGINS = "http://localhost:2000 http://127.0.0.1:2000 http://localhost:3000 chrome-extension://*"
++MAIL_PROVIDER = "resend"
+ 
+ [[d1_databases]]
+ binding = "DB"
+@@ -48,6 +49,7 @@ API_ORIGIN = "https://raindrop-api-preview.shenyuan.workers.dev"
+ APP_ORIGIN = "https://preview.raindrop.io"
+ AI_PAGE_ORIGIN = "https://ai-preview.raindrop.io/ai"
+ CORS_ORIGINS = "https://preview.raindrop.io chrome-extension://*"
++MAIL_PROVIDER = "resend"
+ 
+ [[env.preview.d1_databases]]
+ binding = "DB"
+@@ -85,6 +87,7 @@ API_ORIGIN = "https://raindrop-api-beta.shenyuan.workers.dev"
+ APP_ORIGIN = "https://beta.raindrop.io"
+ AI_PAGE_ORIGIN = "https://beta-ai.raindrop.io/ai"
+ CORS_ORIGINS = "https://beta.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
++MAIL_PROVIDER = "resend"
+ 
+ [[env.beta.d1_databases]]
+ binding = "DB"
+@@ -126,6 +129,7 @@ API_ORIGIN = "https://api.raindrop.io"
+ APP_ORIGIN = "https://app.raindrop.io"
+ AI_PAGE_ORIGIN = "https://ai.raindrop.io/ai"
+ CORS_ORIGINS = "https://app.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
++MAIL_PROVIDER = "resend"
+ 
+ [[env.production.d1_databases]]
+ binding = "DB"
+diff --git a/package.json b/package.json
+index a9286268..9cbbcb80 100755
+--- a/package.json
++++ b/package.json
+@@ -20,7 +20,7 @@
+ 		"build:extension:opera": "webpack --config build/extension.js --env production --env vendor=opera",
+ 		"build:extension:safari": "webpack --config build/extension.js --env production --env vendor=safari && cd 'build/xcode/Save to Raindrop.io' && ./version.sh",
+ 		"build:extension:safari-ios": "webpack --config build/extension.js --env production --env vendor=safari-ios",
+-		"test:contract": "node --test cloudflare/test/contract.test.js cloudflare/test/build-config.test.js",
++    "test:contract": "node --test cloudflare/test/*.test.js",
+ 		"build:electron": "webpack --config build/electron.js --env production",
+ 		"size": "webpack --config build/web.js --env production --profile --json > dist/web-stats.json && webpack-bundle-analyzer dist/web-stats.json dist/web",
+ 		"size:extension:chrome": "webpack --config build/extension.js --env production --env vendor=chrome --profile --json > dist/extension-chrome-stats.json && webpack-bundle-analyzer dist/extension-chrome-stats.json dist/chrome/prod",
+diff --git a/src/config/csp.js b/src/config/csp.js
+index 1b77febe..75640919 100644
+--- a/src/config/csp.js
++++ b/src/config/csp.js
+@@ -1,3 +1,3 @@
+ module.exports = {
+-    hosts: 'https://app.raindrop.io https://www.google.com https://www.gstatic.com '+(process.env.SENTRY_RELEASE ? 'https://*.sentry.io https://sentry.io' : '')
+-}
+\ No newline at end of file
++    hosts: 'https://app.raindrop.io https://www.google.com https://www.gstatic.com https://challenges.cloudflare.com '+(process.env.SENTRY_RELEASE ? 'https://*.sentry.io https://sentry.io' : '')
++}
+diff --git a/src/data/actions/user.js b/src/data/actions/user.js
+index 215bcfc7..b1e925b2 100755
+--- a/src/data/actions/user.js
++++ b/src/data/actions/user.js
+@@ -53,9 +53,9 @@ export const loginWithPassword = ({email, password}, onSuccess, onFail)=>({
+ 	onFail: wrapFunc(onFail)
+ })
+ 
+-export const registerWithPassword = ({name, email, password})=>({
++export const registerWithPassword = ({name, email, password, betaAccessPassword, turnstileToken})=>({
+ 	type: USER_REGISTER_PASSWORD,
+-	name, email, password
++	name, email, password, betaAccessPassword, turnstileToken
+ })
+ 
+ export const loginNative = (params, onSuccess, onFail)=>({
+@@ -134,4 +134,4 @@ export const confirmEmail = ({ token }, onSuccess, onFail)=>({
+ 	token,
+ 	onSuccess: wrapFunc(onSuccess),
+ 	onFail: wrapFunc(onFail)
+-})
+\ No newline at end of file
++})
+diff --git a/src/data/constants/app.js b/src/data/constants/app.js
+index 88b4ec46..b7f32eda 100644
+--- a/src/data/constants/app.js
++++ b/src/data/constants/app.js
+@@ -16,6 +16,9 @@ export const
+ export const
+ 	RECAPTCHA_SITE_KEY = '6LfB38wUAAAAAMX3VuFcriTz-Tb-qw7MD966XNnk'
+ 
++export const
++	TURNSTILE_SITE_KEY	= process.env.TURNSTILE_SITE_KEY || ''
++
+ export const
+ 	API_ENDPOINT_URL 	= `${API_ORIGIN}/v1/`,
+ 	API_RETRIES 		= 3,
+diff --git a/src/data/sagas/user.js b/src/data/sagas/user.js
+index 98d72850..1a38a726 100755
+--- a/src/data/sagas/user.js
++++ b/src/data/sagas/user.js
+@@ -1,8 +1,6 @@
+ import { call, put, takeLatest, all } from 'redux-saga/effects'
+-import { load as loadRecaptcha } from 'recaptcha-v3'
+ import Api from '../modules/api'
+ import ApiError from '../modules/error'
+-import { RECAPTCHA_SITE_KEY } from '../constants/app'
+ import {
+ 	USER_LOAD_REQ, USER_LOAD_SUCCESS, USER_LOAD_ERROR,
+ 	USER_UPDATE_REQ, USER_UPDATE_SUCCESS, USER_UPDATE_ERROR,
+@@ -115,15 +113,9 @@ function* loginWithPassword({email, password, onSuccess, onFail}) {
+ 	}
+ }
+ 
+-function* registerWithPassword({name, email, password, onSuccess, onFail}) {
++function* registerWithPassword({name, email, password, betaAccessPassword, turnstileToken, onSuccess, onFail}) {
+ 	try {
+-		let recaptcha
+-		if (RAINDROP_ENVIRONMENT == 'browser') {
+-			const inst = yield call(loadRecaptcha, RECAPTCHA_SITE_KEY)
+-			recaptcha = yield call([inst, inst.execute], 'signup')
+-		}
+-
+-		yield call(Api.post, 'auth/email/signup', {name, email:email||'0', password, recaptcha});
++		yield call(Api.post, 'auth/email/signup', {name, email:email||'0', password, betaAccessPassword, turnstileToken});
+ 		yield call(Api.post, 'auth/email/login', {email, password});
+ 
+ 		yield put({type: USER_REFRESH_REQ, way: 'register', onSuccess});
+@@ -301,4 +293,4 @@ function* confirmEmail({ token, onSuccess, onFail }) {
+ 	} catch (error) {
+ 		onFail(error)
+ 	}
+-}
+\ No newline at end of file
++}
+diff --git a/src/index.ejs b/src/index.ejs
+index 8baf1111..100ced70 100755
+--- a/src/index.ejs
++++ b/src/index.ejs
+@@ -11,6 +11,9 @@
+ 	<%if (process.env.APP_TARGET != 'extension') { %>
+ 		<meta name="google" value="notranslate" />
+ 		<meta name="description" content="All-in-one bookmark manager">
++		<%if (turnstileSiteKey) { %>
++			<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
++		<% } %>
+ 
+ 		<!-- security -->
+ 		<meta http-equiv="Content-Security-Policy" content="default-src *; script-src 'self' <%= require('./config/csp.js').hosts %> <%= process.env.NODE_ENV === 'development' ? '\'unsafe-inline\' \'unsafe-eval\'' : '' %>; style-src 'self' 'unsafe-inline'; img-src * blob: data:; object-src 'self' up.raindrop.io;">
+diff --git a/src/routes/account/signup/index.js b/src/routes/account/signup/index.js
+index b4c2bf88..d1902097 100644
+--- a/src/routes/account/signup/index.js
++++ b/src/routes/account/signup/index.js
+@@ -4,6 +4,7 @@ import t from '~t'
+ import { connect } from 'react-redux'
+ import { userStatus, errorReason } from '~data/selectors/user'
+ import { registerWithPassword } from '~data/actions/user'
++import { TURNSTILE_SITE_KEY } from '~data/constants/app'
+ 
+ import { Link } from 'react-router-dom'
+ import { Helmet } from 'react-helmet'
+@@ -18,7 +19,35 @@ class AccountSignup extends React.Component {
+     state = {
+         name: '',
+         email: '',
+-        password: ''
++        password: '',
++        betaAccessPassword: '',
++        turnstileToken: ''
++    }
++
++    componentDidMount() {
++        if (!TURNSTILE_SITE_KEY || process.env.APP_TARGET == 'extension')
++            return
++
++        const render = () => {
++            if (!window.turnstile || this.turnstileId !== undefined)
++                return Boolean(window.turnstile)
++            this.turnstileId = window.turnstile.render(this.turnstile, {
++                sitekey: TURNSTILE_SITE_KEY,
++                callback: turnstileToken => this.setState({ turnstileToken }),
++                'expired-callback': () => this.setState({ turnstileToken: '' }),
++                'error-callback': () => this.setState({ turnstileToken: '' })
++            })
++            return true
++        }
++
++        if (!render())
++            this.turnstileTimer = setInterval(()=>render() && clearInterval(this.turnstileTimer), 50)
++    }
++
++    componentWillUnmount() {
++        clearInterval(this.turnstileTimer)
++        if (this.turnstileId !== undefined)
++            window.turnstile?.remove(this.turnstileId)
+     }
+ 
+     componentDidUpdate(prev) {
+@@ -80,6 +109,21 @@ class AccountSignup extends React.Component {
+                         value={this.state.password}
+                         onChange={this.onChangeValue} />
+ 
++                    {process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' ? <>
++                        <Label>Beta Access Password</Label>
++                        <Text
++                            type='password'
++                            name='betaAccessPassword'
++                            disabled={status=='loading'}
++                            required
++                            value={this.state.betaAccessPassword}
++                            onChange={this.onChangeValue} />
++                    </> : null}
++
++                    {TURNSTILE_SITE_KEY && process.env.APP_TARGET != 'extension' ? (
++                        <div ref={element=>this.turnstile=element} />
++                    ) : null}
++
+                     {status == 'loading' ? (
+                         <Button variant='flat' data-block>
+                             <Preloader />
+@@ -120,4 +164,4 @@ export default connect(
+ 		error: errorReason(state)
+     }),
+     { registerWithPassword }
+-)(AccountSignup)
+\ No newline at end of file
++)(AccountSignup)

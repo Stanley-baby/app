@@ -1,0 +1,2735 @@
+openapi: 3.0.3
+info:
+  title: Independent Bookmarking Service API
+  version: 1.0.0
+servers:
+  - url: https://api.example.com
+components:
+  responses:
+    InternalError:
+      description: Unexpected API failure; the response contains no exception details or User content.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [result, error, errorMessage]
+            properties:
+              result: {type: boolean, enum: [false]}
+              error: {type: string, enum: [internal_error]}
+              errorMessage: {type: string, enum: [Internal server error]}
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: rd_session
+    BearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: DeveloperToken or OAuthAccessToken
+x-error-alerts:
+  api_error:
+    response: internal_error
+    metadata: [code, status]
+    redacted: true
+x-bearer-auth:
+  description: Developer Tokens and OAuth access tokens may replace SessionCookie on data routes outside Beta.
+  scopes:
+    profile:read: User profile and quota reads.
+    bookmarks:read: Bookmark and saved-content reads.
+    bookmarks:write: Bookmark and saved-content writes.
+    collections:read: Collection, tag, and filter reads.
+    collections:write: Collection, tag, and filter writes.
+paths:
+  /health:
+    get:
+      responses:
+        '200':
+          description: Worker is healthy.
+  /version:
+    get:
+      responses:
+        '200':
+          description: Deployed Worker version.
+  /v1/auth/email/signup:
+    post:
+      security: []
+      responses:
+        '201':
+          description: Unverified User created and confirmation email sent.
+        '400':
+          description: Validation or Turnstile failure.
+        '403':
+          description: Beta Access Password rejected.
+        '409':
+          description: Conflict or pending operation.
+        '502':
+          description: Upstream delivery failed.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/email/login:
+    post:
+      security: []
+      responses:
+        '200':
+          description: Device session cookie created.
+        '401':
+          description: Invalid credentials.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/email/confirm:
+    post:
+      security: []
+      responses:
+        '200':
+          description: Email verified.
+        '400':
+          description: Invalid request validation.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/google:
+    get:
+      security: []
+      responses:
+        '302':
+          description: Redirect to Google consent.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security: []
+      responses:
+        '200':
+          description: Authorize a Beta Google signup and return the consent URL.
+        '403':
+          description: Beta Access Password rejected.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/google/callback:
+    get:
+      security: []
+      responses:
+        '303':
+          description: Complete a Google sign-in or connection.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/apple:
+    get:
+      security: []
+      responses:
+        '302': {description: Redirect to Apple consent.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '503': {description: Apple sign-in is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security: []
+      responses:
+        '200': {description: Authorize a Beta Apple signup and return the consent URL.}
+        '403': {description: Beta Access Password rejected.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '503': {description: Apple sign-in is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/apple/callback:
+    get:
+      security: []
+      responses:
+        '303': {description: Complete an Apple sign-in or connection.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '503': {description: Apple sign-in is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security: []
+      responses:
+        '303': {description: Complete an Apple sign-in or connection from the form_post response.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '503': {description: Apple sign-in is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/tfa/{token}:
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema: {type: string}
+    post:
+      security: []
+      responses:
+        '200': {description: Device session cookie created after Second Factor verification.}
+        '401': {description: Second Factor challenge is invalid or expired.}
+        '503': {description: Authentication is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security: []
+      responses:
+        '200': {description: Second Factor disabled with a Recovery Code.}
+        '401': {description: Second Factor challenge is invalid or expired.}
+        '503': {description: Authentication is not configured.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/auth/onedrive/callback:
+    get:
+      security: []
+      responses:
+        '303':
+          description: Complete a OneDrive connection.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/sessions:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Current User device sessions.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collections/all:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
+      parameters:
+        - in: query
+          name: removed
+          required: false
+          description: Return the signed-in User's Recycle Bin Collections when true.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Authorized active or removed Collections with numeric Resource IDs and parent IDs.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collections:
+    delete:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: integer
+                    minimum: 1
+      responses:
+        '200':
+          description: Owned Collections and descendants moved to the Recycle Bin.
+        '400':
+          description: Invalid Collection IDs.
+        '401':
+          description: Login required.
+        '404':
+          description: A Collection is not owned by this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collections/clean:
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      responses:
+        '200':
+          description: Empty owned Collections permanently removed.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collection:
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:
+                  type: string
+                  maxLength: 200
+                parentId:
+                  oneOf:
+                    - type: integer
+                      minimum: 0
+                    - type: string
+                      enum: [root]
+                  nullable: true
+      responses:
+        '201':
+          description: Nested or root Collection created for the signed-in User.
+        '400':
+          description: Invalid Collection title or parent.
+        '401':
+          description: Login required.
+        '404':
+          description: Parent Collection is not owned by the User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collection/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
+      responses:
+        '200':
+          description: Authorized Collection with numeric Resource ID.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  maxLength: 200
+                parentId:
+                  oneOf:
+                    - type: integer
+                      minimum: 0
+                    - type: string
+                      enum: [root]
+                  nullable: true
+                removed:
+                  type: boolean
+      responses:
+        '200':
+          description: Collection title or parent updated.
+        '400':
+          description: Invalid Collection update.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection or parent not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      responses:
+        '200':
+          description: Owned Collection and descendants moved to the Recycle Bin, or the Recycle Bin was permanently cleared for the special -99 ID.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/tags/{collectionId}:
+    parameters:
+      - in: path
+        name: collectionId
+        required: true
+        schema:
+          type: integer
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
+      parameters:
+        - in: query
+          name: search
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: tagsSort
+          required: false
+          schema:
+            type: string
+            enum: [_id, -count]
+      responses:
+        '200':
+          description: Tags from authorized active Bookmarks.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/tags/recent:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
+      responses:
+        '200':
+          description: Recently updated authorized Tags.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/tags/0:
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tag, replace]
+              properties:
+                tag:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                replace:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+      responses:
+        '200':
+          description: Tag renamed on the User's active Bookmarks.
+        '400':
+          description: Invalid Tag name.
+        '409':
+          description: Tag update conflicted with a concurrent Bookmark change.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/tag:
+    delete:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      parameters:
+        - in: query
+          name: tag
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 100
+      responses:
+        '200':
+          description: Tag removed from the User's active Bookmarks.
+        '400':
+          description: Invalid Tag name.
+        '409':
+          description: Tag update conflicted with a concurrent Bookmark change.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/filters/{collectionId}:
+    parameters:
+      - in: path
+        name: collectionId
+        required: true
+        schema:
+          type: integer
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
+      responses:
+        '200':
+          description: Authorized tag filters for a Collection.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop:
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [link]
+              properties:
+                link:
+                  type: string
+                  format: uri
+                title:
+                  type: string
+                  maxLength: 500
+                description:
+                  type: string
+                  maxLength: 10000
+                excerpt:
+                  type: string
+                  maxLength: 10000
+                note:
+                  type: string
+                  maxLength: 10000
+                collectionId:
+                  type: integer
+                  minimum: -1
+                tags:
+                  type: array
+                  items:
+                    type: string
+                    maxLength: 100
+                highlights:
+                  type: array
+                  items:
+                    type: object
+      responses:
+        '201':
+          description: Basic Bookmark created for the signed-in User.
+        '401':
+          description: Login required.
+        '400':
+          description: Invalid request validation.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/suggest:
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [link, title]
+              properties:
+                link: {type: string, format: uri}
+                title: {type: string, maxLength: 500}
+                description: {type: string, maxLength: 10000}
+                note: {type: string, maxLength: 10000}
+                tags:
+                  type: array
+                  items: {type: string, maxLength: 100}
+      responses:
+        '200':
+          description: Collection and Tag suggestions for a new Bookmark.
+        '400':
+          description: Bookmark URL or title is invalid.
+        '401':
+          description: Login required.
+        '429':
+          description: Daily AI quota exhausted.
+        '404':
+          description: Resource not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/{id}/suggest:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: integer, minimum: 1}
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      responses:
+        '200':
+          description: Collection and Tag suggestions for an authorized Bookmark.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      responses:
+        '200':
+          description: Bookmark with its numeric Resource ID and Change Version.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                link:
+                  type: string
+                  format: uri
+                title:
+                  type: string
+                  maxLength: 500
+                description:
+                  type: string
+                  maxLength: 10000
+                excerpt:
+                  type: string
+                  maxLength: 10000
+                note:
+                  type: string
+                  maxLength: 10000
+                collectionId:
+                  type: integer
+                  minimum: -1
+                tags:
+                  type: array
+                  items:
+                    type: string
+                    maxLength: 100
+                highlights:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      _id:
+                        type: integer
+                        minimum: 1
+                      text:
+                        type: string
+                        maxLength: 10000
+                      note:
+                        type: string
+                        maxLength: 10000
+                      color:
+                        type: string
+                        enum: [yellow, blue, green, red]
+                      position: {}
+                removed:
+                  type: boolean
+      responses:
+        '200':
+          description: Bookmark updated with the winning Change Version.
+        '400':
+          description: Invalid Bookmark fields.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      responses:
+        '200':
+          description: Bookmark moved to the Recycle Bin and a Change Version emitted.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/{id}/highlights.txt:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      responses:
+        '200':
+          description: Plain-text Highlights for the authorized Bookmark.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/{id}/highlights.csv:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: integer
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      responses:
+        '200':
+          description: CSV Highlights for the authorized Bookmark.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrops:
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [link]
+                    properties:
+                      link:
+                        type: string
+                        format: uri
+                      title:
+                        type: string
+                        maxLength: 500
+                      description:
+                        type: string
+                        maxLength: 10000
+                      excerpt:
+                        type: string
+                        maxLength: 10000
+                      note:
+                        type: string
+                        maxLength: 10000
+                      collectionId:
+                        type: integer
+                        minimum: -1
+                      tags:
+                        type: array
+                        items:
+                          type: string
+                          maxLength: 100
+                      highlights:
+                        type: array
+                        items:
+                          type: object
+      responses:
+        '201':
+          description: Multiple Bookmarks created with one Change Version per item.
+        '400':
+          description: Invalid Bookmark batch.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrops/{collectionId}:
+    parameters:
+      - in: path
+        name: collectionId
+        required: true
+        schema:
+          type: integer
+      - in: query
+        name: version
+        required: false
+        description: Return only the latest state for Bookmarks changed after this Change Version.
+        schema:
+          type: integer
+          minimum: 0
+      - in: query
+        name: search
+        required: false
+        description: Match only authorized Bookmark title, URL, description, tags, note, or Highlights; Saved-page Snapshot body is excluded.
+        schema:
+          type: string
+      - in: query
+        name: page
+        required: false
+        description: Zero-based page number for Bookmark results.
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+      - in: query
+        name: perpage
+        required: false
+        description: Number of Bookmarks per page; values above 100 are rejected.
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 40
+      - in: query
+        name: dangerAll
+        required: false
+        description: Required by bulk Bookmark deletion clients.
+        schema:
+          type: boolean
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      responses:
+        '200':
+          description: Zero-based Bookmark page, total count, and the current lastAction/version marker.
+        '400':
+          description: Invalid Change Version.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: integer
+                    minimum: 1
+      responses:
+        '200':
+          description: Owned active Bookmarks moved to the Recycle Bin, or the -99 Recycle Bin was permanently cleared.
+        '400':
+          description: Invalid Bookmark IDs.
+        '401':
+          description: Login required.
+        '404':
+          description: Collection not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrops/{collectionId}/export.{format}:
+    parameters:
+      - in: path
+        name: collectionId
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: format
+        required: true
+        schema:
+          type: string
+          enum: [html, csv, txt, zip]
+      - in: query
+        name: ids
+        required: false
+        description: Comma-separated Bookmark IDs; unauthorized IDs are omitted.
+        schema:
+          type: string
+      - in: query
+        name: search
+        required: false
+        schema:
+          type: string
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      responses:
+        '200':
+          description: Authorized Bookmark export in the requested format.
+        '400':
+          description: Unsupported Recycle Bin export scope.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Collection not found for this User.
+        '413':
+          description: Authorized cleared content exceeds the archive limit.
+        '503':
+          description: Export content could not be read.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrops/changes:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      parameters:
+        - in: query
+          name: since
+          required: true
+          description: Return the latest state for each Bookmark changed after this Change Version.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: Incremental Bookmark changes and the current marker.
+        '400':
+          description: A non-negative Change Version is required.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backup:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '202':
+          description: Private R2 backup queued for the authenticated User.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '503':
+          description: Backup could not be queued.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '202':
+          description: Private R2 backup queued for the authenticated User.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '503':
+          description: Backup could not be queued.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backups:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: The authenticated User's completed private restore points.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backup/connections:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Verified backup destinations without readable credentials.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, credentials]
+              properties:
+                provider: {type: string, enum: [gdrive, onedrive, webdav]}
+                credentials: {type: object}
+                default: {type: boolean}
+      responses:
+        '201': {description: Backup destination independently verified and encrypted credentials saved.}
+        '400': {description: Provider or credentials rejected.}
+        '401': {description: Login required.}
+        '403': {description: Email verification required.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backup/connections/gdrive/authorize:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '302':
+          description: Redirect to Google consent for encrypted offline Drive access.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '503':
+          description: Google OAuth is not configured.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backup/connections/onedrive/authorize:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '302':
+          description: Redirect to Microsoft consent for encrypted offline OneDrive access.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '503':
+          description: Microsoft OAuth is not configured.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backup/connections/{id}/default:
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Default backup destination selected.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Backup destination not found.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backups/{id}:
+    get:
+      security:
+        - SessionCookie: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Private backup status.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Backup not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backup/{id}/status:
+    get:
+      security:
+        - SessionCookie: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Private backup status.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Backup not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/backup/{id}.{format}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: format
+        required: true
+        schema:
+          type: string
+          enum: [html, csv, txt, zip]
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Authorized private backup export.
+        '401':
+          description: Login required.
+        '403':
+          description: Email verification required.
+        '404':
+          description: Backup or private R2 object not found.
+        '409':
+          description: Backup is still being created.
+        '503':
+          description: Private R2 backup could not be read.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collection/{id}/lastAction:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Monotonic lastAction timestamp and numeric Change Version.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [profile:read]
+      responses:
+        '200':
+          description: Authenticated User.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/tfa:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Begin authenticator-app Second Factor setup or return its enabled state.}
+        '401': {description: Login required.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Enable Second Factor and return the one-time Recovery Code.}
+        '400': {description: Authenticator code is invalid.}
+        '401': {description: Login required.}
+        '409': {description: Second Factor is already enabled.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Disable Second Factor after code verification.}
+        '400': {description: Authenticator or Recovery Code is invalid.}
+        '401': {description: Login required.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/quota:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [profile:read]
+      responses:
+        '200':
+          description: Current daily Usage Quota and its reset time for the authenticated User.
+        '401':
+          description: Login required.
+        '429':
+          description: Endpoint rate limit reached; retry after the Retry-After interval.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/connect/google:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '302':
+          description: Redirect to Google consent to connect an identity.
+        '401':
+          description: Login required.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/connect/google/revoke:
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Disconnect Google from the authenticated User.
+        '403':
+          description: Browser origin is not the configured Web app.
+        '409':
+          description: Another sign-in method is required before disconnecting Google.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/connect/apple:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '302':
+          description: Redirect to Apple consent to connect an identity.
+        '404':
+          description: Public API access is unavailable in Beta.
+        '401':
+          description: Login required.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/connect/apple/revoke:
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Disconnect Apple from the authenticated User.
+        '403':
+          description: Browser origin is not the configured Web app.
+        '404':
+          description: Public API access is unavailable in Beta.
+        '409':
+          description: Another sign-in method is required before disconnecting Apple.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/deletion:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Current deletion-window status.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '202':
+          description: Thirty-day deletion window scheduled.
+        '409':
+          description: Shared collections require explicit resolution first.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Scheduled deletion cancelled.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/tasks/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Authorized Background Task status, progress, retry count, and safe failure details.
+        '401':
+          description: Login required.
+        '404':
+          description: Task not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/tasks/{id}/status:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Authorized Background Task status and progress.
+        '401':
+          description: Login required.
+        '404':
+          description: Task not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/tasks/{id}/failure:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Safe Background Task failure details, or null when it has not failed.
+        '401':
+          description: Login required.
+        '404':
+          description: Task not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/tasks/{id}/retry:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '202':
+          description: Failed Background Task queued for an explicit manual retry.
+        '400':
+          description: Task type cannot be retried.
+        '401':
+          description: Login required.
+        '404':
+          description: Task not found for this User.
+        '409':
+          description: Task is not in a retryable failure state.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/import/preflight:
+    post:
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Migration Archive containing collections, bookmarks, and inline protected content (attachments, covers, or snapshots).
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Migration Preflight report with duplicate candidates awaiting review.
+        '400':
+          description: Invalid or empty Migration Archive.
+        '413':
+          description: Migration Archive exceeds the configured size limit.
+        '401':
+          description: Login required.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/import:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Current User's Migration Archives and Background Task states.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/import/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Migration Archive status, duplicate decisions, and resumable task progress.
+        '404':
+          description: Migration Archive not found for this User.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/import/{id}/review:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decisions]
+              properties:
+                decisions:
+                  oneOf:
+                    - type: object
+                      additionalProperties:
+                        type: string
+                        enum: [keep, skip]
+                    - type: array
+                      items:
+                        type: object
+                        required: [sourceId, decision]
+                        properties:
+                          sourceId:
+                            type: string
+                          decision:
+                            type: string
+                            enum: [keep, skip]
+      responses:
+        '200':
+          description: Duplicate Review decisions saved.
+        '400':
+          description: Invalid or unknown duplicate decision.
+        '409':
+          description: Archive is no longer awaiting review.
+        '401':
+          description: Login required.
+        '404':
+          description: Resource not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/import/{id}/commit:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Existing completed Migration Archive returned idempotently.
+        '202':
+          description: Migration Archive accepted as a resumable Background Task.
+        '409':
+          description: Duplicate Review is incomplete.
+        '503':
+          description: Background Task could not be queued.
+        '401':
+          description: Login required.
+        '404':
+          description: Resource not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/import/{id}/status:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Current import progress and safe failure details.
+        '401':
+          description: Login required.
+        '404':
+          description: Resource not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/import/{id}/retry:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '202':
+          description: Failed import task queued for explicit retry.
+        '409':
+          description: Import task is not in a retryable state.
+        '400':
+          description: Invalid request validation.
+        '401':
+          description: Login required.
+        '404':
+          description: Resource not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/import/{id}/mappings:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: Source identifiers mapped to assigned Resource IDs (numeric for Collections and Bookmarks, opaque for Protected Content).
+        '401':
+          description: Login required.
+        '404':
+          description: Resource not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/file:
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                title:
+                  type: string
+                  maxLength: 500
+                collectionId:
+                  type: integer
+                  minimum: -1
+                tags:
+                  type: string
+      responses:
+        '201':
+          description: Private attachment stored in Quarantined Content.
+        '400':
+          description: Upload metadata or file is invalid.
+        '401':
+          description: Login required.
+        '403':
+          description: Verified email required.
+        '413':
+          description: Attachment exceeds the 50 MiB Beta limit.
+        '503':
+          description: Private content storage is unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/content/upload:
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, bookmarkId]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                bookmarkId:
+                  type: integer
+                  minimum: 1
+      responses:
+        '201':
+          description: Private attachment stored in Quarantined Content.
+        '400':
+          description: Upload metadata or file is invalid.
+        '401':
+          description: Login required.
+        '403':
+          description: Verified email required.
+        '404':
+          description: Bookmark not found for this User.
+        '413':
+          description: Attachment exceeds the 50 MiB Beta limit.
+        '503':
+          description: Private content storage or the safety queue is unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        '201': {description: Protected Content uploaded and cleared or quarantined according to the safety switch.}
+        '400': {description: Invalid upload.}
+        '401': {description: Login required.}
+        '403': {description: Editor access required.}
+        '404': {description: Bookmark not found.}
+        '413': {description: Upload exceeds the configured capacity.}
+        '503': {description: Content storage or safety task unavailable.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/{id}/attachments:
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Private attachment stored in Quarantined Content.
+        '400':
+          description: Upload metadata or file is invalid.
+        '401':
+          description: Login required.
+        '403':
+          description: Verified email required.
+        '404':
+          description: Bookmark not found for this User.
+        '413':
+          description: Attachment exceeds the 50 MiB Beta limit.
+        '503':
+          description: Private content storage or the safety queue is unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        '201': {description: Protected Content uploaded and cleared or quarantined according to the safety switch.}
+        '400': {description: Invalid upload.}
+        '401': {description: Login required.}
+        '403': {description: Editor access required.}
+        '404': {description: Bookmark not found.}
+        '413': {description: Upload exceeds the configured capacity.}
+        '503': {description: Content storage or safety task unavailable.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/{id}/content:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Authorized private content metadata for a Bookmark.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/{id}/capture:
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind:
+                  type: string
+                  enum: [snapshot, screenshot]
+      responses:
+        '202':
+          description: Explicit Dynamic Capture queued for safety checking.
+        '400':
+          description: Bookmark URL is not a public HTTP(S) address.
+        '401':
+          description: Login required.
+        '403':
+          description: Verified email required.
+        '404':
+          description: Bookmark not found for this User.
+        '503':
+          description: Capture task could not be queued.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Capture and snapshot status for the Bookmark.
+        '401':
+          description: Login required.
+        '404':
+          description: Bookmark not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/content/{id}:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Authorized Protected Content metadata.
+        '401':
+          description: Login required.
+        '404':
+          description: Content not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/content/{id}/download:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Authorized Cleared Content stream from private R2.
+        '401':
+          description: Login required.
+        '404':
+          description: Content not found for this User.
+        '409':
+          description: Content is still Quarantined.
+        '503':
+          description: Service is temporarily unavailable.
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collection/{id}/sharing:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: Direct Collaborators and their roles.}
+        '401': {description: Login required.}
+        '404': {description: Collection not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+                  enum: [editor, viewer, member]
+      responses:
+        '201': {description: One-time invitation created.}
+        '400': {description: Invalid role.}
+        '401': {description: Login required.}
+        '403': {description: Editor or Owner access required.}
+        '404':
+          description: Resource not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      responses:
+        '200': {description: Sharing removed from the Collection and descendants.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collection/{id}/sharing/{userId}:
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+        - in: path
+          name: userId
+          required: true
+          schema: {type: integer}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [editor, viewer, member]
+      responses:
+        '200': {description: Collaborator role updated.}
+        '400': {description: Invalid role.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or User not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      responses:
+        '200': {description: Collaborator removed.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or User not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+        - in: path
+          name: userId
+          required: true
+          schema: {type: integer}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: {type: string, enum: [editor, viewer, member]}
+      responses:
+        '200': {description: Collaborator role updated.}
+        '400': {description: Invalid role.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or User not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collaborators/join:
+    get:
+      security:
+        - SessionCookie: []
+      parameters:
+        - in: query
+          name: token
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Invitation accepted.}
+        '400': {description: Invitation is invalid or expired.}
+        '401': {description: Login required.}
+        '404': {description: Collection not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: {type: string}
+      responses:
+        '200': {description: Invitation accepted.}
+        '400': {description: Invitation is invalid or expired.}
+        '401': {description: Login required.}
+        '404': {description: Collection not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collection/{id}/transfer:
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId: {type: integer, minimum: 1}
+      responses:
+        '200': {description: Collection ownership transferred explicitly.}
+        '400': {description: Invalid target User.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or User not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collection/{id}/published-snapshots:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:read]
+      responses:
+        '200': {description: Published snapshot metadata.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404':
+          description: Resource not found for this User.
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contentId: {type: string}
+                contentIds:
+                  type: array
+                  items: {type: string}
+      responses:
+        '200': {description: Cleared snapshot explicitly published.}
+        '400': {description: Snapshot validation failed.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or content not found.}
+        '409': {description: Snapshot is not Cleared Content.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/collection/{id}/published-snapshots/{contentId}:
+    delete:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [collections:write]
+      responses:
+        '200': {description: Published snapshot revoked.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Collection or content not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/content/{id}/publish:
+    post:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      responses:
+        '200': {description: Cleared snapshot published to its Owner Collection.}
+        '400': {description: Snapshot validation failed.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Content not found.}
+        '409': {description: Snapshot is not Cleared Content.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      responses:
+        '200': {description: Published snapshot revoked.}
+        '401': {description: Login required.}
+        '403': {description: Owner access required.}
+        '404': {description: Content not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/public/collections/{id}/{slug}:
+    get:
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+        - in: path
+          name: slug
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Public Collection metadata and Bookmark list without private content.}
+        '404': {description: Collection is private, removed, or not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/public/content/{id}:
+    get:
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Published Cleared Snapshot stream.}
+        '404': {description: Content is not currently published.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v2/ai/config:
+    get:
+      responses:
+        '200': {description: Authenticated Workers AI and redacted Custom AI Provider configuration with per-user daily quota.}
+        '401': {description: Login required.}
+  /v2/ai/provider:
+    get:
+      responses:
+        '200': {description: Redacted Custom AI Provider configuration; API keys are never returned.}
+        '401': {description: Login required.}
+    put:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint, model, apiKey]
+              properties:
+                endpoint: {type: string, format: uri, description: Public HTTPS OpenAI-compatible endpoint.}
+                model: {type: string, maxLength: 200}
+                apiKey: {type: string, writeOnly: true, maxLength: 4096}
+      responses:
+        '200': {description: Provider tested and saved with the API key encrypted at rest.}
+        '400': {description: Invalid endpoint, model, credentials, or provider response.}
+        '401': {description: Login required.}
+        '503': {description: Provider storage is unavailable.}
+    delete:
+      responses:
+        '200': {description: Custom AI Provider deleted.}
+        '401': {description: Login required.}
+        '503': {description: Provider storage is unavailable.}
+  /v2/ai/provider/test:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint, model, apiKey]
+              properties:
+                endpoint: {type: string, format: uri, description: Public HTTPS OpenAI-compatible endpoint.}
+                model: {type: string, maxLength: 200}
+                apiKey: {type: string, writeOnly: true, maxLength: 4096}
+      responses:
+        '200': {description: Content-free provider connectivity test succeeded.}
+        '400': {description: Invalid endpoint, unsafe redirect, credentials, or provider response.}
+        '401': {description: Login required.}
+  /v2/ai/quota:
+    get:
+      responses:
+        '200': {description: Authenticated user's current AI quota and reset time.}
+        '401': {description: Login required.}
+  /v2/ai/context:
+    get:
+      parameters:
+        - in: query
+          name: raindropId
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '200': {description: Minimal authorized Bookmark context and matching source links.}
+        '401': {description: Login required.}
+        '404': {description: Bookmark is not owned by or shared with the User.}
+  /v2/ai/suggestions:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [raindropId]
+              properties:
+                raindropId: {type: integer, minimum: 1}
+                language: {type: string, maxLength: 32}
+                provider: {type: string, enum: [workers_ai, custom], description: Explicit provider choice.}
+      responses:
+        '200': {description: Authorized Collection and Tag suggestions.}
+        '400': {description: Invalid Bookmark input.}
+        '401': {description: Login required.}
+        '404': {description: Bookmark is not owned by or shared with the User.}
+        '409': {description: Custom AI Provider is not configured.}
+        '429': {description: Daily AI quota exhausted.}
+        '503': {description: Workers AI is unavailable.}
+  /v2/ai/description-draft:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [raindropId]
+              properties:
+                raindropId: {type: integer, minimum: 1}
+                language: {type: string, maxLength: 32}
+                provider: {type: string, enum: [workers_ai, custom], description: Explicit provider choice.}
+      responses:
+        '200': {description: Editable Description Draft with matching source links; no Bookmark is written.}
+        '400': {description: Invalid Bookmark input.}
+        '401': {description: Login required.}
+        '404': {description: Bookmark is not owned by or shared with the User.}
+        '409': {description: Custom AI Provider is not configured.}
+        '429': {description: Daily AI quota exhausted.}
+        '503': {description: Workers AI is unavailable.}
+  /v2/ai/tools:
+    get:
+      responses:
+        '200': {description: Authenticated AI Tool catalog and active Standing AI Approvals.}
+        '401': {description: Login required.}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tool]
+              properties:
+                tool: {type: string, enum: [bookmark_read, bookmark_search, bookmark_context, bookmark_update, bookmark_delete]}
+                bookmarkId: {type: integer, minimum: 1}
+                query: {type: string, maxLength: 8000}
+      responses:
+        '200': {description: Authorized AI read-tool result; write tools are rejected here.}
+        '400': {description: Invalid or write-only AI Tool request.}
+        '401': {description: Login required.}
+        '404': {description: Bookmark is not owned by or shared with the User.}
+  /v2/ai/action-proposals:
+    get:
+      parameters:
+        - in: query
+          name: status
+          schema: {type: string, enum: [pending, applied, rejected, failed]}
+      responses:
+        '200': {description: User-scoped AI Action Proposals.}
+        '401': {description: Login required.}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tool, bookmarkId]
+              properties:
+                tool: {type: string, enum: [bookmark_update, bookmark_delete]}
+                bookmarkId: {type: integer, minimum: 1}
+                changes: {type: object}
+      responses:
+        '201': {description: Pending AI Action Proposal requiring an explicit decision.}
+        '400': {description: Invalid AI Tool or change payload.}
+        '401': {description: Login required.}
+        '403': {description: Editor access is required for the Bookmark.}
+        '404': {description: Bookmark or destination Collection is not available.}
+        '503': {description: Proposal storage is temporarily unavailable.}
+  /v2/ai/action-proposals/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: User-scoped AI Action Proposal.}
+        '401': {description: Login required.}
+        '404': {description: Proposal is not owned by the User.}
+  /v2/ai/action-proposals/{id}/decision:
+    post:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: {type: string, enum: [approve, reject, always_approve]}
+      responses:
+        '200': {description: AI Action Proposal approved, rejected, or applied under a scoped Standing AI Approval.}
+        '400': {description: Invalid decision or Standing AI Approval scope.}
+        '401': {description: Login required.}
+        '403': {description: Current Bookmark permissions no longer allow the action.}
+        '404': {description: Proposal is not owned by the User.}
+        '409': {description: Proposal is no longer pending or its target changed.}
+  /v2/ai/approvals:
+    get:
+      responses:
+        '200': {description: Active user-scoped Standing AI Approvals.}
+        '401': {description: Login required.}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tool, collectionId]
+              properties:
+                tool: {type: string, enum: [bookmark_update, bookmark_delete]}
+                collectionId: {type: integer, minimum: 1}
+      responses:
+        '201': {description: Standing AI Approval limited to this User, Tool, and Collection.}
+        '400': {description: Invalid write Tool or Collection.}
+        '401': {description: Login required.}
+        '403': {description: Editor access is required for the Collection.}
+        '404': {description: Collection is not available.}
+        '503': {description: Approval storage is temporarily unavailable.}
+  /v2/ai/approvals/{id}:
+    delete:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Standing AI Approval revoked.}
+        '401': {description: Login required.}
+        '404': {description: Approval is not owned by the User or already revoked.}
+  /v2/ai/chat:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: {type: string, maxLength: 8000}
+                chatId: {type: string}
+                raindropId: {type: integer, minimum: 1}
+                language: {type: string, maxLength: 32}
+                provider: {type: string, enum: [workers_ai, custom], description: Explicit provider choice; no automatic fallback.}
+      responses:
+        '200': {description: SSE stream of the explicitly selected provider's deltas; provider is never silently changed.}
+        '400': {description: Invalid message.}
+        '401': {description: Login required.}
+        '404': {description: Chat or Bookmark is not owned by the User.}
+        '429': {description: Daily AI quota exhausted; retryAt and resetAt are returned.}
+        '503': {description: Selected AI Provider is unavailable.}
+  /v2/ai/history:
+    get:
+      responses:
+        '200': {description: Private AI chats and messages for the authenticated User.}
+        '401': {description: Login required.}
+    delete:
+      responses:
+        '200': {description: All private AI history deleted for the authenticated User.}
+        '401': {description: Login required.}
+        '503': {description: AI history storage is temporarily unavailable.}
+  /v2/ai/chats/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Private AI chat and messages.}
+        '401': {description: Login required.}
+        '404': {description: Chat is not owned by the User.}
+        '503': {description: AI history storage is temporarily unavailable.}
+    delete:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Private AI chat deleted.}
+        '401': {description: Login required.}
+        '404': {description: Chat is not owned by the User.}
+        '503': {description: AI history storage is temporarily unavailable.}
+
+  /v1/developer/tokens:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: User-owned Developer Tokens without secret values.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '201': {description: Developer Token created; the secret is returned once.}
+        '400': {description: Invalid name, scope, or expiry.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/developer/tokens/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    delete:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Developer Token revoked.}
+        '401': {description: Login required.}
+        '404': {description: Developer Token not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/clients:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: User-owned OAuth Clients without client secrets.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/connections:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: OAuth Clients with an active delegated connection.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client:
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '201': {description: OAuth Client created; client secret is returned once.}
+        '400': {description: Invalid client metadata or redirect URI.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    put:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: OAuth Client metadata updated.}
+        '400': {description: Invalid client metadata or redirect URI.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: OAuth Client removed.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client/{id}/revoke:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    put:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: OAuth Client and its access tokens revoked.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client/{id}/reset_secret:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    put:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Client secret rotated and returned once.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/client/{id}/test_token:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Short-lived test bearer token issued.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Short-lived test bearer token issued.}
+        '401': {description: Login required.}
+        '404': {description: OAuth Client not found.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/authorize:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Explicit OAuth consent form.}
+        '302': {description: Authorization code sent to the exact registered redirect URI.}
+        '400': {description: Invalid OAuth request, PKCE parameters, or consent token.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '302': {description: Authorization response sent to the exact registered redirect URI.}
+        '400': {description: Invalid OAuth request, PKCE parameters, or consent token.}
+        '401': {description: Login required.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/token:
+    post:
+      security: []
+      responses:
+        '200': {description: Short-lived OAuth bearer access token.}
+        '400': {description: Invalid, expired, reused, or PKCE-mismatched authorization code.}
+        '401': {description: Invalid client authentication.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/oauth/access_token:
+    post:
+      security: []
+      responses:
+        '200': {description: OAuth bearer access token or rotated refresh token.}
+        '400': {description: Invalid, expired, reused, or PKCE-mismatched authorization or refresh grant.}
+        '401': {description: Invalid client authentication.}
+        '404': {description: Public API access is unavailable in Beta.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/auth/logout:
+    get:
+      security: []
+      responses:
+        '200': {description: Device Session revoked and the session cookie expired.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/remove:
+    get:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Account deletion or restore page for the authenticated User.}
+        '401': {description: Login required.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/stats:
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [profile:read]
+      responses:
+        '200': {description: Authorized Bookmark counters for active, unsorted, and Recycle Bin items.}
+        '401': {description: Login required.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/user/send_email_confirm:
+    post:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Confirmation email queued, or already verified.}
+        '401': {description: Login required.}
+        '502': {description: Confirmation email delivery failed.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/sessions/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+    delete:
+      security:
+        - SessionCookie: []
+      responses:
+        '200': {description: Device Session revoked.}
+        '401': {description: Login required.}
+        '404': {description: Device Session not found for the User.}
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/raindrop/{id}/capture/status:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: integer}
+    get:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:read]
+      responses:
+        '200': {description: Capture Request status and its safe Background Task details.}
+        '401': {description: Login required.}
+        '404': {description: Bookmark or Capture Request not found.}
+
+        '500':
+          $ref: '#/components/responses/InternalError'

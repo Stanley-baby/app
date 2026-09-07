@@ -2,15 +2,22 @@ const path = require('path')
 const webpack = require('webpack')
 const { merge } = require('webpack-merge')
 const common = require('./common')
+const { resolveEnvironment } = require('./environments')
 
 const HtmlWebpackPlugin = require('html-webpack-plugin')
 const CopyPlugin = require('copy-webpack-plugin')
 const ZipPlugin = require('zip-webpack-plugin')
 
 module.exports = (env={}, args={}) => {
-    const outputPath = path.resolve(__dirname, '..', 'dist', env.vendor, env.production?'prod':'dev')
+    const buildEnvironment = resolveEnvironment(env)
+    const outputDirectory = buildEnvironment.name == 'local' ? 'dev' : buildEnvironment.name == 'production' ? 'prod' : buildEnvironment.name
+    const outputPath = path.resolve(__dirname, '..', 'dist', env.vendor, outputDirectory)
 
     env.filename = '[name]'
+    env.environment = buildEnvironment.name
+    env.apiOrigin = buildEnvironment.apiOrigin
+    env.aiPageOrigin = buildEnvironment.aiPageOrigin
+    env.appOrigin = buildEnvironment.appOrigin
 
     //prevent mv3 review issues with remote code
     env.sentry = { disabled: true }
@@ -56,12 +63,24 @@ module.exports = (env={}, args={}) => {
                 devMiddleware: {
                     writeToDisk: true
                 },
+
+                port: env.vendor == 'chrome' ? 2001 : 2000,
             },
 
             plugins: [
                 new HtmlWebpackPlugin({
                     title: 'Raindrop.io',
                     template: './index.ejs',
+                    templateParameters: {
+                        apiOrigin: buildEnvironment.apiOrigin,
+                        aiPageOrigin: buildEnvironment.aiPageOrigin,
+                        appOrigin: buildEnvironment.appOrigin,
+                        helpOrigin: buildEnvironment.helpOrigin,
+                        repositoryUrl: buildEnvironment.repositoryUrl,
+                        independentService: buildEnvironment.independentService,
+                        turnstileSiteKey: buildEnvironment.turnstileSiteKey,
+                        turnstileEnabled: buildEnvironment.turnstileEnabled
+                    },
                     filename: 'sidepanel.html',
                     scriptLoading: 'blocking',
                     inject: 'body',
@@ -75,14 +94,27 @@ module.exports = (env={}, args={}) => {
 
                 new CopyPlugin({
                     patterns: [
-                        { from: 'assets/target/extension/welcome', to: 'welcome' }
+                        {
+                            from: 'assets/target/extension/welcome',
+                            to: 'welcome',
+                            transform(content, resourcePath) {
+                                if (!/\.(html|js|css)$/.test(resourcePath))
+                                    return content
+
+                                return content.toString()
+                                    .replaceAll('__API_ORIGIN__', buildEnvironment.apiOrigin)
+                                    .replaceAll('__APP_ORIGIN__', buildEnvironment.appOrigin)
+                                    .replaceAll('__HELP_ORIGIN__', buildEnvironment.helpOrigin)
+                                    .replaceAll('__DOWNLOAD_URL__', `${buildEnvironment.repositoryUrl}/releases`)
+                            }
+                        }
                     ]
                 }),
 
                 ...(env.production ? [
                     new ZipPlugin({
                         path: '../../',
-                        filename: `${env.vendor}-${env.production?'prod':'dev'}.zip`,
+                        filename: `${env.vendor}-${env.environment == 'production' ? 'prod' : env.environment}.zip`,
                         exclude: []
                     })
                 ] : [])
