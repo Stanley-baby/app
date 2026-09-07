@@ -66,8 +66,7 @@ export default function SettingsTfaEnable() {
                     <Title>{t.s('add')} 2FA</Title>
 
                     <Label>Step 1</Label>
-                    <b>Scan QR code in your authenticator app</b>
-                    <div/><img src={configure.qrCode} />
+                    <b>Enter this setup key in your authenticator app</b>
                     <div/><SubLabel>{configure.secret}</SubLabel>
 
                     <Label>Step 2</Label>

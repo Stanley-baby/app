@@ -26,9 +26,6 @@ export default function PageAccountTfaLogin() {
     const onChangeCodeField = useCallback(e=>{
         setCode(e.target.value)
         setValid(e.target.validity.valid)
-
-        if (e.target.value.length==6)
-            e.target.closest('form').requestSubmit()
     }, [])
 
     return (<>
@@ -48,11 +45,9 @@ export default function PageAccountTfaLogin() {
                     autoFocus
                     required
                     type='text'
-                    inputMode='numeric'
-                    pattern='[0-9]*'
                     autoComplete='one-time-code'
                     name='code'
-                    placeholder={t.s('enterTotp')}
+                    placeholder={`${t.s('enterTotp')} / ${t.s('recoveryCode')}`}
                     value={code}
                     onChange={onChangeCodeField} />
 

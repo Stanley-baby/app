@@ -106,5 +106,5 @@ test('preflight returns credentialed CORS headers without a response body', asyn
     assert.equal(response.headers.get('Access-Control-Allow-Origin'), 'http://localhost:2000')
     assert.equal(response.headers.get('Access-Control-Allow-Credentials'), 'true')
     assert.equal(response.headers.get('Access-Control-Allow-Methods'), 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
-    assert.equal(response.headers.get('Access-Control-Allow-Headers'), 'Content-Type, X-Request-ID, X-Device-Name')
+    assert.equal(response.headers.get('Access-Control-Allow-Headers'), 'Content-Type, Authorization, X-Request-ID, X-Device-Name')
 })

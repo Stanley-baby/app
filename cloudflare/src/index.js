@@ -4,6 +4,13 @@ const encoder = new TextEncoder()
 const sessionDays = 30
 const verificationHours = 24
 const oauthStateMinutes = 10
+const tfaStepSeconds = 30
+const tfaChallengeMinutes = 10
+const developerTokenDefaultDays = 30
+const developerTokenMaxDays = 365
+const oauthCodeMinutes = 5
+const oauthAccessTokenMinutes = 60
+const oauthRefreshTokenDays = 14
 const microsoftScopes = 'offline_access Files.ReadWrite'
 const deletionDays = 30
 const passwordIterations = 100000
@@ -105,7 +112,7 @@ const cors = (request, env) => {
         'X-Request-ID': requestId(request)
     }), request, env)
     headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
-    headers.set('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID, X-Device-Name')
+    headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-ID, X-Device-Name')
     headers.set('Access-Control-Max-Age', '600')
     return new Response(null, { status: 204, headers })
 }
@@ -138,6 +145,69 @@ const hmac = async (value, secret) => {
     const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(value))
     return bytesToBase64url(new Uint8Array(signature))
 }
+
+const base64urlText = value => bytesToBase64url(encoder.encode(String(value)))
+
+const base32Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+
+const base32Encode = bytes => {
+    let output = ''
+    let buffer = 0
+    let bits = 0
+    for (const byte of bytes) {
+        buffer = buffer << 8 | byte
+        bits += 8
+        while (bits >= 5) {
+            bits -= 5
+            output += base32Alphabet[(buffer >> bits) & 31]
+        }
+    }
+    if (bits) output += base32Alphabet[(buffer << (5 - bits)) & 31]
+    return output
+}
+
+const base32Decode = value => {
+    const clean = String(value || '').toUpperCase().replace(/[=\s]/g, '')
+    if (!clean || !/^[A-Z2-7]+$/.test(clean)) throw new Error('Invalid Base32 value')
+    const output = []
+    let buffer = 0
+    let bits = 0
+    for (const char of clean) {
+        buffer = buffer << 5 | base32Alphabet.indexOf(char)
+        bits += 5
+        if (bits >= 8) {
+            bits -= 8
+            output.push((buffer >> bits) & 255)
+        }
+    }
+    return new Uint8Array(output)
+}
+
+const totpCode = async (secret, timestamp = Date.now()) => {
+    const counter = Math.floor(Number(timestamp) / 1000 / tfaStepSeconds)
+    const message = new Uint8Array(8)
+    let value = counter
+    for (let index = 7; index >= 0; index--) {
+        message[index] = value & 255
+        value = Math.floor(value / 256)
+    }
+    const key = await crypto.subtle.importKey('raw', base32Decode(secret), { name: 'HMAC', hash: 'SHA-1' }, false, ['sign'])
+    const digest = new Uint8Array(await crypto.subtle.sign('HMAC', key, message))
+    const offset = digest[digest.length - 1] & 15
+    const number = ((digest[offset] & 127) << 24) | (digest[offset + 1] << 16) | (digest[offset + 2] << 8) | digest[offset + 3]
+    return String(number % 1000000).padStart(6, '0')
+}
+
+const validTotp = async (secret, value, timestamp = Date.now()) => {
+    const code = String(value || '').trim()
+    if (!/^\d{6}$/.test(code)) return false
+    for (const offset of [-1, 0, 1]) {
+        if (equal(await totpCode(secret, timestamp + offset * tfaStepSeconds * 1000), code)) return true
+    }
+    return false
+}
+
+const sha256Base64url = async value => bytesToBase64url(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(String(value)))))
 
 const credentialKey = async env => {
     const secret = env.BACKUP_CREDENTIAL_KEY || env.ENCRYPTION_KEY || env.SESSION_SECRET
@@ -208,7 +278,9 @@ const publicUser = user => ({
     email: user.email,
     name: user.name,
     email_verified: Boolean(user.email_verified_at),
-    ...(user.google_enabled ? { google: { enabled: true } } : {})
+    ...(user.google_enabled ? { google: { enabled: true } } : {}),
+    ...(user.apple_enabled ? { apple: { enabled: true } } : {}),
+    ...(user.tfa_enabled ? { tfa: { enabled: true } } : {})
 })
 
 const arrayValue = value => {
@@ -2687,8 +2759,10 @@ const mutateBookmarkTags = async (env, userId, transform) => {
 }
 
 const authReady = env => Boolean(env.DB && env.SESSION_SECRET)
+const publicAuthEnabled = env => String(env.ENVIRONMENT || '').toLowerCase() !== 'beta'
 const turnstileEnabled = env => String(env.TURNSTILE_ENABLED || '').toLowerCase() === 'true'
 const googleReady = env => Boolean(authReady(env) && env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.API_ORIGIN)
+const appleReady = env => Boolean(authReady(env) && env.APPLE_CLIENT_ID && env.APPLE_TEAM_ID && env.APPLE_KEY_ID && env.APPLE_PRIVATE_KEY && env.API_ORIGIN)
 const microsoftReady = env => Boolean(authReady(env) && env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.API_ORIGIN)
 
 const configurationError = (request, env) =>
@@ -2706,21 +2780,73 @@ const createSession = async (request, env, userId) => {
     return { id, token }
 }
 
+const bearerValue = request => {
+    const value = request.headers.get('Authorization') || ''
+    const match = value.match(/^Bearer\s+([A-Za-z0-9._~-]{20,512})$/i)
+    return match?.[1] || null
+}
+
+const scopeList = value => [...new Set(String(value || '').split(/[\s,]+/).map(item => item.trim()).filter(Boolean))]
+
+const sessionFromRow = (row, token, authType = 'session') => ({
+    ...row,
+    token,
+    auth_type: authType,
+    token_scopes: scopeList(row.token_scopes || row.scopes)
+})
+
 const getSession = async (request, env) => {
-    const token = cookieValue(request, 'rd_session')
-    if (!token || !authReady(env)) return null
+    if (!authReady(env)) return null
 
     const now = Date.now()
-    const session = await env.DB.prepare(`SELECT s.id AS session_id, s.user_id, s.device_name, s.created_at, s.last_seen_at, s.expires_at,
+    const cookie = cookieValue(request, 'rd_session')
+    if (cookie) {
+        const session = await env.DB.prepare(`SELECT s.id AS session_id, s.user_id, s.device_name, s.created_at, s.last_seen_at, s.expires_at,
         u.id, u.email, u.name, u.email_verified_at,
         u.federated_only,
-        EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'google') AS google_enabled
+        EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'google') AS google_enabled,
+        EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'apple') AS apple_enabled,
+        EXISTS(SELECT 1 FROM user_tfa tf WHERE tf.user_id = u.id AND tf.enabled_at IS NOT NULL) AS tfa_enabled
         FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?`)
-        .bind(await hmac(token, env.SESSION_SECRET), now).first()
+            .bind(await hmac(cookie, env.SESSION_SECRET), now).first()
 
-    if (!session) return null
-    await env.DB.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').bind(now, session.session_id).run()
-    return { ...session, token }
+        if (session) {
+            await env.DB.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').bind(now, session.session_id).run()
+            return sessionFromRow(session, cookie)
+        }
+    }
+
+    const token = publicAuthEnabled(env) ? bearerValue(request) : null
+    if (!token) return null
+    const tokenHash = await hmac(token, env.SESSION_SECRET)
+    try {
+        const developer = await env.DB.prepare(`SELECT t.id AS token_id, t.user_id, t.scopes AS token_scopes,
+            u.id, u.email, u.name, u.email_verified_at, u.federated_only,
+            EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'google') AS google_enabled,
+            EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'apple') AS apple_enabled,
+            EXISTS(SELECT 1 FROM user_tfa tf WHERE tf.user_id = u.id AND tf.enabled_at IS NOT NULL) AS tfa_enabled
+            FROM developer_tokens t JOIN users u ON u.id = t.user_id
+            WHERE t.token_hash = ? AND t.revoked_at IS NULL AND t.expires_at > ?`)
+            .bind(tokenHash, now).first()
+        if (developer) {
+            await env.DB.prepare('UPDATE developer_tokens SET last_used_at = ? WHERE id = ?').bind(now, developer.token_id).run()
+            return sessionFromRow(developer, token, 'bearer')
+        }
+
+        const access = await env.DB.prepare(`SELECT t.id AS access_token_id, t.user_id, t.scopes AS token_scopes,
+            u.id, u.email, u.name, u.email_verified_at, u.federated_only,
+            EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'google') AS google_enabled,
+            EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'apple') AS apple_enabled,
+            EXISTS(SELECT 1 FROM user_tfa tf WHERE tf.user_id = u.id AND tf.enabled_at IS NOT NULL) AS tfa_enabled
+            FROM oauth_access_tokens t JOIN oauth_clients c ON c.id = t.client_id JOIN users u ON u.id = t.user_id
+            WHERE t.token_hash = ? AND t.revoked_at IS NULL AND c.revoked_at IS NULL AND t.expires_at > ?`)
+            .bind(tokenHash, now).first()
+        if (!access) return null
+        await env.DB.prepare('UPDATE oauth_access_tokens SET last_used_at = ? WHERE id = ?').bind(now, access.access_token_id).run()
+        return sessionFromRow(access, token, 'bearer')
+    } catch {
+        return null
+    }
 }
 
 const auditRequestId = request => requestId(request)
@@ -2740,6 +2866,12 @@ const auditRoute = request => {
         [/^\/v1\/tags\/-?\d+$/, '/v1/tags/:collectionId'],
         [/^\/v1\/filters\/-?\d+$/, '/v1/filters/:collectionId'],
         [/^\/v1\/sessions\/[^/]+$/, '/v1/sessions/:id'],
+        [/^\/v1\/auth\/tfa\/[^/]+$/, '/v1/auth/tfa/:token'],
+        [/^\/v1\/developer\/tokens\/[^/]+(?:\/revoke)?$/, '/v1/developer/tokens/:id'],
+        [/^\/v1\/oauth\/client\/[^/]+(?:\/(?:revoke|reset_secret|test_token|icon))?$/, '/v1/oauth/client/:id'],
+        [/^\/v1\/oauth\/authorize$/, '/v1/oauth/authorize'],
+        [/^\/v1\/oauth\/token$/, '/v1/oauth/token'],
+        [/^\/v1\/oauth\/access_token$/, '/v1/oauth/access_token'],
         [/^\/v1\/tasks\/[^/]+(?:\/(?:status|failure|retry))?$/, '/v1/tasks/:id'],
         [/^\/v1\/content\/[^/]+\/download$/, '/v1/content/:id/download'],
         [/^\/v1\/content\/[^/]+$/, '/v1/content/:id'],
@@ -2763,11 +2895,15 @@ const auditRoute = request => {
     const known = new Set([
         '/v1/auth/email/signup', '/v1/auth/email/login', '/v1/auth/email/confirm',
         '/v1/auth/google', '/v1/auth/google/callback', '/v1/auth/onedrive/callback', '/v1/auth/logout',
+        '/v1/auth/apple', '/v1/auth/apple/callback', '/v1/auth/tfa',
         '/v1/sessions', '/v1/collections/all', '/v1/collections', '/v1/collections/clean',
         '/v1/collection', '/v1/tags/recent', '/v1/tags/0', '/v1/tag',
         '/v1/raindrops', '/v1/raindrops/changes', '/v1/raindrop', '/v1/user', '/v1/user/quota',
         '/v1/backup', '/v1/backups', '/v1/backup/connections',
         '/v1/user/connect/google', '/v1/user/connect/google/revoke', '/v1/user/deletion',
+        '/v1/user/connect/apple', '/v1/user/connect/apple/revoke', '/v1/user/tfa',
+        '/v1/developer/tokens', '/v1/developer/token', '/v1/oauth/clients', '/v1/oauth/connections',
+        '/v1/oauth/client', '/v1/oauth/authorize', '/v1/oauth/token', '/v1/oauth/access_token',
         '/v1/tasks',
         '/v1/import', '/v1/import/preflight',
         '/v1/user/remove', '/v1/user/send_email_confirm', '/v1/user/stats',
@@ -4561,9 +4697,449 @@ const sendVerification = async (env, email, token) => {
     }
 }
 
+const appleCallbackUrl = env => new URL('/v1/auth/apple/callback', env.API_ORIGIN).toString()
+
+const pemBytes = value => {
+    const text = String(value || '').replace(/\\n/g, '\n').trim()
+    const body = text.includes('-----BEGIN')
+        ? text.replace(/-----BEGIN [^-]+-----|-----END [^-]+-----/g, '').replace(/\s+/g, '')
+        : text.replace(/\s+/g, '')
+    try { return Uint8Array.from(atob(body), char => char.charCodeAt(0)) } catch { return base64urlToBytes(body) }
+}
+
+const appleClientSecret = async env => {
+    const now = Math.floor(Date.now() / 1000)
+    const header = base64urlText(JSON.stringify({ alg: 'ES256', kid: env.APPLE_KEY_ID, typ: 'JWT' }))
+    const payload = base64urlText(JSON.stringify({
+        iss: env.APPLE_TEAM_ID,
+        iat: now,
+        exp: now + 300,
+        aud: 'https://appleid.apple.com',
+        sub: env.APPLE_CLIENT_ID
+    }))
+    const key = await crypto.subtle.importKey('pkcs8', pemBytes(env.APPLE_PRIVATE_KEY), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign'])
+    const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, encoder.encode(header + '.' + payload))
+    return header + '.' + payload + '.' + bytesToBase64url(new Uint8Array(signature))
+}
+
+const appleJwtPayload = value => {
+    const parts = String(value || '').split('.')
+    if (parts.length !== 3) return null
+    try { return JSON.parse(new TextDecoder().decode(base64urlToBytes(parts[1]))) } catch { return null }
+}
+
+const verifyAppleIdToken = async (env, token, claims) => {
+    const parts = String(token || '').split('.')
+    if (parts.length !== 3 || !claims) return false
+    try {
+        const header = JSON.parse(new TextDecoder().decode(base64urlToBytes(parts[0])))
+        if (!['ES256', 'RS256'].includes(header.alg) || !header.kid) return false
+        const response = await fetch(env.APPLE_JWKS_URL || 'https://appleid.apple.com/auth/keys')
+        if (!response.ok) return false
+        const keys = await response.json()
+        const jwk = (keys.keys || []).find(item => item.kid === header.kid &&
+            (header.alg === 'RS256' ? item.kty === 'RSA' : item.kty === 'EC' && item.crv === 'P-256') &&
+            (!item.alg || item.alg === header.alg))
+        if (!jwk) return false
+        const algorithm = header.alg === 'RS256'
+            ? { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }
+            : { name: 'ECDSA', namedCurve: 'P-256' }
+        const key = await crypto.subtle.importKey('jwk', jwk, algorithm, false, ['verify'])
+        const valid = await crypto.subtle.verify(header.alg === 'RS256'
+            ? { name: 'RSASSA-PKCS1-v1_5' }
+            : { name: 'ECDSA', hash: 'SHA-256' }, key,
+            base64urlToBytes(parts[2]), encoder.encode(parts[0] + '.' + parts[1]))
+        return valid && claims.iss === 'https://appleid.apple.com' && claims.aud === env.APPLE_CLIENT_ID &&
+            Number(claims.exp || 0) > Math.floor(Date.now() / 1000) && Number(claims.iat || 0) <= Math.floor(Date.now() / 1000) + 60
+    } catch {
+        return false
+    }
+}
+
+const appleProfile = async (env, code, user = null) => {
+    try {
+        const response = await fetch('https://appleid.apple.com/auth/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: env.APPLE_CLIENT_ID,
+                client_secret: await appleClientSecret(env),
+                code: String(code),
+                grant_type: 'authorization_code',
+                redirect_uri: appleCallbackUrl(env)
+            })
+        })
+        if (!response.ok) return null
+        const token = await response.json()
+        const claims = appleJwtPayload(token.id_token)
+        const email = claims?.email ? String(claims.email).toLowerCase() : null
+        if (!claims || !await verifyAppleIdToken(env, token.id_token, claims) || !claims.sub ||
+            email && (!validEmail(email) || !['true', true].includes(claims.email_verified))) return null
+        return {
+            subject: String(claims.sub),
+            email,
+            name: String(user?.name ? [user.name.firstName, user.name.lastName].filter(Boolean).join(' ') :
+                claims.name || claims.email || 'Apple User').slice(0, 100)
+        }
+    } catch {
+        return null
+    }
+}
+
+const otpUri = (email, secret) => {
+    const label = encodeURIComponent('Raindrop:' + String(email || ''))
+    const issuer = encodeURIComponent('Raindrop')
+    return 'otpauth://totp/' + label + '?secret=' + secret + '&issuer=' + issuer + '&algorithm=SHA1&digits=6&period=' + tfaStepSeconds
+}
+
+const tfaRow = async (env, userId) => env.DB.prepare(`SELECT user_id, secret_encrypted, recovery_code_hash, recovery_used_at, enabled_at
+    FROM user_tfa WHERE user_id = ?`).bind(userId).first()
+
+const tfaEnabled = async (env, userId) => {
+    try { return Boolean((await env.DB.prepare('SELECT enabled_at FROM user_tfa WHERE user_id = ? AND enabled_at IS NOT NULL').bind(userId).first())?.enabled_at) } catch { return false }
+}
+
+const createTfaChallenge = async (env, userId, redirectPath = '/') => {
+    const token = randomToken(32)
+    await env.DB.prepare(`INSERT INTO tfa_login_challenges (token_hash, user_id, redirect_path, expires_at)
+        VALUES (?, ?, ?, ?)`).bind(await hmac(token, env.SESSION_SECRET), userId, redirectPath, Date.now() + tfaChallengeMinutes * 60 * 1000).run()
+    return { token, redirectPath }
+}
+
+const recoveryCode = () => base32Encode(crypto.getRandomValues(new Uint8Array(16))).slice(0, 20)
+
+const verifyTfaCode = async (env, userId, value, consumeRecovery = true) => {
+    const row = await tfaRow(env, userId)
+    if (!row?.enabled_at) return false
+    try {
+        const secret = (await decryptCredentials(env, row.secret_encrypted)).secret
+        if (await validTotp(secret, value)) return true
+    } catch {}
+    const hash = await hmac(String(value || '').trim().toUpperCase(), env.SESSION_SECRET)
+    if (consumeRecovery) {
+        const result = await env.DB.prepare(`UPDATE user_tfa SET recovery_used_at = ?
+            WHERE user_id = ? AND recovery_code_hash = ? AND recovery_used_at IS NULL AND enabled_at IS NOT NULL`)
+            .bind(Date.now(), userId, hash).run()
+        return Number(result?.meta?.changes || 0) === 1
+    }
+    return Boolean(await env.DB.prepare(`SELECT user_id FROM user_tfa WHERE user_id = ? AND recovery_code_hash = ?
+        AND recovery_used_at IS NULL AND enabled_at IS NOT NULL`).bind(userId, hash).first())
+}
+
+const verifyPendingTfa = async (env, userId, value) => {
+    const row = await tfaRow(env, userId)
+    if (!row || row.enabled_at) return false
+    try { return await validTotp((await decryptCredentials(env, row.secret_encrypted)).secret, value) } catch { return false }
+}
+
+const completeTfaLogin = async (request, env, challengeToken, code, redirectPath = '') => {
+    const hash = await hmac(String(challengeToken || ''), env.SESSION_SECRET)
+    const challenge = await env.DB.prepare(`SELECT id, user_id, redirect_path FROM tfa_login_challenges
+        WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`).bind(hash, Date.now()).first()
+    if (!challenge || !await verifyTfaCode(env, challenge.user_id, code)) return null
+    const claimed = await env.DB.prepare(`UPDATE tfa_login_challenges SET used_at = ?
+        WHERE id = ? AND used_at IS NULL AND expires_at > ?`).bind(Date.now(), challenge.id, Date.now()).run()
+    if (Number(claimed?.meta?.changes || 0) !== 1) return null
+    const session = await createSession(request, env, challenge.user_id)
+    return { ...session, user_id: challenge.user_id, redirectPath: appPath(env, redirectPath || challenge.redirect_path, '/') }
+}
+
+const developerScopes = new Set(['profile:read', 'bookmarks:read', 'bookmarks:write', 'collections:read', 'collections:write', 'read', 'write'])
+
+const requestedScopes = value => {
+    const scopes = scopeList(value || 'profile:read bookmarks:read')
+    return scopes.length && scopes.every(scope => developerScopes.has(scope)) ? scopes : null
+}
+
+const tokenExpiry = (data, now = Date.now()) => {
+    let expiresAt
+    if (data.expiresAt !== undefined || data.expires_at !== undefined) {
+        const value = data.expiresAt ?? data.expires_at
+        if (typeof value === 'number' || /^\d+$/.test(String(value))) {
+            expiresAt = Number(value)
+            if (expiresAt < 100000000000) expiresAt *= 1000
+        } else expiresAt = Date.parse(String(value))
+    } else {
+        const supplied = data.expiresIn !== undefined || data.expires_in !== undefined
+        const seconds = Number(data.expiresIn ?? data.expires_in)
+        if (supplied && (!Number.isFinite(seconds) || seconds <= 0)) return null
+        expiresAt = now + (supplied ? seconds * 1000 : developerTokenDefaultDays * 86400000)
+    }
+    return Number.isSafeInteger(expiresAt) && expiresAt > now && expiresAt <= now + developerTokenMaxDays * 86400000 ? expiresAt : null
+}
+
+const publicDeveloperToken = row => ({
+    id: String(row.id),
+    name: row.name,
+    scopes: scopeList(row.scopes),
+    expiresAt: new Date(Number(row.expires_at)).toISOString(),
+    createdAt: new Date(Number(row.created_at)).toISOString(),
+    lastUsedAt: row.last_used_at ? new Date(Number(row.last_used_at)).toISOString() : null,
+    revoked: Boolean(row.revoked_at)
+})
+
+const createDeveloperToken = async (env, userId, data) => {
+    const name = String(data.name || '').trim()
+    const scopes = requestedScopes(data.scopes ?? data.scope)
+    const expiresAt = tokenExpiry(data)
+    if (!name || name.length > 100 || !scopes || !expiresAt) return null
+    const token = 'rd_dev_' + randomToken(32)
+    const id = randomToken(16)
+    const now = Date.now()
+    await env.DB.prepare(`INSERT INTO developer_tokens
+        (id, user_id, name, token_hash, scopes, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .bind(id, userId, name, await hmac(token, env.SESSION_SECRET), scopes.join(' '), expiresAt, now).run()
+    return { token, item: { id, name, scopes, expiresAt: new Date(expiresAt).toISOString(), createdAt: new Date(now).toISOString(), lastUsedAt: null, revoked: false } }
+}
+
+const oauthRedirects = value => {
+    let values = value
+    if (typeof value === 'string') {
+        try {
+            const parsed = JSON.parse(value)
+            values = Array.isArray(parsed) ? parsed : value.split(/[\n\s]+/).filter(Boolean)
+        } catch { values = value.split(/[\n\s]+/).filter(Boolean) }
+    }
+    if (!Array.isArray(values)) values = []
+    return [...new Set(values.map(item => String(item).trim()).filter(Boolean))]
+}
+
+const validOAuthRedirect = value => {
+    try {
+        const target = new URL(String(value))
+        if (target.username || target.password || target.hash) return false
+        if (target.protocol === 'https:') return true
+        return target.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname)
+    } catch { return false }
+}
+
+const publicOAuthClient = (row, secret = '') => ({
+    _id: String(row.id),
+    id: String(row.id),
+    clientId: String(row.id),
+    client_id: String(row.id),
+    name: row.name,
+    icon: row.icon || '',
+    site: row.site || '',
+    description: row.description || '',
+    redirects: oauthRedirects(row.redirect_uris),
+    redirectUris: oauthRedirects(row.redirect_uris),
+    secret,
+    ...(secret ? { client_secret: secret, clientSecret: secret } : {})
+})
+
+const selectOAuthClient = async (env, clientId, userId = null) => {
+    const query = userId === null
+        ? 'SELECT id, user_id, name, icon, site, description, redirect_uris, client_secret_hash, revoked_at FROM oauth_clients WHERE id = ?'
+        : 'SELECT id, user_id, name, icon, site, description, redirect_uris, client_secret_hash, revoked_at FROM oauth_clients WHERE id = ? AND user_id = ?'
+    return userId === null
+        ? env.DB.prepare(query).bind(clientId).first()
+        : env.DB.prepare(query).bind(clientId, userId).first()
+}
+
+const oauthClientInput = data => {
+    const redirects = oauthRedirects(data.redirects ?? data.redirectUris ?? data.redirect_uris)
+    return {
+        name: String(data.name || '').trim(),
+        icon: String(data.icon || '').trim().slice(0, 2048),
+        site: String(data.site || '').trim().slice(0, 2048),
+        description: String(data.description || '').trim().slice(0, 1000),
+        redirects
+    }
+}
+
+const createOAuthClient = async (env, userId, data) => {
+    const input = oauthClientInput(data)
+    if (!input.name || input.name.length > 100 || !input.redirects.length || input.redirects.length > 20 || !input.redirects.every(validOAuthRedirect)) return null
+    const id = 'client_' + randomToken(18)
+    const secret = randomToken(32)
+    const now = Date.now()
+    await env.DB.prepare(`INSERT INTO oauth_clients
+        (id, user_id, name, icon, site, description, redirect_uris, client_secret_hash, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(id, userId, input.name, input.icon, input.site, input.description, JSON.stringify(input.redirects), await hmac(secret, env.SESSION_SECRET), now, now).run()
+    return { item: publicOAuthClient({ id, ...input, redirect_uris: JSON.stringify(input.redirects) }, secret), secret }
+}
+
+const oauthCodeChallenge = value => /^[A-Za-z0-9_-]{43}$/.test(String(value || ''))
+const oauthCodeVerifier = value => /^[A-Za-z0-9._~-]{43,128}$/.test(String(value || ''))
+
+const oauthRedirectResponse = (redirectUri, code, state) => {
+    const target = new URL(redirectUri)
+    target.searchParams.set('code', code)
+    if (state) target.searchParams.set('state', state)
+    return target.toString()
+}
+
+const oauthErrorResponse = (redirectUri, errorCode, state) => {
+    const target = new URL(redirectUri)
+    target.searchParams.set('error', errorCode)
+    if (state) target.searchParams.set('state', state)
+    return target.toString()
+}
+
+const createOAuthApprovalToken = async (env, session, input) => {
+    const payload = base64urlText(JSON.stringify({
+        clientId: input.clientId,
+        userId: session.user_id,
+        sessionId: String(session.session_id),
+        redirectUri: input.redirectUri,
+        scopes: input.scopes,
+        codeChallenge: input.codeChallenge,
+        state: input.state,
+        exp: Date.now() + oauthStateMinutes * 60 * 1000
+    }))
+    return payload + '.' + await hmac(payload + '.' + session.token, env.SESSION_SECRET)
+}
+
+const readOAuthApprovalToken = async (env, session, token) => {
+    const parts = String(token || '').split('.')
+    if (parts.length !== 2 || !parts[0] || !parts[1]) return null
+    try {
+        if (!equal(parts[1], await hmac(parts[0] + '.' + session.token, env.SESSION_SECRET))) return null
+        const payload = JSON.parse(new TextDecoder().decode(base64urlToBytes(parts[0])))
+        if (payload.exp <= Date.now() || payload.userId !== session.user_id ||
+            payload.sessionId !== String(session.session_id) || !payload.clientId ||
+            !payload.redirectUri || !Array.isArray(payload.scopes) || !payload.codeChallenge) return null
+        return payload
+    } catch {
+        return null
+    }
+}
+
+const oauthConsentResponse = (request, client, scopes, approvalToken, redirectUri) => {
+    const scopeText = scopes.join(' ')
+    const clientName = htmlEscape(client.name || 'An application')
+    return new Response(`<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>Authorize ${clientName}</title><main><h1>Authorize ${clientName}</h1><p>${clientName} is requesting access to: ${htmlEscape(scopeText)}</p><p>Redirect URI: ${htmlEscape(redirectUri)}</p><form method="post" action="/v1/oauth/authorize"><input type="hidden" name="approval_token" value="${htmlEscape(approvalToken)}"><button type="submit" name="decision" value="deny">Deny</button><button type="submit" name="decision" value="approve">Allow</button></form></main>`, {
+        status: 200,
+        headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Content-Security-Policy': 'default-src \'none\'; form-action \'self\'; base-uri \'none\'; frame-ancestors \'none\'',
+            'X-Content-Type-Options': 'nosniff',
+            'X-Frame-Options': 'DENY',
+            'X-Request-ID': requestId(request)
+        }
+    })
+}
+
+const createAuthorizationCode = async (env, { clientId, userId, redirectUri, scopes, codeChallenge }) => {
+    const code = randomToken(32)
+    await env.DB.prepare(`INSERT INTO oauth_authorization_codes
+        (code_hash, client_id, user_id, redirect_uri, scopes, code_challenge, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(await hmac(code, env.SESSION_SECRET), clientId, userId, redirectUri, scopes.join(' '), codeChallenge, Date.now() + oauthCodeMinutes * 60 * 1000, Date.now()).run()
+    return code
+}
+
+const issueOAuthAccessToken = async (env, row) => {
+    const token = 'rd_oauth_' + randomToken(32)
+    const refreshToken = 'rd_refresh_' + randomToken(32)
+    const now = Date.now()
+    const expiresAt = now + oauthAccessTokenMinutes * 60 * 1000
+    await env.DB.prepare(`INSERT INTO oauth_access_tokens
+        (id, token_hash, client_id, user_id, scopes, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .bind(randomToken(16), await hmac(token, env.SESSION_SECRET), row.client_id, row.user_id, row.scopes, expiresAt, now).run()
+    await env.DB.prepare(`INSERT INTO oauth_refresh_tokens
+        (id, token_hash, client_id, user_id, scopes, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .bind(randomToken(16), await hmac(refreshToken, env.SESSION_SECRET), row.client_id, row.user_id, row.scopes,
+            now + oauthRefreshTokenDays * 86400000, now).run()
+    return { token, refreshToken, expiresAt, expiresIn: oauthAccessTokenMinutes * 60, scopes: scopeList(row.scopes) }
+}
+
+const bearerScope = (pathname, method) => {
+    const read = ['GET', 'HEAD'].includes(method)
+    if (pathname === '/v1/user' || pathname === '/v1/user/stats' || pathname === '/v1/user/quota') return 'profile:read'
+    if (/^\/v1\/(?:raindrop|raindrops|content)\b/.test(pathname)) return read ? 'bookmarks:read' : 'bookmarks:write'
+    if (/^\/v1\/(?:collection|collections|tag|tags|filters)\b/.test(pathname)) return read ? 'collections:read' : 'collections:write'
+    return null
+}
+
+const hasBearerScope = (session, required) => {
+    const scopes = session.token_scopes || []
+    return scopes.includes('*') || scopes.includes(required) || required.endsWith(':read') && scopes.includes('read') || required.endsWith(':write') && scopes.includes('write')
+}
+
+const oauthTokenRequest = async (request, env) => {
+    if (!authReady(env)) return configurationError(request, env)
+    const { data } = await readBody(request)
+    if (String(data.grant_type || '') === 'refresh_token') return oauthRefreshRequest(request, env, data)
+    const code = String(data.code || '').trim()
+    const clientId = String(data.client_id || data.clientId || '').trim()
+    const redirectUri = String(data.redirect_uri || data.redirectUri || '').trim()
+    const verifier = String(data.code_verifier || data.codeVerifier || '').trim()
+    if (String(data.grant_type || '') !== 'authorization_code' || !code || !clientId || !redirectUri || !oauthCodeVerifier(verifier))
+        return error('invalid_grant', 400, request, env, 'The authorization grant is invalid')
+
+    const codeHash = await hmac(code, env.SESSION_SECRET)
+    const grant = await env.DB.prepare(`SELECT c.id, c.client_id, c.user_id, c.redirect_uri, c.scopes, c.code_challenge,
+        c.expires_at, cl.client_secret_hash, cl.revoked_at
+        FROM oauth_authorization_codes c JOIN oauth_clients cl ON cl.id = c.client_id
+        WHERE c.code_hash = ? AND c.client_id = ? AND c.expires_at > ?`).bind(codeHash, clientId, Date.now()).first()
+    if (!grant || grant.revoked_at || grant.redirect_uri !== redirectUri || !await sha256Base64url(verifier).then(value => equal(value, grant.code_challenge)))
+        return error('invalid_grant', 400, request, env, 'The authorization grant is invalid')
+    if (data.client_secret !== undefined && !equal(await hmac(String(data.client_secret), env.SESSION_SECRET), grant.client_secret_hash))
+        return error('invalid_client', 401, request, env, 'Client authentication failed')
+    const claimed = await env.DB.prepare(`UPDATE oauth_authorization_codes SET used_at = ?
+        WHERE id = ? AND used_at IS NULL AND expires_at > ?`).bind(Date.now(), grant.id, Date.now()).run()
+    if (Number(claimed?.meta?.changes || 0) !== 1)
+        return error('invalid_grant', 400, request, env, 'The authorization grant is invalid')
+    const access = await issueOAuthAccessToken(env, grant)
+    await recordAudit(env, request, { userId: grant.user_id, action: 'oauth.token_issued', resourceType: 'oauth_client', resourceId: clientId, outcome: 'success' })
+    return json({
+        result: true,
+        access_token: access.token,
+        refresh_token: access.refreshToken,
+        expires: access.expiresAt,
+        token_type: 'Bearer',
+        expires_in: access.expiresIn,
+        scope: access.scopes.join(' ')
+    }, 200, request, env, { 'Cache-Control': 'no-store' })
+}
+
+const oauthRefreshRequest = async (request, env, data) => {
+    const clientId = String(data.client_id || data.clientId || '').trim()
+    const refreshToken = String(data.refresh_token || data.refreshToken || '').trim()
+    const clientSecret = String(data.client_secret || data.clientSecret || '')
+    if (String(data.grant_type || '') !== 'refresh_token' || !clientId || !refreshToken || !clientSecret)
+        return error('invalid_grant', 400, request, env, 'The refresh grant is invalid')
+
+    const grant = await env.DB.prepare(`SELECT r.id, r.client_id, r.user_id, r.scopes, r.expires_at,
+        r.used_at, r.revoked_at, c.client_secret_hash, c.revoked_at AS client_revoked_at
+        FROM oauth_refresh_tokens r JOIN oauth_clients c ON c.id = r.client_id
+        WHERE r.token_hash = ? AND r.client_id = ? AND r.expires_at > ?`)
+        .bind(await hmac(refreshToken, env.SESSION_SECRET), clientId, Date.now()).first()
+    if (!grant || grant.used_at || grant.revoked_at || grant.client_revoked_at)
+        return error('invalid_grant', 400, request, env, 'The refresh grant is invalid')
+    if (!equal(await hmac(clientSecret, env.SESSION_SECRET), grant.client_secret_hash))
+        return error('invalid_client', 401, request, env, 'Client authentication failed')
+
+    const now = Date.now()
+    const claimed = await env.DB.prepare(`UPDATE oauth_refresh_tokens SET used_at = ?, revoked_at = ?
+        WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?`)
+        .bind(now, now, grant.id, now).run()
+    if (Number(claimed?.meta?.changes || 0) !== 1)
+        return error('invalid_grant', 400, request, env, 'The refresh grant is invalid')
+
+    const access = await issueOAuthAccessToken(env, grant)
+    await recordAudit(env, request, { userId: grant.user_id, action: 'oauth.token_refreshed', resourceType: 'oauth_client', resourceId: clientId, outcome: 'success' })
+    return json({
+        result: true,
+        access_token: access.token,
+        refresh_token: access.refreshToken,
+        expires: access.expiresAt,
+        token_type: 'Bearer',
+        expires_in: access.expiresIn,
+        scope: access.scopes.join(' ')
+    }, 200, request, env, { 'Cache-Control': 'no-store' })
+}
+
 const requiresVerification = pathname =>
     pathname.startsWith('/v1/oauth/') ||
     pathname.startsWith('/v1/developer/') ||
+    pathname.startsWith('/v1/user/tfa') ||
     pathname.startsWith('/v1/collaborators/') ||
     pathname.includes('/sharing') ||
     pathname.startsWith('/v1/backup') ||
@@ -4624,6 +5200,19 @@ const googleAuthorization = (env, state, drive = false) => {
         state,
         prompt: drive ? 'consent select_account' : 'select_account',
         ...(drive ? { access_type: 'offline', include_granted_scopes: 'true' } : {})
+    }).toString()
+    return url.toString()
+}
+
+const appleAuthorization = (env, state) => {
+    const url = new URL(env.APPLE_AUTHORIZATION_URL || 'https://appleid.apple.com/auth/authorize')
+    url.search = new URLSearchParams({
+        client_id: env.APPLE_CLIENT_ID,
+        redirect_uri: appleCallbackUrl(env),
+        response_type: 'code',
+        response_mode: 'form_post',
+        scope: 'name email',
+        state
     }).toString()
     return url.toString()
 }
@@ -4731,6 +5320,13 @@ const deleteUserData = async (env, userId) => {
     const statements = [
         env.DB.prepare('DELETE FROM email_tokens WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM tfa_login_challenges WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM user_tfa WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM developer_tokens WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM oauth_access_tokens WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM oauth_refresh_tokens WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM oauth_authorization_codes WHERE user_id = ?').bind(userId),
+        env.DB.prepare('DELETE FROM oauth_clients WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM connected_identities WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM oauth_states WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM published_snapshots WHERE published_by = ? OR bookmark_id IN (SELECT id FROM bookmarks WHERE user_id = ?)').bind(userId, userId),
@@ -4836,6 +5432,11 @@ export default {
             if (limited) return limited
         }
 
+        if (['/v1/oauth/token', '/v1/oauth/access_token'].includes(url.pathname) && request.method === 'POST') {
+            if (!publicAuthEnabled(env)) return error('public_api_unavailable', 404, request, env, 'Public API access is not enabled in Beta')
+            return oauthTokenRequest(request, env)
+        }
+
         if (url.pathname === '/v1/auth/google' && request.method === 'GET') {
             if (!googleReady(env)) return configurationError(request, env)
             const state = await createOAuthState(env, 'login', null, appPath(env, url.searchParams.get('redirect')))
@@ -4850,6 +5451,88 @@ export default {
                 return error('beta_access_denied', 403, request, env, 'Beta access password is invalid')
             const state = await createOAuthState(env, 'login', null, appPath(env, data.redirect), true)
             return json({ result: true, location: googleAuthorization(env, state) }, 200, request, env)
+        }
+
+        if (url.pathname === '/v1/auth/apple' && request.method === 'GET') {
+            if (!publicAuthEnabled(env)) return error('public_api_unavailable', 404, request, env, 'Public API access is not enabled in Beta')
+            if (!appleReady(env)) return configurationError(request, env)
+            const state = await createOAuthState(env, 'apple_login', null, appPath(env, url.searchParams.get('redirect')))
+            return new Response(null, { status: 302, headers: { Location: appleAuthorization(env, state), 'X-Request-ID': requestId(request) } })
+        }
+
+        if (url.pathname === '/v1/auth/apple' && request.method === 'POST') {
+            if (!publicAuthEnabled(env)) return error('public_api_unavailable', 404, request, env, 'Public API access is not enabled in Beta')
+            if (!appleReady(env)) return configurationError(request, env)
+            const { data } = await readBody(request)
+            const admitted = env.ENVIRONMENT !== 'beta' || Boolean(env.BETA_ACCESS_PASSWORD && equal(data.betaAccessPassword, env.BETA_ACCESS_PASSWORD))
+            if (!admitted) return error('beta_access_denied', 403, request, env, 'Beta access password is invalid')
+            const state = await createOAuthState(env, 'apple_login', null, appPath(env, data.redirect), true)
+            return json({ result: true, location: appleAuthorization(env, state) }, 200, request, env)
+        }
+
+        if (url.pathname === '/v1/auth/apple/callback' && ['GET', 'POST'].includes(request.method)) {
+            if (!publicAuthEnabled(env)) return error('public_api_unavailable', 404, request, env, 'Public API access is not enabled in Beta')
+            if (!appleReady(env)) return configurationError(request, env)
+            const { data } = request.method === 'POST' ? await readBody(request) : { data: {} }
+            const code = url.searchParams.get('code') || data.code
+            const stateValue = url.searchParams.get('state') || data.state
+            const stateHash = await hmac(String(stateValue || ''), env.SESSION_SECRET)
+            const state = await env.DB.prepare(`SELECT purpose, user_id, redirect_path, admission_granted FROM oauth_states
+                WHERE state_hash = ? AND used_at IS NULL AND expires_at > ?`).bind(stateHash, Date.now()).first()
+            if (!state || !code || !['apple_login', 'connect_apple'].includes(state.purpose))
+                return appRedirect(request, env, '/account/login?error=apple_sign_in_failed')
+
+            const claimed = await env.DB.prepare('UPDATE oauth_states SET used_at = ? WHERE state_hash = ? AND used_at IS NULL')
+                .bind(Date.now(), stateHash).run()
+            if (Number(claimed?.meta?.changes || 0) !== 1)
+                return appRedirect(request, env, '/account/login?error=apple_sign_in_failed')
+            let appleUser = null
+            if (data.user) {
+                try { appleUser = typeof data.user === 'string' ? JSON.parse(data.user) : data.user } catch {}
+            }
+            const profile = await appleProfile(env, code, appleUser)
+            if (!profile)
+                return appRedirect(request, env, state.purpose === 'connect_apple'
+                    ? '/settings/account?connect_error=apple_sign_in_failed' : '/account/login?error=apple_sign_in_failed')
+
+            let identity = await env.DB.prepare('SELECT user_id FROM connected_identities WHERE provider = ? AND provider_subject = ?')
+                .bind('apple', profile.subject).first()
+            if (state.purpose === 'connect_apple') {
+                if (identity && identity.user_id !== state.user_id)
+                    return appRedirect(request, env, '/settings/account?connect_error=conflict')
+                if (!identity) {
+                    const user = await env.DB.prepare('SELECT email FROM users WHERE id = ?').bind(state.user_id).first()
+                    if (!user?.email)
+                        return appRedirect(request, env, '/settings/account?connect_error=apple_sign_in_failed')
+                    await env.DB.prepare('INSERT INTO connected_identities (provider, provider_subject, user_id, email, created_at) VALUES (?, ?, ?, ?, ?)')
+                        .bind('apple', profile.subject, state.user_id, profile.email || user.email, Date.now()).run()
+                }
+                return appRedirect(request, env, '/settings/account?connected=apple')
+            }
+
+            if (!identity) {
+                if (env.ENVIRONMENT === 'beta' && !state.admission_granted)
+                    return appRedirect(request, env, '/account/signup?error=beta_access_required')
+                if (!profile.email)
+                    return appRedirect(request, env, '/account/login?error=apple_sign_in_failed')
+                const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(profile.email).first()
+                if (existing) return appRedirect(request, env, '/account/login?error=apple_identity_conflict')
+                const salt = new Uint8Array(16)
+                crypto.getRandomValues(salt)
+                const inserted = await env.DB.prepare(`INSERT INTO users
+                    (email, name, password_hash, password_salt, email_verified_at, created_at, federated_only)
+                    VALUES (?, ?, ?, ?, ?, ?, 1)`).bind(profile.email, profile.name,
+                    await passwordHash(randomToken(32), salt), bytesToBase64url(salt), Date.now(), Date.now()).run()
+                identity = { user_id: Number(inserted.meta.last_row_id) }
+                await env.DB.prepare('INSERT INTO connected_identities (provider, provider_subject, user_id, email, created_at) VALUES (?, ?, ?, ?, ?)')
+                    .bind('apple', profile.subject, identity.user_id, profile.email, Date.now()).run()
+            }
+            if (publicAuthEnabled(env) && await tfaEnabled(env, identity.user_id)) {
+                const challenge = await createTfaChallenge(env, identity.user_id, state.redirect_path || '/')
+                return appRedirect(request, env, '/account/tfa/login/' + encodeURIComponent(challenge.token))
+            }
+            const session = await createSession(request, env, identity.user_id)
+            return appRedirect(request, env, state.redirect_path || '/', session.token)
         }
 
         if (url.pathname === '/v1/auth/google/callback' && request.method === 'GET') {
@@ -4906,6 +5589,10 @@ export default {
                 identity = { user_id: Number(inserted.meta.last_row_id) }
                 await env.DB.prepare('INSERT INTO connected_identities (provider, provider_subject, user_id, email, created_at) VALUES (?, ?, ?, ?, ?)')
                     .bind('google', profile.subject, identity.user_id, profile.email, Date.now()).run()
+            }
+            if (publicAuthEnabled(env) && await tfaEnabled(env, identity.user_id)) {
+                const challenge = await createTfaChallenge(env, identity.user_id, state.redirect_path || '/')
+                return appRedirect(request, env, '/account/tfa/login/' + encodeURIComponent(challenge.token))
             }
             const session = await createSession(request, env, identity.user_id)
             return appRedirect(request, env, state.redirect_path || '/', session.token)
@@ -4994,6 +5681,11 @@ export default {
                 return form ? loginErrorPage(request, env, 'Email or password is invalid') : error('invalid_credentials', 401, request, env, 'Email or password is invalid')
             }
 
+            if (publicAuthEnabled(env) && await tfaEnabled(env, user.id)) {
+                const challenge = await createTfaChallenge(env, user.id, appPath(env, data.redirect))
+                if (form) return appRedirect(request, env, '/account/tfa/login/' + encodeURIComponent(challenge.token))
+                return json({ result: true, tfa: challenge.token }, 200, request, env, { 'Cache-Control': 'no-store' })
+            }
             const session = await createSession(request, env, user.id)
             await recordAudit(env, request, { userId: user.id, action: 'auth.login', resourceType: 'session', outcome: 'success' })
             if (form) return redirect(request, env, data.redirect, session.token)
@@ -5011,6 +5703,34 @@ export default {
 
             await env.DB.prepare('UPDATE users SET email_verified_at = ? WHERE id = ?').bind(now, token.user_id).run()
             await env.DB.prepare('UPDATE email_tokens SET used_at = ? WHERE token_hash = ?').bind(now, hash).run()
+            return json({ result: true }, 200, request, env)
+        }
+
+        const tfaLoginMatch = url.pathname.match(/^\/v1\/auth\/tfa\/([^/]+)$/)
+        if (tfaLoginMatch && request.method === 'POST') {
+            if (!publicAuthEnabled(env)) return error('public_api_unavailable', 404, request, env, 'Public API access is not enabled in Beta')
+            if (!authReady(env)) return configurationError(request, env)
+            const { data, form } = await readBody(request)
+            const completed = await completeTfaLogin(request, env, decodeURIComponent(tfaLoginMatch[1]), data.code, data.redirect)
+            if (!completed)
+                return form ? loginErrorPage(request, env, 'The authentication code is invalid or expired') : error('tfa_invalid', 401, request, env, 'The authentication code is invalid or expired')
+            await recordAudit(env, request, { userId: null, action: 'auth.tfa_login', resourceType: 'session', outcome: 'success' })
+            if (form) return appRedirect(request, env, completed.redirectPath, completed.token)
+            return json({ result: true, user: { _id: String(completed.user_id) } }, 200, request, env, { 'Set-Cookie': sessionCookie(completed.token), 'Cache-Control': 'no-store' })
+        }
+
+        const tfaRevokeLoginMatch = url.pathname.match(/^\/v1\/auth\/tfa\/([^/]+)$/)
+        if (tfaRevokeLoginMatch && request.method === 'DELETE') {
+            if (!publicAuthEnabled(env)) return error('public_api_unavailable', 404, request, env, 'Public API access is not enabled in Beta')
+            if (!authReady(env)) return configurationError(request, env)
+            const { data } = await readBody(request)
+            const hash = await hmac(decodeURIComponent(tfaRevokeLoginMatch[1]), env.SESSION_SECRET)
+            const challenge = await env.DB.prepare(`SELECT id, user_id FROM tfa_login_challenges
+                WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?`).bind(hash, Date.now()).first()
+            if (!challenge || !await verifyTfaCode(env, challenge.user_id, data.code))
+                return error('tfa_invalid', 401, request, env, 'The authentication code is invalid or expired')
+            await env.DB.prepare('DELETE FROM user_tfa WHERE user_id = ?').bind(challenge.user_id).run()
+            await env.DB.prepare('UPDATE tfa_login_challenges SET used_at = ? WHERE id = ? AND used_at IS NULL').bind(Date.now(), challenge.id).run()
             return json({ result: true }, 200, request, env)
         }
 
@@ -5043,6 +5763,20 @@ export default {
             if (requiresVerification(url.pathname) && !session.email_verified_at)
                 return error('email_verification_required', 403, request, env, 'Confirm your email before this action')
 
+            if (!publicAuthEnabled(env) && (url.pathname.startsWith('/v1/developer/') || url.pathname.startsWith('/v1/oauth/') ||
+                url.pathname.startsWith('/v1/user/tfa')))
+                return error('public_api_unavailable', 404, request, env, 'Public API access is not enabled in Beta')
+
+            if (session.auth_type === 'bearer') {
+                const requiredScope = bearerScope(url.pathname, request.method)
+                if (!requiredScope)
+                    return error('session_required', 403, request, env, 'This action requires a device session')
+                if (!hasBearerScope(session, requiredScope))
+                    return json({ result: false, error: 'insufficient_scope', errorMessage: 'The access token does not grant this scope', scope: requiredScope }, 403, request, env, {
+                        'WWW-Authenticate': 'Bearer error="insufficient_scope", scope="' + requiredScope + '"'
+                    })
+            }
+
             if (!['GET', 'HEAD'].includes(request.method)) {
                 const usage = await consumeUsage(env, request, session.user_id)
                 if (!usage.allowed)
@@ -5061,6 +5795,176 @@ export default {
             if (legacySuggestions && ['GET', 'POST'].includes(request.method))
                 return aiSuggestions(request, env, session.user_id, { legacy: true, bookmarkId: legacySuggestions[1] })
 
+            if (url.pathname === '/v1/oauth/authorize' && ['GET', 'POST'].includes(request.method)) {
+                if (session.auth_type === 'bearer') return error('session_required', 403, request, env, 'Authorization requires a device session')
+                const body = request.method === 'POST' ? (await readBody(request)).data || {} : {}
+                const value = name => url.searchParams.get(name) ?? body[name]
+                if (request.method === 'POST') {
+                    const approval = await readOAuthApprovalToken(env, session, body.approval_token || body.approvalToken)
+                    const decision = String(body.decision || '').trim().toLowerCase()
+                    if (!approval || !['approve', 'deny'].includes(decision))
+                        return error('invalid_authorization_request', 400, request, env, 'Authorization approval is invalid or expired')
+                    const client = await selectOAuthClient(env, approval.clientId)
+                    if (!client || client.revoked_at || !oauthRedirects(client.redirect_uris).includes(approval.redirectUri))
+                        return error('invalid_authorization_request', 400, request, env, 'The authorization request is no longer valid')
+                    if (decision === 'deny') {
+                        await recordAudit(env, request, { userId: session.user_id, action: 'oauth.authorization_denied', resourceType: 'oauth_client', resourceId: approval.clientId, outcome: 'success' })
+                        return new Response(null, { status: 302, headers: {
+                            Location: oauthErrorResponse(approval.redirectUri, 'access_denied', approval.state),
+                            'Cache-Control': 'no-store',
+                            'X-Request-ID': requestId(request)
+                        } })
+                    }
+                    const code = await createAuthorizationCode(env, {
+                        clientId: approval.clientId,
+                        userId: session.user_id,
+                        redirectUri: approval.redirectUri,
+                        scopes: approval.scopes,
+                        codeChallenge: approval.codeChallenge
+                    })
+                    await recordAudit(env, request, { userId: session.user_id, action: 'oauth.authorization_granted', resourceType: 'oauth_client', resourceId: approval.clientId, outcome: 'success' })
+                    return new Response(null, { status: 302, headers: {
+                        Location: oauthRedirectResponse(approval.redirectUri, code, approval.state),
+                        'Cache-Control': 'no-store',
+                        'X-Request-ID': requestId(request)
+                    } })
+                }
+                const clientId = String(value('client_id') || value('clientId') || '').trim()
+                const redirectUri = String(value('redirect_uri') || value('redirectUri') || '').trim()
+                const responseType = String(value('response_type') || 'code')
+                const challenge = String(value('code_challenge') || value('codeChallenge') || '').trim()
+                const challengeMethod = String(value('code_challenge_method') || value('codeChallengeMethod') || '')
+                const state = String(value('state') || '').trim()
+                const scopes = requestedScopes(value('scope'))
+                const client = await selectOAuthClient(env, clientId)
+                if (responseType !== 'code' || !client || client.revoked_at || !validOAuthRedirect(redirectUri) ||
+                    !oauthCodeChallenge(challenge) || challengeMethod !== 'S256' || !scopes || scopes.length > 20 ||
+                    !oauthRedirects(client.redirect_uris).some(item => item === redirectUri) || state.length > 512)
+                    return error('invalid_authorization_request', 400, request, env, 'The authorization request is invalid')
+                const approvalToken = await createOAuthApprovalToken(env, session, { clientId, redirectUri, scopes, codeChallenge: challenge, state })
+                return oauthConsentResponse(request, client, scopes, approvalToken, redirectUri)
+            }
+
+            if ((url.pathname === '/v1/developer/tokens' || url.pathname === '/v1/developer/token') && request.method === 'GET') {
+                if (session.auth_type === 'bearer') return error('session_required', 403, request, env, 'This action requires a device session')
+                const records = await env.DB.prepare(`SELECT id, name, scopes, expires_at, created_at, last_used_at, revoked_at
+                    FROM developer_tokens WHERE user_id = ? ORDER BY created_at DESC`).bind(session.user_id).all()
+                return json({ result: true, items: (records.results || []).map(publicDeveloperToken) }, 200, request, env)
+            }
+
+            if ((url.pathname === '/v1/developer/tokens' || url.pathname === '/v1/developer/token') && request.method === 'POST') {
+                if (session.auth_type === 'bearer') return error('session_required', 403, request, env, 'This action requires a device session')
+                const { data } = await readBody(request)
+                const created = await createDeveloperToken(env, session.user_id, data)
+                if (!created) return error('validation_failed', 400, request, env, 'Provide a name, valid scopes, and an expiry within one year')
+                await recordAudit(env, request, { userId: session.user_id, action: 'developer_token.created', resourceType: 'developer_token', resourceId: created.item.id, outcome: 'success' })
+                return json({ result: true, item: created.item, token: created.token }, 201, request, env, { 'Cache-Control': 'no-store' })
+            }
+
+            const developerTokenMatch = url.pathname.match(/^\/v1\/developer\/(?:tokens?|token)\/([^/]+)(?:\/revoke)?$/)
+            if (developerTokenMatch && ['DELETE', 'POST'].includes(request.method)) {
+                if (session.auth_type === 'bearer') return error('session_required', 403, request, env, 'This action requires a device session')
+                const id = decodeURIComponent(developerTokenMatch[1])
+                const revoked = await env.DB.prepare(`UPDATE developer_tokens SET revoked_at = ?
+                    WHERE id = ? AND user_id = ? AND revoked_at IS NULL`).bind(Date.now(), id, session.user_id).run()
+                if (Number(revoked?.meta?.changes || 0) !== 1)
+                    return error('developer_token_not_found', 404, request, env, 'Developer Token was not found')
+                await recordAudit(env, request, { userId: session.user_id, action: 'developer_token.revoked', resourceType: 'developer_token', resourceId: id, outcome: 'success' })
+                return json({ result: true }, 200, request, env)
+            }
+
+            if (url.pathname === '/v1/oauth/clients' && request.method === 'GET') {
+                if (session.auth_type === 'bearer') return error('session_required', 403, request, env, 'This action requires a device session')
+                const records = await env.DB.prepare(`SELECT id, user_id, name, icon, site, description, redirect_uris, client_secret_hash, revoked_at
+                    FROM oauth_clients WHERE user_id = ? ORDER BY created_at DESC`).bind(session.user_id).all()
+                return json({ result: true, items: (records.results || []).map(item => publicOAuthClient(item)) }, 200, request, env)
+            }
+
+            if (url.pathname === '/v1/oauth/connections' && request.method === 'GET') {
+                if (session.auth_type === 'bearer') return error('session_required', 403, request, env, 'This action requires a device session')
+                const records = await env.DB.prepare(`SELECT DISTINCT c.id, c.user_id, c.name, c.icon, c.site, c.description, c.redirect_uris, c.client_secret_hash, c.revoked_at
+                    FROM oauth_clients c JOIN oauth_access_tokens a ON a.client_id = c.id
+                    WHERE a.user_id = ? AND a.revoked_at IS NULL AND a.expires_at > ? AND c.revoked_at IS NULL
+                    ORDER BY c.name`).bind(session.user_id, Date.now()).all()
+                return json({ result: true, items: (records.results || []).map(item => publicOAuthClient(item)) }, 200, request, env)
+            }
+
+            if (url.pathname === '/v1/oauth/client' && request.method === 'POST') {
+                if (session.auth_type === 'bearer') return error('session_required', 403, request, env, 'This action requires a device session')
+                const { data } = await readBody(request)
+                const created = await createOAuthClient(env, session.user_id, data)
+                if (!created) return error('validation_failed', 400, request, env, 'Provide a name and valid redirect URIs')
+                await recordAudit(env, request, { userId: session.user_id, action: 'oauth.client_created', resourceType: 'oauth_client', resourceId: created.item.id, outcome: 'success' })
+                return json({ result: true, item: created.item }, 201, request, env, { 'Cache-Control': 'no-store' })
+            }
+
+            const oauthClientMatch = url.pathname.match(/^\/v1\/oauth\/client\/([^/]+)(?:\/(revoke|reset_secret|test_token|icon))?$/)
+            if (oauthClientMatch) {
+                if (session.auth_type === 'bearer') return error('session_required', 403, request, env, 'This action requires a device session')
+                const id = decodeURIComponent(oauthClientMatch[1])
+                const action = oauthClientMatch[2]
+                const client = await selectOAuthClient(env, id, session.user_id)
+                if (!client) return error('oauth_client_not_found', 404, request, env, 'OAuth Client was not found')
+                if (action === 'revoke' && request.method === 'PUT') {
+                    const result = await env.DB.prepare('UPDATE oauth_clients SET revoked_at = ?, updated_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL')
+                        .bind(Date.now(), Date.now(), id, session.user_id).run()
+                    if (Number(result?.meta?.changes || 0) !== 1) return error('oauth_client_not_found', 404, request, env, 'OAuth Client was not found')
+                    await env.DB.prepare('UPDATE oauth_access_tokens SET revoked_at = ? WHERE client_id = ? AND user_id = ? AND revoked_at IS NULL')
+                        .bind(Date.now(), id, session.user_id).run()
+                    return json({ result: true }, 200, request, env)
+                }
+                if (action === 'reset_secret' && request.method === 'PUT') {
+                    const secret = randomToken(32)
+                    await env.DB.prepare('UPDATE oauth_clients SET client_secret_hash = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(await hmac(secret, env.SESSION_SECRET), Date.now(), id, session.user_id).run()
+                    return json({ result: true, item: publicOAuthClient(client, secret) }, 200, request, env, { 'Cache-Control': 'no-store' })
+                }
+                if (action === 'test_token' && ['GET', 'POST'].includes(request.method)) {
+                    if (client.revoked_at) return error('oauth_client_not_found', 404, request, env, 'OAuth Client was not found')
+                    const access = await issueOAuthAccessToken({ ...env }, { client_id: id, user_id: session.user_id, scopes: 'profile:read bookmarks:read' })
+                    return json({ result: true, token: access.token }, 200, request, env, { 'Cache-Control': 'no-store' })
+                }
+                if (action === 'icon' && ['PUT', 'POST'].includes(request.method)) {
+                    const { data } = await readBody(request)
+                    let icon = typeof data.icon === 'string' ? data.icon.trim() : ''
+                    if (data.icon?.arrayBuffer) {
+                        const type = String(data.icon.type || '').toLowerCase()
+                        const bytes = new Uint8Array(await data.icon.arrayBuffer())
+                        if (!/^image\/(?:png|jpeg|gif|webp)$/.test(type) || bytes.length > 256 * 1024)
+                            return error('validation_failed', 400, request, env, 'Use a PNG, JPEG, GIF, or WebP image up to 256 KiB')
+                        icon = 'data:' + type + ';base64,' + bytesToBase64(bytes)
+                    }
+                    if (!icon || icon.length > 350000)
+                        return error('validation_failed', 400, request, env, 'Provide a valid icon')
+                    await env.DB.prepare('UPDATE oauth_clients SET icon = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(icon, Date.now(), id, session.user_id).run()
+                    return json({ result: true, item: publicOAuthClient({ ...client, icon }) }, 200, request, env)
+                }
+                if (!action && request.method === 'PUT') {
+                    const { data } = await readBody(request)
+                    const input = oauthClientInput({
+                        name: data.name ?? client.name,
+                        icon: data.icon ?? client.icon,
+                        site: data.site ?? client.site,
+                        description: data.description ?? client.description,
+                        redirects: data.redirects ?? data.redirectUris ?? data.redirect_uris ?? oauthRedirects(client.redirect_uris)
+                    })
+                    if (!input.name || input.name.length > 100 || !input.redirects.length || input.redirects.length > 20 || !input.redirects.every(validOAuthRedirect))
+                        return error('validation_failed', 400, request, env, 'Provide a name and exact HTTPS redirect URI')
+                    await env.DB.prepare(`UPDATE oauth_clients SET name = ?, icon = ?, site = ?, description = ?, redirect_uris = ?, updated_at = ?
+                        WHERE id = ? AND user_id = ?`).bind(input.name, input.icon, input.site, input.description, JSON.stringify(input.redirects), Date.now(), id, session.user_id).run()
+                    return json({ result: true, item: publicOAuthClient({ ...client, ...input, redirect_uris: JSON.stringify(input.redirects) }) }, 200, request, env)
+                }
+                if (!action && request.method === 'DELETE') {
+                    await env.DB.prepare('UPDATE oauth_access_tokens SET revoked_at = ? WHERE client_id = ? AND user_id = ? AND revoked_at IS NULL')
+                        .bind(Date.now(), id, session.user_id).run()
+                    await env.DB.prepare('DELETE FROM oauth_authorization_codes WHERE client_id = ? AND user_id = ?').bind(id, session.user_id).run()
+                    const removed = await env.DB.prepare('DELETE FROM oauth_clients WHERE id = ? AND user_id = ?').bind(id, session.user_id).run()
+                    if (Number(removed?.meta?.changes || 0) !== 1) return error('oauth_client_not_found', 404, request, env, 'OAuth Client was not found')
+                    return json({ result: true }, 200, request, env)
+                }
+            }
+
             if (url.pathname === '/v1/user/connect/google' && request.method === 'GET') {
                 if (!googleReady(env)) return configurationError(request, env)
                 const state = await createOAuthState(env, 'connect', session.user_id, '/settings/account')
@@ -5073,6 +5977,23 @@ export default {
                 if (session.federated_only)
                     return error('alternative_sign_in_required', 409, request, env, 'Set an email password before disconnecting Google')
                 await env.DB.prepare('DELETE FROM connected_identities WHERE user_id = ? AND provider = ?').bind(session.user_id, 'google').run()
+                return json({ result: true }, 200, request, env)
+            }
+
+            if (url.pathname === '/v1/user/connect/apple' && request.method === 'GET') {
+                if (!publicAuthEnabled(env)) return error('public_api_unavailable', 404, request, env, 'Public API access is not enabled in Beta')
+                if (!appleReady(env)) return configurationError(request, env)
+                const state = await createOAuthState(env, 'connect_apple', session.user_id, '/settings/account')
+                return new Response(null, { status: 302, headers: { Location: appleAuthorization(env, state), 'X-Request-ID': requestId(request) } })
+            }
+
+            if (url.pathname === '/v1/user/connect/apple/revoke' && request.method === 'POST') {
+                if (!publicAuthEnabled(env)) return error('public_api_unavailable', 404, request, env, 'Public API access is not enabled in Beta')
+                if (request.method === 'POST' && request.headers.get('Origin') !== env.APP_ORIGIN)
+                    return error('origin_not_allowed', 403, request, env, 'Use the Web app to disconnect Apple')
+                if (session.federated_only)
+                    return error('alternative_sign_in_required', 409, request, env, 'Set an email password before disconnecting Apple')
+                await env.DB.prepare('DELETE FROM connected_identities WHERE user_id = ? AND provider = ?').bind(session.user_id, 'apple').run()
                 return json({ result: true }, 200, request, env)
             }
 
@@ -5111,6 +6032,40 @@ export default {
 
             if (url.pathname === '/v1/user' && request.method === 'GET')
                 return json({ result: true, user: publicUser(session) }, 200, request, env)
+
+            if (url.pathname === '/v1/user/tfa' && request.method === 'GET') {
+                const row = await tfaRow(env, session.user_id)
+                if (row?.enabled_at) return json({ result: true, enabled: true }, 200, request, env)
+                const secret = base32Encode(crypto.getRandomValues(new Uint8Array(20)))
+                const now = Date.now()
+                await env.DB.prepare(`INSERT INTO user_tfa (user_id, secret_encrypted, created_at)
+                    VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET secret_encrypted = excluded.secret_encrypted,
+                    recovery_code_hash = NULL, recovery_used_at = NULL, enabled_at = NULL, created_at = excluded.created_at`)
+                    .bind(session.user_id, await encryptCredentials(env, { secret }), now).run()
+                const uri = otpUri(session.email, secret)
+                return json({ result: true, enabled: false, secret, otpauthUrl: uri }, 200, request, env, { 'Cache-Control': 'no-store' })
+            }
+
+            if (url.pathname === '/v1/user/tfa' && request.method === 'POST') {
+                const row = await tfaRow(env, session.user_id)
+                if (row?.enabled_at) return error('tfa_already_enabled', 409, request, env, 'Two-factor authentication is already enabled')
+                if (!row || !await verifyPendingTfa(env, session.user_id, (await readBody(request)).data.code))
+                    return error('tfa_invalid_code', 400, request, env, 'The authenticator code is invalid')
+                const code = recoveryCode()
+                const enabled = await env.DB.prepare(`UPDATE user_tfa SET enabled_at = ?, recovery_code_hash = ?, recovery_used_at = NULL
+                    WHERE user_id = ? AND enabled_at IS NULL`).bind(Date.now(), await hmac(code, env.SESSION_SECRET), session.user_id).run()
+                if (Number(enabled?.meta?.changes || 0) !== 1)
+                    return error('tfa_already_enabled', 409, request, env, 'Two-factor authentication is already enabled')
+                return json({ result: true, user: publicUser({ ...session, tfa_enabled: true }), recoveryCode: code }, 200, request, env, { 'Cache-Control': 'no-store' })
+            }
+
+            if (url.pathname === '/v1/user/tfa' && request.method === 'DELETE') {
+                const { data } = await readBody(request)
+                if (!await verifyTfaCode(env, session.user_id, data.code))
+                    return error('tfa_invalid_code', 400, request, env, 'The authentication code is invalid')
+                await env.DB.prepare('DELETE FROM user_tfa WHERE user_id = ?').bind(session.user_id).run()
+                return json({ result: true, user: publicUser({ ...session, tfa_enabled: false }) }, 200, request, env)
+            }
 
             if (url.pathname === '/v1/user/quota' && request.method === 'GET') {
                 const usage = await readUsage(env, session.user_id)

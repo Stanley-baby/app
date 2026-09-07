@@ -45,8 +45,8 @@ export default function SettingsProfileConnect() {
     const { pathname } = useLocation()
     const user = useSelector(state=>getUser(state))
 
-    const revokeGoogle = async () => {
-        const response = await fetch(`${API_ENDPOINT_URL}user/connect/google/revoke`, {
+    const revokeSocial = async provider => {
+        const response = await fetch(`${API_ENDPOINT_URL}user/connect/${provider}/revoke`, {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' }
@@ -70,7 +70,7 @@ export default function SettingsProfileConnect() {
                             <Checkbox 
                                 key={key}
                                 checked={enabled}
-                                onChange={()=>independentService && enabled ? revokeGoogle() : window.location=`${API_ENDPOINT_URL}user/connect/${key}/${enabled ? 'revoke' : ''}`}
+                                onChange={()=>independentService && enabled ? revokeSocial(key) : window.location=`${API_ENDPOINT_URL}user/connect/${key}/${enabled ? 'revoke' : ''}`}
                                 className={enabled ? s.enabled : s.default}>
                                 <Icon 
                                     name={key}

@@ -36,7 +36,11 @@
             "MICROSOFT_CLIENT_ID",
             "MICROSOFT_CLIENT_SECRET",
             "SCANNER_URL",
-            "SCANNER_API_KEY"
+            "SCANNER_API_KEY",
+            "APPLE_CLIENT_ID",
+            "APPLE_TEAM_ID",
+            "APPLE_KEY_ID",
+            "APPLE_PRIVATE_KEY"
         ],
         "attachmentMaxBytes": 52428800,
         "migrationMaxBytes": 2097152,
@@ -77,7 +81,11 @@
             "MICROSOFT_CLIENT_ID",
             "MICROSOFT_CLIENT_SECRET",
             "SCANNER_URL",
-            "SCANNER_API_KEY"
+            "SCANNER_API_KEY",
+            "APPLE_CLIENT_ID",
+            "APPLE_TEAM_ID",
+            "APPLE_KEY_ID",
+            "APPLE_PRIVATE_KEY"
         ],
         "attachmentMaxBytes": 52428800,
         "migrationMaxBytes": 2097152,
@@ -118,7 +126,11 @@
             "MICROSOFT_CLIENT_ID",
             "MICROSOFT_CLIENT_SECRET",
             "SCANNER_URL",
-            "SCANNER_API_KEY"
+            "SCANNER_API_KEY",
+            "APPLE_CLIENT_ID",
+            "APPLE_TEAM_ID",
+            "APPLE_KEY_ID",
+            "APPLE_PRIVATE_KEY"
         ],
         "attachmentMaxBytes": 52428800,
         "migrationMaxBytes": 2097152,
@@ -159,7 +171,11 @@
             "MICROSOFT_CLIENT_ID",
             "MICROSOFT_CLIENT_SECRET",
             "SCANNER_URL",
-            "SCANNER_API_KEY"
+            "SCANNER_API_KEY",
+            "APPLE_CLIENT_ID",
+            "APPLE_TEAM_ID",
+            "APPLE_KEY_ID",
+            "APPLE_PRIVATE_KEY"
         ],
         "attachmentMaxBytes": 52428800,
         "migrationMaxBytes": 2097152,

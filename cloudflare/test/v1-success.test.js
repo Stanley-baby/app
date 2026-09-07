@@ -99,7 +99,7 @@ class DB {
         return { bind: (...next) => { values = next; return { first, all, run } } }
     }
 }
-const base = { ENVIRONMENT: 'local', VERSION: 'test', APP_ORIGIN: 'https://app.test', API_ORIGIN: 'https://api.test', CORS_ORIGINS: 'https://app.test', SESSION_SECRET: 'secret', RATE_LIMIT_PER_MINUTE: '1000', MAIL_PROVIDER: 'resend', RESEND_API_KEY: 'key', MAIL_FROM: 'test@example.test', TURNSTILE_ENABLED: 'false', BETA_ACCESS_PASSWORD: 'expected', GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', MICROSOFT_CLIENT_ID: 'microsoft-client', MICROSOFT_CLIENT_SECRET: 'microsoft-secret', TASK_QUEUE: { send: async () => {} }, CONTENT_BUCKET: { put: async () => {}, get: async () => ({ body: new Blob(['x']).stream(), size: 1 }), delete: async () => {} }, BACKUP_BUCKET: { put: async () => {}, get: async () => ({ body: new Blob(['{"version":1}']).stream(), size: 15 }), delete: async () => {} }, ATTACHMENT_SCAN_ENABLED: 'false' }
+const base = { ENVIRONMENT: 'local', VERSION: 'test', APP_ORIGIN: 'https://app.test', API_ORIGIN: 'https://api.test', CORS_ORIGINS: 'https://app.test', SESSION_SECRET: 'secret', RATE_LIMIT_PER_MINUTE: '1000', MAIL_PROVIDER: 'resend', RESEND_API_KEY: 'key', MAIL_FROM: 'test@example.test', TURNSTILE_ENABLED: 'false', BETA_ACCESS_PASSWORD: 'expected', GOOGLE_CLIENT_ID: 'client', GOOGLE_CLIENT_SECRET: 'secret', APPLE_CLIENT_ID: 'com.example.app', APPLE_TEAM_ID: 'team', APPLE_KEY_ID: 'key', APPLE_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgy2ivCqTm6FBI8IqT\nqI4pr5OgYm4YsQB5F4Schn9FiT+hRANCAATtNgUjaUEroDwAGu5xH9DZYLUel9Vf\noX6tApPf6O8maoYI9U+kEbMRQmo1+n/Bxp/ygx/9+kzcehtmxuT7dGg7\n-----END PRIVATE KEY-----\n', MICROSOFT_CLIENT_ID: 'microsoft-client', MICROSOFT_CLIENT_SECRET: 'microsoft-secret', TASK_QUEUE: { send: async () => {} }, CONTENT_BUCKET: { put: async () => {}, get: async () => ({ body: new Blob(['x']).stream(), size: 1 }), delete: async () => {} }, BACKUP_BUCKET: { put: async () => {}, get: async () => ({ body: new Blob(['{"version":1}']).stream(), size: 15 }), delete: async () => {} }, ATTACHMENT_SCAN_ENABLED: 'false' }
 test('success fixtures execute every v1 route with an authenticated verified setup', async () => {
     const oldFetch = globalThis.fetch
     globalThis.fetch = async url => { const target = String(url); if (target.includes('resend.com')) return new Response('{}', { status: 200 }); if (target.includes('googleapis.com') || target.includes('oauth2.googleapis.com')) return new Response(JSON.stringify({ access_token: 'token', id_token: 'token', expires_in: 3600 }), { status: 200, headers: { 'Content-Type': 'application/json' } }); return new Response('<html><title>Fixture</title></html>', { status: 200, headers: { 'Content-Type': 'text/html' } }) }
@@ -119,7 +119,7 @@ test('success fixtures execute every v1 route with an authenticated verified set
                 headers.set('Content-Type', 'application/json')
                 body = JSON.stringify(bodyFor(item))
             }
-            if (item.path === '/v1/user/connect/google/revoke') headers.set('Origin', base.APP_ORIGIN)
+            if (['/v1/user/connect/google/revoke', '/v1/user/connect/apple/revoke'].includes(item.path)) headers.set('Origin', base.APP_ORIGIN)
             if (item.authentication === 'none') headers.delete('Cookie')
             const env = { ...base, DB: new DB(item) }
             const response = await worker.fetch(new Request('https://api.test' + path, { method: item.method, headers, body }), env)

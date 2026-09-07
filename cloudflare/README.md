@@ -18,7 +18,9 @@ Before each remote deploy, create the environment's D1/R2/Queue resources,
 put the actual D1 ID in the matching block, and set each secret with the same
 `--env` value. Identity deployments require `BETA_ACCESS_PASSWORD`,
 `SESSION_SECRET`, `TURNSTILE_SECRET_KEY`, `RESEND_API_KEY`, and
-`MAIL_FROM`; the matching public `TURNSTILE_SITE_KEY` is supplied only to
+`MAIL_FROM`; production Apple sign-in additionally requires
+`APPLE_CLIENT_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID`, and `APPLE_PRIVATE_KEY`.
+The matching public `TURNSTILE_SITE_KEY` is supplied only to
 the Web build. Apply the D1 migrations before deploying the Worker.
 
 The client build selects the same profiles with `--env environment=preview`.
@@ -117,3 +119,13 @@ retries idempotent, while a failed task can be retried explicitly with
 the source identifier remains traceable without creating a second Bookmark.
 When scanning is enabled, import status also reports child safety tasks and
 their pending or failed state; an explicit retry requeues failed safety tasks.
+
+Public release identity and API access are exposed through the existing Web paths:
+`/v1/auth/apple`, `/v1/user/tfa`, and `/v1/developer/tokens`. Developer Tokens
+are returned only at creation, store only a keyed hash, enforce explicit scopes,
+and expire or revoke independently of Device Sessions. OAuth Clients use
+`/v1/oauth/authorize` and `/v1/oauth/access_token` (also available as
+`/v1/oauth/token`) with an explicit, session-bound consent step, exact redirect
+URI matching, and mandatory S256 PKCE;
+bearer access is accepted by the scoped `/v1` read/write routes in non-Beta
+environments without changing the Beta cookie-session contract.
