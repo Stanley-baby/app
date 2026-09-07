@@ -98,23 +98,6 @@ module.exports = (env={}, args={}) => {
                     //     }
                     // },
 
-                    related_applications: [
-                        {
-                            platform: 'play',
-                            url: 'https://play.google.com/store/apps/details?id=io.raindrop.raindropio',
-                            id: 'io.raindrop.raindropio'
-                        },
-                        {
-                            platform: 'itunes',
-                            url: 'https://apps.apple.com/app/id1021913807'
-                        },
-                        {
-                            platform: 'chrome_web_store',
-                            url: 'https://chromewebstore.google.com/detail/ldgfbffkinooeloadekpmfoklnobpien',
-                            id: 'ldgfbffkinooeloadekpmfoklnobpien'
-                        }
-                    ],
-
                     edge_side_panel: {
                         preferred_width: 400
                     }

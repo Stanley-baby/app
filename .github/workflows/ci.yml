@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches:
+    - master
+    - docs/add-repository-guidelines
+  pull_request:
+
+jobs:
+  contract-and-build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Use Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 18.16.0
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Contract tests
+      run: npm run test:contract
+
+    - name: Lint
+      run: >-
+        npx eslint
+        build/common.js build/environments.js build/extension.js build/web.js
+        cloudflare/test/build-config.test.js
+        src/config/csp.js src/config/links.js src/data/constants/app.js
+        src/data/modules/format/favicon.js src/data/modules/format/screenshot.js
+        src/data/modules/format/thumb.js src/co/common/webview/browser.js
+        src/co/collections/sharing/public/footer.js src/routes/account/layout.js
+        src/routes/account/redirect.js src/routes/account/signup/index.js
+        src/routes/my/item/tab/cache.js src/target/extension/manifest/index.js
+
+    - name: Build self-hosted Web client
+      run: npm run build:selfhosted
+
+    - name: Build self-hosted extensions
+      run: npm run build:extension:selfhosted

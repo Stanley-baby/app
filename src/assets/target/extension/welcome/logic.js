@@ -64,7 +64,7 @@ window.onload = ()=>{
 
     //update authenticated status class
     async function updateAuthenticatedClass() {
-        const res = await fetch('https://api.raindrop.io/v1/user', { credentials: 'include' } )
+        const res = await fetch('__API_ORIGIN__/v1/user', { credentials: 'include' } )
         const { result } = await res.json()
         if (result) 
             document.documentElement.classList.add('authenticated')

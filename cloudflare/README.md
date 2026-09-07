@@ -1,11 +1,66 @@
 # Cloudflare API worker
 
+This Worker is an independently operated, self-hosted bookmarking backend.
+Each operator supplies their own Cloudflare resources, domains, and secrets;
+the repository does not provide a shared data plane.
+
+## Self-hosted quick start
+
+1. Install Node 18 and Wrangler, then authenticate with `wrangler login`.
+2. Copy the committed template and keep the private copy out of Git:
+
+   ```sh
+   cp cloudflare/wrangler.toml cloudflare/wrangler.private.toml
+   ```
+
+3. Create a D1 database, two R2 buckets, and the task queues in your Cloudflare
+   account. Put the returned D1 ID and your resource names in the `selfhosted`
+   blocks of `cloudflare/wrangler.private.toml`; use those names in the commands
+   below if they differ from the template.
+4. Set `API_ORIGIN`, `APP_ORIGIN`, `AI_PAGE_ORIGIN`, and `CORS_ORIGINS` to
+   origins you own. Apply migrations and deploy:
+
+   ```sh
+   npx wrangler d1 migrations apply raindrop-db-selfhosted --remote \
+     --config cloudflare/wrangler.private.toml --env selfhosted
+   npx wrangler deploy --config cloudflare/wrangler.private.toml --env selfhosted
+   ```
+
+5. Add `SESSION_SECRET` and `ENCRYPTION_KEY` at minimum. Add email, OAuth,
+   Turnstile, scanner, and Apple credentials only when you enable those
+   features. Secrets are stored with `wrangler secret put` and never committed.
+
+The committed `wrangler.toml` contains placeholders only. The ignored
+`wrangler.private.toml` is the local deployment copy. A custom API domain is
+optional; `workers.dev` is sufficient for a self-hosted instance.
+
+## Client builds and GitHub Releases
+
+Build clients against the same self-hosted origins:
+
+```sh
+export API_ORIGIN=https://api.example.com
+export APP_ORIGIN=https://app.example.com
+export AI_PAGE_ORIGIN=https://app.example.com/ai
+export REPOSITORY_URL=https://github.com/your-org/your-repo
+export HELP_ORIGIN=https://github.com/your-org/your-repo
+npm run build:selfhosted
+
+npm run build:extension:selfhosted
+```
+
+The Web output is written to `dist/web/selfhosted`; extension ZIPs are written
+to `dist/*.zip`. Publish those artifacts with a GitHub Release and install the
+extensions manually in browser developer mode. No browser or mobile store
+account is required. Safari source is retained for operators who choose to
+sign it themselves.
+
 `wrangler.toml` keeps the top-level (default) configuration for `local` and
-defines separate `preview`, `beta`, and `production` environments. Every
-environment has its own Worker name, D1 database, R2 buckets, queues, origins,
-and secret namespace. Replace the placeholder D1 IDs before a remote deploy.
-Remote custom-domain deployment also requires an active Cloudflare zone for
-the configured API hostnames; a dry-run validates syntax and bindings but does
+defines separate `preview`, `beta`, `production`, and `selfhosted` environments.
+Every environment has its own Worker name, D1 database, R2 buckets, queues,
+origins, and secret namespace. Replace placeholder D1 IDs before a remote
+deploy. Remote custom-domain deployment requires an active Cloudflare zone for
+the configured API hostname; a dry-run validates syntax and bindings but does
 not provision resources or verify zone ownership.
 
 ```sh
@@ -23,7 +78,9 @@ put the actual D1 ID in the matching block, and set each secret with the same
 The matching public `TURNSTILE_SITE_KEY` is supplied only to
 the Web build. Apply the D1 migrations before deploying the Worker.
 
-The client build selects the same profiles with `--env environment=preview`.
+The client build selects the same profiles with `--env environment=preview` or
+the self-hosted scripts `npm run build:selfhosted` and
+`npm run build:extension:selfhosted`.
 The versioned `/v1` route manifest and request fixtures live in
 `contracts/v1-routes.json` and `contracts/v1-fixtures.json`; the contract suite
 checks their OpenAPI operations and QA dimensions. Run it with

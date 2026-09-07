@@ -1,3 +1,5 @@
+# Copy this file to wrangler.private.toml for a local deployment and replace
+# every placeholder with resources owned by your Cloudflare account.
 # The top-level (no --env) configuration is the isolated local environment.
 name = "raindrop-api-local"
 main = "src/index.js"
@@ -74,10 +76,10 @@ binding = "BROWSER"
 [env.preview.vars]
 ENVIRONMENT = "preview"
 VERSION = "0.1.0-preview"
-API_ORIGIN = "https://raindrop-api-preview.shenyuan.workers.dev"
-APP_ORIGIN = "https://preview.raindrop.io"
-AI_PAGE_ORIGIN = "https://preview.raindrop.io/ai"
-CORS_ORIGINS = "https://preview.raindrop.io chrome-extension://*"
+API_ORIGIN = "https://api-preview.example.com"
+APP_ORIGIN = "https://preview.example.com"
+AI_PAGE_ORIGIN = "https://preview.example.com/ai"
+CORS_ORIGINS = "https://preview.example.com chrome-extension://*"
 MAIL_PROVIDER = "resend"
 TURNSTILE_ENABLED = "false"
 USAGE_QUOTA_DAILY = "1000"
@@ -96,7 +98,7 @@ BACKUP_MAX_BYTES = "16777216"
 [[env.preview.d1_databases]]
 binding = "DB"
 database_name = "raindrop-db-preview"
-database_id = "7996b398-6a27-4916-b303-cd42180eaf3b"
+database_id = "REPLACE_WITH_PREVIEW_D1_DATABASE_ID"
 migrations_dir = "migrations"
 
 [[env.preview.r2_buckets]]
@@ -135,10 +137,10 @@ binding = "BROWSER"
 [env.beta.vars]
 ENVIRONMENT = "beta"
 VERSION = "0.1.0-beta"
-API_ORIGIN = "https://raindrop-api-beta.shenyuan.workers.dev"
-APP_ORIGIN = "https://raindrop-beta.pages.dev"
-AI_PAGE_ORIGIN = "https://raindrop-beta.pages.dev/ai"
-CORS_ORIGINS = "https://raindrop-beta.pages.dev chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+API_ORIGIN = "https://api-beta.example.com"
+APP_ORIGIN = "https://beta.example.com"
+AI_PAGE_ORIGIN = "https://beta.example.com/ai"
+CORS_ORIGINS = "https://beta.example.com chrome-extension://*"
 MAIL_PROVIDER = "resend"
 TURNSTILE_ENABLED = "false"
 USAGE_QUOTA_DAILY = "1000"
@@ -157,7 +159,7 @@ BACKUP_MAX_BYTES = "16777216"
 [[env.beta.d1_databases]]
 binding = "DB"
 database_name = "raindrop-db-beta"
-database_id = "4bad3000-d53b-451d-a6f7-b7030684c72d"
+database_id = "REPLACE_WITH_BETA_D1_DATABASE_ID"
 migrations_dir = "migrations"
 
 [[env.beta.r2_buckets]]
@@ -196,10 +198,10 @@ binding = "BROWSER"
 [env.production.vars]
 ENVIRONMENT = "production"
 VERSION = "0.1.0-production"
-API_ORIGIN = "https://raindrop-api-production.shenyuan.workers.dev"
-APP_ORIGIN = "https://app.raindrop.io"
-AI_PAGE_ORIGIN = "https://app.raindrop.io/ai"
-CORS_ORIGINS = "https://app.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+API_ORIGIN = "https://api-production.example.com"
+APP_ORIGIN = "https://app.example.com"
+AI_PAGE_ORIGIN = "https://app.example.com/ai"
+CORS_ORIGINS = "https://app.example.com chrome-extension://*"
 MAIL_PROVIDER = "resend"
 TURNSTILE_ENABLED = "false"
 USAGE_QUOTA_DAILY = "1000"
@@ -218,7 +220,7 @@ BACKUP_MAX_BYTES = "16777216"
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "raindrop-db-production"
-database_id = "62a51fd1-90d9-4b7a-babc-2173bd9ea89b"
+database_id = "REPLACE_WITH_PRODUCTION_D1_DATABASE_ID"
 migrations_dir = "migrations"
 
 [[env.production.r2_buckets]]
@@ -245,4 +247,65 @@ max_retries = 3
 dead_letter_queue = "raindrop-tasks-dlq-production"
 
 [env.production.ai]
+binding = "AI"
+
+[env.selfhosted]
+name = "raindrop-api-selfhosted"
+workers_dev = true
+
+[env.selfhosted.browser]
+binding = "BROWSER"
+
+[env.selfhosted.vars]
+ENVIRONMENT = "selfhosted"
+VERSION = "0.1.0-selfhosted"
+API_ORIGIN = "https://api-selfhosted.example.com"
+APP_ORIGIN = "https://selfhosted.example.com"
+AI_PAGE_ORIGIN = "https://selfhosted.example.com/ai"
+CORS_ORIGINS = "https://selfhosted.example.com chrome-extension://*"
+MAIL_PROVIDER = "resend"
+TURNSTILE_ENABLED = "false"
+USAGE_QUOTA_DAILY = "1000"
+AI_DAILY_QUOTA = "20"
+AI_GLOBAL_DAILY_QUOTA = "10000"
+AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+RATE_LIMIT_PER_MINUTE = "60"
+FETCH_DNS_RESOLVER = "https://cloudflare-dns.com/dns-query"
+ATTACHMENT_MAX_BYTES = "52428800"
+ATTACHMENT_SCAN_ENABLED = "true"
+MIGRATION_MAX_BYTES = "2097152"
+BACKUP_RETENTION_DAILY = "30"
+BACKUP_RETENTION_MONTHLY = "12"
+BACKUP_MAX_BYTES = "16777216"
+
+[[env.selfhosted.d1_databases]]
+binding = "DB"
+database_name = "raindrop-db-selfhosted"
+database_id = "REPLACE_WITH_SELFHOSTED_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[env.selfhosted.r2_buckets]]
+binding = "CONTENT_BUCKET"
+bucket_name = "raindrop-content-selfhosted"
+
+[[env.selfhosted.r2_buckets]]
+binding = "BACKUP_BUCKET"
+bucket_name = "raindrop-backup-selfhosted"
+
+[[env.selfhosted.queues.producers]]
+binding = "TASK_QUEUE"
+queue = "raindrop-tasks-selfhosted"
+
+[[env.selfhosted.queues.producers]]
+binding = "TASK_DLQ"
+queue = "raindrop-tasks-dlq-selfhosted"
+
+[[env.selfhosted.queues.consumers]]
+queue = "raindrop-tasks-selfhosted"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "raindrop-tasks-dlq-selfhosted"
+
+[env.selfhosted.ai]
 binding = "AI"

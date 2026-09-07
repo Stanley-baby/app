@@ -4,6 +4,7 @@ import t from '~t'
 import { API_ENDPOINT_URL } from '~data/constants/app'
 import { useSelector } from 'react-redux'
 import { isPro } from '~data/selectors/user'
+import links from '~config/links'
 
 import Header, { Title, Space } from '~co/common/header'
 import Button from '~co/common/button'
@@ -43,7 +44,7 @@ function CacheStatus({ cache, url }) {
             <Title>
                 {title}<br/>
                 <small>
-                    {t.s('webArchiveDescription')} <a href='https://help.raindrop.io/permanent-copy' target='_blank'>{t.s('learnMore')}</a>
+                    {t.s('webArchiveDescription')} <a href={links.help.permanentCopy} target='_blank'>{t.s('learnMore')}</a>
                 </small>
             </Title>
             <Space />

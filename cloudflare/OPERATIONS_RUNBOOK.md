@@ -48,7 +48,7 @@ npx wrangler d1 execute raindrop-db-beta --remote --config cloudflare/wrangler.t
 
 ## Triage and recovery
 
-1. Check `https://raindrop-api-beta.shenyuan.workers.dev/health` and
+1. Check `<API_ORIGIN>/health` and
    `/version`; a non-200 response is an API incident.
 2. For `api_error`, use the redacted `request_id` and route in Worker logs.
    Return the API to the last known-good Beta commit; never copy request data
@@ -58,9 +58,9 @@ npx wrangler d1 execute raindrop-db-beta --remote --config cloudflare/wrangler.t
 
    ```sh
    curl -sS -H "Cookie: rd_session=<session-cookie>" \
-     https://raindrop-api-beta.shenyuan.workers.dev/v1/tasks/<task-id>
+     <API_ORIGIN>/v1/tasks/<task-id>
    curl -sS -X POST -H "Cookie: rd_session=<session-cookie>" \
-     https://raindrop-api-beta.shenyuan.workers.dev/v1/tasks/<task-id>/retry
+     <API_ORIGIN>/v1/tasks/<task-id>/retry
    ```
 
    The cookie and task ID are operator placeholders; do not paste real

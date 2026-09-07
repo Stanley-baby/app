@@ -72,11 +72,14 @@ module.exports = (env={}, args={}) => {
                     title: 'Raindrop.io',
                     template: './index.ejs',
                     templateParameters: {
-						apiOrigin: buildEnvironment.apiOrigin,
-						aiPageOrigin: buildEnvironment.aiPageOrigin,
-						appOrigin: buildEnvironment.appOrigin,
-						turnstileSiteKey: buildEnvironment.turnstileSiteKey,
-						turnstileEnabled: buildEnvironment.turnstileEnabled
+                        apiOrigin: buildEnvironment.apiOrigin,
+                        aiPageOrigin: buildEnvironment.aiPageOrigin,
+                        appOrigin: buildEnvironment.appOrigin,
+                        helpOrigin: buildEnvironment.helpOrigin,
+                        repositoryUrl: buildEnvironment.repositoryUrl,
+                        independentService: buildEnvironment.independentService,
+                        turnstileSiteKey: buildEnvironment.turnstileSiteKey,
+                        turnstileEnabled: buildEnvironment.turnstileEnabled
                     },
                     filename: 'sidepanel.html',
                     scriptLoading: 'blocking',
@@ -91,7 +94,20 @@ module.exports = (env={}, args={}) => {
 
                 new CopyPlugin({
                     patterns: [
-                        { from: 'assets/target/extension/welcome', to: 'welcome' }
+                        {
+                            from: 'assets/target/extension/welcome',
+                            to: 'welcome',
+                            transform(content, resourcePath) {
+                                if (!/\.(html|js|css)$/.test(resourcePath))
+                                    return content
+
+                                return content.toString()
+                                    .replaceAll('__API_ORIGIN__', buildEnvironment.apiOrigin)
+                                    .replaceAll('__APP_ORIGIN__', buildEnvironment.appOrigin)
+                                    .replaceAll('__HELP_ORIGIN__', buildEnvironment.helpOrigin)
+                                    .replaceAll('__DOWNLOAD_URL__', `${buildEnvironment.repositoryUrl}/releases`)
+                            }
+                        }
                     ]
                 }),
 
