@@ -138,7 +138,7 @@
     },
     "production": {
         "workerName": "raindrop-api-production",
-        "apiOrigin": "https://api.raindrop.io",
+        "apiOrigin": "https://raindrop-api-production.shenyuan.workers.dev",
         "appOrigin": "https://app.raindrop.io",
         "aiPageOrigin": "https://app.raindrop.io/ai",
         "turnstileSiteKey": "",

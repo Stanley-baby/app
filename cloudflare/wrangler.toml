@@ -188,19 +188,15 @@ binding = "AI"
 
 [env.production]
 name = "raindrop-api-production"
-workers_dev = false
+workers_dev = true
 
 [env.production.browser]
 binding = "BROWSER"
 
-[[env.production.routes]]
-pattern = "api.raindrop.io"
-custom_domain = true
-
 [env.production.vars]
 ENVIRONMENT = "production"
 VERSION = "0.1.0-production"
-API_ORIGIN = "https://api.raindrop.io"
+API_ORIGIN = "https://raindrop-api-production.shenyuan.workers.dev"
 APP_ORIGIN = "https://app.raindrop.io"
 AI_PAGE_ORIGIN = "https://app.raindrop.io/ai"
 CORS_ORIGINS = "https://app.raindrop.io chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
