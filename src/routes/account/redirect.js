@@ -4,6 +4,7 @@ import { userStatus } from '~data/selectors/user'
 import { refresh } from '~data/actions/user'
 import isURL from 'validator/es/lib/isURL'
 import sessionStorage from '~modules/sessionStorage'
+import { APP_BASE_URL } from '~data/constants/app'
 
 import { Outlet, Navigate, useSearchParams } from 'react-router-dom'
 
@@ -25,7 +26,7 @@ export default function AccountRedirect() {
         if (redirect && 
             isURL(redirect, {
                 require_host: false, 
-                host_whitelist: ['raindrop.io', /\.raindrop\.io$/]
+                host_whitelist: [new URL(APP_BASE_URL).hostname]
             })
         )
             sessionStorage.setItem('redirect', new URL(redirect, location.href).toString())

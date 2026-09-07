@@ -33,3 +33,5 @@ DerivedData
 *.xcuserstate
 project.xcworkspace
 cloudflare/.wrangler/
+
+cloudflare/wrangler.private.toml

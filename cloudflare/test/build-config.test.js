@@ -10,12 +10,12 @@ const web = require('../../build/web.js')
 const extension = require('../../build/extension.js')
 const manifest = require('../../src/target/extension/manifest/index.js')
 
-const profiles = ['local', 'preview', 'beta']
+const profiles = ['local', 'preview', 'beta', 'production', 'selfhosted']
 const definitionsFor = config => config.plugins.find(plugin =>
     plugin.definitions?.['process.env.API_ORIGIN'])?.definitions
 const valueFor = (definitions, name) => JSON.parse(definitions[`process.env.${name}`])
 
-test('Web and Chrome development profiles inject matching origins and API host permissions', () => {
+test('Web and Chrome profiles inject matching origins and API host permissions', () => {
     for (const name of profiles) {
         const profile = environments[name]
         const webConfig = web({ environment: name })
@@ -27,6 +27,10 @@ test('Web and Chrome development profiles inject matching origins and API host p
             assert.equal(valueFor(definitions, 'API_ORIGIN'), profile.apiOrigin)
             assert.equal(valueFor(definitions, 'AI_PAGE_ORIGIN'), profile.aiPageOrigin)
             assert.equal(valueFor(definitions, 'APP_ORIGIN'), profile.appOrigin)
+            assert.equal(valueFor(definitions, 'HELP_ORIGIN'), profile.helpOrigin)
+            assert.equal(valueFor(definitions, 'REPOSITORY_URL'), profile.repositoryUrl)
+            assert.equal(valueFor(definitions, 'WORKERS_BASE_URL'), profile.workersBaseUrl)
+            assert.equal(valueFor(definitions, 'PREVIEW_URL'), profile.previewUrl)
             assert.equal(valueFor(definitions, 'TURNSTILE_SITE_KEY'), profile.turnstileSiteKey)
             assert.equal(valueFor(definitions, 'TURNSTILE_ENABLED'), String(profile.turnstileEnabled))
             assert.equal(valueFor(definitions, 'RAINDROP_BUILD_ENVIRONMENT'), name)
@@ -34,15 +38,16 @@ test('Web and Chrome development profiles inject matching origins and API host p
 
         assert.equal(
             webConfig.output.path,
-            path.resolve(process.cwd(), 'dist', 'web', name === 'local' ? 'dev' : name)
+            path.resolve(process.cwd(), 'dist', 'web', name === 'local' ? 'dev' : name === 'production' ? 'prod' : name)
         )
         assert.equal(
             chromeConfig.output.path,
-            path.resolve(process.cwd(), 'dist', 'chrome', name === 'local' ? 'dev' : name)
+            path.resolve(process.cwd(), 'dist', 'chrome', name === 'local' ? 'dev' : name === 'production' ? 'prod' : name)
         )
 
-        const generated = manifest({ vendor: 'chrome', apiOrigin: profile.apiOrigin }, { emitFile() {} })
+        const generated = manifest({ vendor: 'chrome', apiOrigin: profile.apiOrigin, appOrigin: profile.appOrigin }, { emitFile() {} })
         assert.deepEqual(JSON.parse(generated.code).host_permissions, [`${new URL(profile.apiOrigin).origin}/*`])
+        assert.equal(JSON.parse(generated.code).homepage_url, profile.appOrigin)
     }
 })
 
@@ -64,9 +69,23 @@ test('Chrome extension development and Beta builds stay isolated', () => {
     assert.equal(archive.options.filename, 'chrome-beta.zip')
 })
 
-test('Independent Service capability is enabled outside production', () => {
-    for (const name of ['local', 'preview', 'beta', 'production']) {
+test('Independent Service capability is enabled for self-hosted profiles', () => {
+    for (const name of ['local', 'preview', 'beta', 'production', 'selfhosted']) {
         const definitions = definitionsFor(web({ environment: name }))
-        assert.equal(valueFor(definitions, 'RAINDROP_INDEPENDENT_SERVICE'), String(name != 'production'))
+        assert.equal(valueFor(definitions, 'RAINDROP_INDEPENDENT_SERVICE'), 'true')
     }
+})
+
+test('self-hosted builds accept operator-supplied origins', () => {
+    const definitions = definitionsFor(web({
+        environment: 'selfhosted',
+        apiOrigin: 'https://api.operator.example',
+        appOrigin: 'https://app.operator.example',
+        helpOrigin: 'https://github.com/operator/bookmarks'
+    }))
+
+    assert.equal(valueFor(definitions, 'API_ORIGIN'), 'https://api.operator.example')
+    assert.equal(valueFor(definitions, 'APP_ORIGIN'), 'https://app.operator.example')
+    assert.equal(valueFor(definitions, 'HELP_ORIGIN'), 'https://github.com/operator/bookmarks')
+    assert.equal(valueFor(definitions, 'WORKERS_BASE_URL'), '')
 })

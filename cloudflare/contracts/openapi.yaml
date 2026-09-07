@@ -3,7 +3,7 @@ info:
   title: Independent Bookmarking Service API
   version: 1.0.0
 servers:
-  - url: https://api.raindrop.io
+  - url: https://api.example.com
 components:
   responses:
     InternalError:

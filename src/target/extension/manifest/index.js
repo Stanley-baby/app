@@ -7,7 +7,7 @@ function file({ emitFile }, filename) {
 	return name
 }
 
-module.exports = ({ vendor, production=false, apiOrigin='https://api.raindrop.io' }, l) => {
+module.exports = ({ vendor, production=false, apiOrigin='https://api.example.com', appOrigin='https://app.example.com' }, l) => {
 	const { version } = JSON.parse(fs.readFileSync(`${__dirname}/../../../../package.json`, 'utf-8'))
 	const apiHostPermission = `${new URL(apiOrigin).origin}/*`
 
@@ -26,7 +26,7 @@ module.exports = ({ vendor, production=false, apiOrigin='https://api.raindrop.io
 
 		name:			'Raindrop.io'+(!production?' (Dev)':''),
 		description:	'__MSG_appDesc__',
-		homepage_url:	'https://app.raindrop.io',
+		homepage_url:	appOrigin,
 		author:			'Mussabekov Rustem',
 		short_name:		'Raindrop.io',
 		default_locale:	'en',
@@ -104,7 +104,6 @@ module.exports = ({ vendor, production=false, apiOrigin='https://api.raindrop.io
 			apiHostPermission,
 
 			//fix firefox cookie protection
-			...(vendor == 'firefox' && apiHostPermission != 'https://api.raindrop.io/*' ? ['*://api.raindrop.io/*'] : []),
 		],
 
 		optional_host_permissions: [

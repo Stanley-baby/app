@@ -44,13 +44,18 @@
         ],
         "attachmentMaxBytes": 52428800,
         "migrationMaxBytes": 2097152,
-        "attachmentScanEnabled": true
+        "attachmentScanEnabled": true,
+        "independentService": true,
+        "repositoryUrl": "https://github.com/your-org/your-repo",
+        "helpOrigin": "https://github.com/your-org/your-repo",
+        "workersBaseUrl": "",
+        "previewUrl": ""
     },
     "preview": {
         "workerName": "raindrop-api-preview",
-        "apiOrigin": "https://raindrop-api-preview.shenyuan.workers.dev",
-        "appOrigin": "https://preview.raindrop.io",
-        "aiPageOrigin": "https://preview.raindrop.io/ai",
+        "apiOrigin": "https://api-preview.example.com",
+        "appOrigin": "https://preview.example.com",
+        "aiPageOrigin": "https://preview.example.com/ai",
         "turnstileSiteKey": "",
         "turnstileEnabled": false,
         "usageQuotaDaily": 1000,
@@ -58,7 +63,7 @@
         "aiGlobalDailyQuota": 10000,
         "rateLimitPerMinute": 60,
         "corsOrigins": [
-            "https://preview.raindrop.io",
+            "https://preview.example.com",
             "chrome-extension://*"
         ],
         "resourceNames": {
@@ -89,22 +94,27 @@
         ],
         "attachmentMaxBytes": 52428800,
         "migrationMaxBytes": 2097152,
-        "attachmentScanEnabled": true
+        "attachmentScanEnabled": true,
+        "independentService": true,
+        "repositoryUrl": "https://github.com/your-org/your-repo",
+        "helpOrigin": "https://github.com/your-org/your-repo",
+        "workersBaseUrl": "",
+        "previewUrl": ""
     },
     "beta": {
         "workerName": "raindrop-api-beta",
-        "apiOrigin": "https://raindrop-api-beta.shenyuan.workers.dev",
-        "appOrigin": "https://raindrop-beta.pages.dev",
-        "aiPageOrigin": "https://raindrop-beta.pages.dev/ai",
-        "turnstileSiteKey": "0x4AAAAAAEgrWY2vz8wLYW8D",
+        "apiOrigin": "https://api-beta.example.com",
+        "appOrigin": "https://beta.example.com",
+        "aiPageOrigin": "https://beta.example.com/ai",
+        "turnstileSiteKey": "",
         "turnstileEnabled": false,
         "usageQuotaDaily": 1000,
         "aiDailyQuota": 20,
         "aiGlobalDailyQuota": 10000,
         "rateLimitPerMinute": 60,
         "corsOrigins": [
-            "https://raindrop-beta.pages.dev",
-            "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+            "https://beta.example.com",
+            "chrome-extension://*"
         ],
         "resourceNames": {
             "DB": "raindrop-db-beta",
@@ -134,13 +144,18 @@
         ],
         "attachmentMaxBytes": 52428800,
         "migrationMaxBytes": 2097152,
-        "attachmentScanEnabled": false
+        "attachmentScanEnabled": false,
+        "independentService": true,
+        "repositoryUrl": "https://github.com/your-org/your-repo",
+        "helpOrigin": "https://github.com/your-org/your-repo",
+        "workersBaseUrl": "",
+        "previewUrl": ""
     },
     "production": {
         "workerName": "raindrop-api-production",
-        "apiOrigin": "https://raindrop-api-production.shenyuan.workers.dev",
-        "appOrigin": "https://app.raindrop.io",
-        "aiPageOrigin": "https://app.raindrop.io/ai",
+        "apiOrigin": "https://api-production.example.com",
+        "appOrigin": "https://app.example.com",
+        "aiPageOrigin": "https://app.example.com/ai",
         "turnstileSiteKey": "",
         "turnstileEnabled": false,
         "usageQuotaDaily": 1000,
@@ -148,8 +163,8 @@
         "aiGlobalDailyQuota": 10000,
         "rateLimitPerMinute": 60,
         "corsOrigins": [
-            "https://app.raindrop.io",
-            "chrome-extension://ldgfbffkinooeloadekpmfoklnobpien"
+            "https://app.example.com",
+            "chrome-extension://*"
         ],
         "resourceNames": {
             "DB": "raindrop-db-production",
@@ -179,6 +194,61 @@
         ],
         "attachmentMaxBytes": 52428800,
         "migrationMaxBytes": 2097152,
-        "attachmentScanEnabled": true
+        "attachmentScanEnabled": true,
+        "independentService": true,
+        "repositoryUrl": "https://github.com/your-org/your-repo",
+        "helpOrigin": "https://github.com/your-org/your-repo",
+        "workersBaseUrl": "",
+        "previewUrl": ""
+    },
+    "selfhosted": {
+        "workerName": "raindrop-api-selfhosted",
+        "apiOrigin": "https://api-selfhosted.example.com",
+        "appOrigin": "https://selfhosted.example.com",
+        "aiPageOrigin": "https://selfhosted.example.com/ai",
+        "turnstileSiteKey": "",
+        "turnstileEnabled": false,
+        "usageQuotaDaily": 1000,
+        "aiDailyQuota": 20,
+        "aiGlobalDailyQuota": 10000,
+        "rateLimitPerMinute": 60,
+        "corsOrigins": [
+            "https://selfhosted.example.com",
+            "chrome-extension://*"
+        ],
+        "resourceNames": {
+            "DB": "raindrop-db-selfhosted",
+            "CONTENT_BUCKET": "raindrop-content-selfhosted",
+            "BACKUP_BUCKET": "raindrop-backup-selfhosted",
+            "TASK_QUEUE": "raindrop-tasks-selfhosted",
+            "TASK_DLQ": "raindrop-tasks-dlq-selfhosted"
+        },
+        "secretScope": "raindrop-api-selfhosted",
+        "secrets": [
+            "BETA_ACCESS_PASSWORD",
+            "SESSION_SECRET",
+            "ENCRYPTION_KEY",
+            "TURNSTILE_SECRET_KEY",
+            "RESEND_API_KEY",
+            "MAIL_FROM",
+            "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET",
+            "MICROSOFT_CLIENT_ID",
+            "MICROSOFT_CLIENT_SECRET",
+            "SCANNER_URL",
+            "SCANNER_API_KEY",
+            "APPLE_CLIENT_ID",
+            "APPLE_TEAM_ID",
+            "APPLE_KEY_ID",
+            "APPLE_PRIVATE_KEY"
+        ],
+        "attachmentMaxBytes": 52428800,
+        "migrationMaxBytes": 2097152,
+        "attachmentScanEnabled": true,
+        "independentService": true,
+        "repositoryUrl": "https://github.com/your-org/your-repo",
+        "helpOrigin": "https://github.com/your-org/your-repo",
+        "workersBaseUrl": "",
+        "previewUrl": ""
     }
 }

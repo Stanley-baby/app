@@ -5,6 +5,7 @@ import { connect } from 'react-redux'
 import { userStatus, errorReason } from '~data/selectors/user'
 import { registerWithPassword } from '~data/actions/user'
 import { TURNSTILE_ENABLED, TURNSTILE_SITE_KEY } from '~data/constants/app'
+import links from '~config/links'
 
 import { Link } from 'react-router-dom'
 import { Helmet } from 'react-helmet'
@@ -138,7 +139,7 @@ class AccountSignup extends React.Component {
                     )}
 
                     <div className={s.acceptLicence}>
-                        <span dangerouslySetInnerHTML={{__html: t.format('privacyTermsFull', `<a href='https://help.raindrop.io/terms' target='_blank'>${t.s('termsOfService')}</a>`, `<a href='https://help.raindrop.io/privacy' target='_blank'>${t.s('privacyPolicy')}</a>`)}} />
+                        <span dangerouslySetInnerHTML={{__html: t.format('privacyTermsFull', `<a href='${links.help.terms}' target='_blank'>${t.s('termsOfService')}</a>`, `<a href='${links.help.privacy}' target='_blank'>${t.s('privacyPolicy')}</a>`)}} />
                     </div>                    
 
                     <Social 
