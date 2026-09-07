@@ -1,7 +1,7 @@
 /* global BigInt, Uint8Array, globalThis */
 
 import assert from 'node:assert/strict'
-import { createHash, createHmac, webcrypto } from 'node:crypto'
+import { createHash, createHmac, createSign, generateKeyPairSync, webcrypto } from 'node:crypto'
 import test from 'node:test'
 import worker from '../src/index.js'
 
@@ -72,6 +72,8 @@ class DB {
         this.sessions = []
         this.tfa = null
         this.challenges = []
+        this.states = []
+        this.identities = []
         this.developer = []
         this.clients = []
         this.codes = []
@@ -117,6 +119,10 @@ class DB {
         }
         const first = async () => {
             if (sql.includes('FROM sessions s')) return session()
+            if (sql.includes('FROM oauth_states'))
+                return this.states.find(s => s.state_hash === v[0] && !s.used_at && s.expires_at > v[1]) || null
+            if (sql.includes('FROM connected_identities WHERE'))
+                return this.identities.find(i => i.provider === v[0] && i.provider_subject === v[1]) || null
             if (sql.includes('FROM users WHERE email'))
                 return this.users.find(u => u.email === v[0]) || null
             if (sql.includes('FROM users WHERE id')) return rowUser()
@@ -256,6 +262,14 @@ class DB {
             }
             if (sql.includes('UPDATE sessions SET last_seen_at'))
                 return { meta: { changes: 1 } }
+            if (sql.includes('UPDATE oauth_states SET used_at')) {
+                const state = this.states.find(s => s.state_hash === v[1] && !s.used_at)
+                if (state) {
+                    state.used_at = v[0]
+                    return { meta: { changes: 1 } }
+                }
+                return { meta: { changes: 0 } }
+            }
             if (sql.includes('INSERT INTO user_tfa')) {
                 this.tfa = {
                     user_id: v[0],
@@ -463,6 +477,16 @@ const req = (path, method = 'GET', body, headers = {}) =>
         }),
         ...(body !== undefined ? { body: JSON.stringify(body) } : {})
     })
+const formReq = (path, values, headers = {}) =>
+    new Request('https://api.example.test' + path, {
+        method: 'POST',
+        headers: new Headers({
+            Cookie: 'rd_session=session-token',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            ...headers
+        }),
+        body: new URLSearchParams(values)
+    })
 test('public identity access controls', async () => {
     const db = new DB()
     await db.init()
@@ -609,11 +633,73 @@ test('Apple authorization requests use form_post for requested identity scopes',
     assert.equal(location.searchParams.get('scope'), 'name email')
 })
 
+test('Apple callback accepts an RS256 ID token from the Apple RSA JWKS', async () => {
+    const db = new DB()
+    await db.init()
+    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
+    const appleKey = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey
+    const applePrivateKey = appleKey.export({ format: 'der', type: 'pkcs8' }).toString('base64')
+    const kid = 'rsa-key'
+    const now = Math.floor(Date.now() / 1000)
+    const header = b64(Buffer.from(JSON.stringify({ alg: 'RS256', kid, typ: 'JWT' })))
+    const payload = b64(Buffer.from(JSON.stringify({
+        iss: 'https://appleid.apple.com',
+        aud: 'com.example.web',
+        exp: now + 300,
+        iat: now,
+        sub: 'apple-subject',
+        email: 'apple@example.test',
+        email_verified: true
+    })))
+    const signingInput = header + '.' + payload
+    const idToken = signingInput + '.' + b64(createSign('RSA-SHA256').update(signingInput).sign(privateKey))
+    db.states.push({
+        state_hash: hmac('apple-state'),
+        purpose: 'apple_login',
+        user_id: null,
+        redirect_path: '/',
+        admission_granted: 1,
+        expires_at: Date.now() + 600000,
+        used_at: null
+    })
+    db.identities.push({ provider: 'apple', provider_subject: 'apple-subject', user_id: 1 })
+    const e = {
+        ...env(db),
+        APPLE_CLIENT_ID: 'com.example.web',
+        APPLE_TEAM_ID: 'TEAM123',
+        APPLE_KEY_ID: 'KEY123',
+        APPLE_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----\n' + applePrivateKey + '\n-----END PRIVATE KEY-----',
+        APPLE_JWKS_URL: 'https://apple.example.test/keys'
+    }
+    const jwk = { ...publicKey.export({ format: 'jwk' }), kid, alg: 'RS256' }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async input => {
+        const target = String(input.url || input)
+        if (target === 'https://appleid.apple.com/auth/token')
+            return new Response(JSON.stringify({ id_token: idToken }), { status: 200 })
+        if (target === e.APPLE_JWKS_URL)
+            return new Response(JSON.stringify({ keys: [jwk] }), { status: 200 })
+        throw new Error('unexpected fetch: ' + target)
+    }
+    try {
+        const response = await worker.fetch(req('/v1/auth/apple/callback?code=apple-code&state=apple-state'), e)
+        assert.equal(response.status, 303)
+        assert.equal(new URL(response.headers.get('Location')).pathname, '/')
+    } finally {
+        globalThis.fetch = originalFetch
+    }
+})
+
 test('oauth authorization code requires exact redirect and S256 PKCE', async () => {
     const db = new DB()
     await db.init()
     const e = env(db)
     let r = await worker.fetch(
+        req('/v1/oauth/client', 'POST', { name: 'missing-redirect' }),
+        e
+    )
+    assert.equal(r.status, 400)
+    r = await worker.fetch(
         req('/v1/oauth/client', 'POST', {
             name: 'app',
             redirects: ['https://client.example/callback']
@@ -634,6 +720,40 @@ test('oauth authorization code requires exact redirect and S256 PKCE', async () 
         ),
         e
     )
+    assert.equal(r.status, 200)
+    assert.match(r.headers.get('Content-Type'), /text\/html/)
+    const consent = await r.text()
+    assert.match(consent, /Authorize app/)
+    assert.doesNotMatch(consent, /name="code"/)
+    const approvalToken = consent.match(/name="approval_token" value="([^"]+)"/)?.[1]
+    assert.ok(approvalToken)
+    r = await worker.fetch(formReq('/v1/oauth/authorize', { decision: 'approve', approval_token: 'tampered' }), e)
+    assert.equal(r.status, 400)
+    r = await worker.fetch(formReq('/v1/oauth/authorize', {
+        approval_token: approvalToken,
+        decision: 'deny'
+    }), e)
+    assert.equal(r.status, 302)
+    let denied = new URL(r.headers.get('Location'))
+    assert.equal(denied.searchParams.get('error'), 'access_denied')
+    assert.equal(denied.searchParams.get('state'), 'x')
+
+    r = await worker.fetch(
+        req(
+            '/v1/oauth/authorize?response_type=code&client_id=' +
+                client.client_id +
+                '&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback&code_challenge=' +
+                challenge +
+                '&code_challenge_method=S256&state=x'
+        ),
+        e
+    )
+    const approval = (await r.text()).match(/name="approval_token" value="([^"]+)"/)?.[1]
+    assert.ok(approval)
+    r = await worker.fetch(formReq('/v1/oauth/authorize', {
+        approval_token: approval,
+        decision: 'approve'
+    }), e)
     assert.equal(r.status, 302)
     const code = new URL(r.headers.get('Location')).searchParams.get('code')
     r = await worker.fetch(

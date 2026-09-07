@@ -749,7 +749,7 @@
             "method": "GET",
             "path": "/v1/oauth/authorize",
             "authentication": "required",
-            "responses": [302, 400, 401, 404, 500]
+            "responses": [200, 302, 400, 401, 404, 500]
         },
         {
             "method": "POST",

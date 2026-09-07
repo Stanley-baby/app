@@ -4733,14 +4733,21 @@ const verifyAppleIdToken = async (env, token, claims) => {
     if (parts.length !== 3 || !claims) return false
     try {
         const header = JSON.parse(new TextDecoder().decode(base64urlToBytes(parts[0])))
-        if (header.alg !== 'ES256' || !header.kid) return false
+        if (!['ES256', 'RS256'].includes(header.alg) || !header.kid) return false
         const response = await fetch(env.APPLE_JWKS_URL || 'https://appleid.apple.com/auth/keys')
         if (!response.ok) return false
         const keys = await response.json()
-        const jwk = (keys.keys || []).find(item => item.kid === header.kid && item.kty === 'EC' && item.crv === 'P-256')
+        const jwk = (keys.keys || []).find(item => item.kid === header.kid &&
+            (header.alg === 'RS256' ? item.kty === 'RSA' : item.kty === 'EC' && item.crv === 'P-256') &&
+            (!item.alg || item.alg === header.alg))
         if (!jwk) return false
-        const key = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
-        const valid = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key,
+        const algorithm = header.alg === 'RS256'
+            ? { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }
+            : { name: 'ECDSA', namedCurve: 'P-256' }
+        const key = await crypto.subtle.importKey('jwk', jwk, algorithm, false, ['verify'])
+        const valid = await crypto.subtle.verify(header.alg === 'RS256'
+            ? { name: 'RSASSA-PKCS1-v1_5' }
+            : { name: 'ECDSA', hash: 'SHA-256' }, key,
             base64urlToBytes(parts[2]), encoder.encode(parts[0] + '.' + parts[1]))
         return valid && claims.iss === 'https://appleid.apple.com' && claims.aud === env.APPLE_CLIENT_ID &&
             Number(claims.exp || 0) > Math.floor(Date.now() / 1000) && Number(claims.iat || 0) <= Math.floor(Date.now() / 1000) + 60
@@ -4943,7 +4950,7 @@ const oauthClientInput = data => {
 
 const createOAuthClient = async (env, userId, data) => {
     const input = oauthClientInput(data)
-    if (!input.name || input.name.length > 100 || input.redirects.length > 20 || !input.redirects.every(validOAuthRedirect)) return null
+    if (!input.name || input.name.length > 100 || !input.redirects.length || input.redirects.length > 20 || !input.redirects.every(validOAuthRedirect)) return null
     const id = 'client_' + randomToken(18)
     const secret = randomToken(32)
     const now = Date.now()
@@ -4962,6 +4969,58 @@ const oauthRedirectResponse = (redirectUri, code, state) => {
     target.searchParams.set('code', code)
     if (state) target.searchParams.set('state', state)
     return target.toString()
+}
+
+const oauthErrorResponse = (redirectUri, errorCode, state) => {
+    const target = new URL(redirectUri)
+    target.searchParams.set('error', errorCode)
+    if (state) target.searchParams.set('state', state)
+    return target.toString()
+}
+
+const createOAuthApprovalToken = async (env, session, input) => {
+    const payload = base64urlText(JSON.stringify({
+        clientId: input.clientId,
+        userId: session.user_id,
+        sessionId: String(session.session_id),
+        redirectUri: input.redirectUri,
+        scopes: input.scopes,
+        codeChallenge: input.codeChallenge,
+        state: input.state,
+        exp: Date.now() + oauthStateMinutes * 60 * 1000
+    }))
+    return payload + '.' + await hmac(payload + '.' + session.token, env.SESSION_SECRET)
+}
+
+const readOAuthApprovalToken = async (env, session, token) => {
+    const parts = String(token || '').split('.')
+    if (parts.length !== 2 || !parts[0] || !parts[1]) return null
+    try {
+        if (!equal(parts[1], await hmac(parts[0] + '.' + session.token, env.SESSION_SECRET))) return null
+        const payload = JSON.parse(new TextDecoder().decode(base64urlToBytes(parts[0])))
+        if (payload.exp <= Date.now() || payload.userId !== session.user_id ||
+            payload.sessionId !== String(session.session_id) || !payload.clientId ||
+            !payload.redirectUri || !Array.isArray(payload.scopes) || !payload.codeChallenge) return null
+        return payload
+    } catch {
+        return null
+    }
+}
+
+const oauthConsentResponse = (request, client, scopes, approvalToken, redirectUri) => {
+    const scopeText = scopes.join(' ')
+    const clientName = htmlEscape(client.name || 'An application')
+    return new Response(`<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>Authorize ${clientName}</title><main><h1>Authorize ${clientName}</h1><p>${clientName} is requesting access to: ${htmlEscape(scopeText)}</p><p>Redirect URI: ${htmlEscape(redirectUri)}</p><form method="post" action="/v1/oauth/authorize"><input type="hidden" name="approval_token" value="${htmlEscape(approvalToken)}"><button type="submit" name="decision" value="deny">Deny</button><button type="submit" name="decision" value="approve">Allow</button></form></main>`, {
+        status: 200,
+        headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Content-Security-Policy': 'default-src \'none\'; form-action \'self\'; base-uri \'none\'; frame-ancestors \'none\'',
+            'X-Content-Type-Options': 'nosniff',
+            'X-Frame-Options': 'DENY',
+            'X-Request-ID': requestId(request)
+        }
+    })
 }
 
 const createAuthorizationCode = async (env, { clientId, userId, redirectUri, scopes, codeChallenge }) => {
@@ -5738,8 +5797,38 @@ export default {
 
             if (url.pathname === '/v1/oauth/authorize' && ['GET', 'POST'].includes(request.method)) {
                 if (session.auth_type === 'bearer') return error('session_required', 403, request, env, 'Authorization requires a device session')
-                const body = request.method === 'POST' ? (await readBody(request)).data : {}
+                const body = request.method === 'POST' ? (await readBody(request)).data || {} : {}
                 const value = name => url.searchParams.get(name) ?? body[name]
+                if (request.method === 'POST') {
+                    const approval = await readOAuthApprovalToken(env, session, body.approval_token || body.approvalToken)
+                    const decision = String(body.decision || '').trim().toLowerCase()
+                    if (!approval || !['approve', 'deny'].includes(decision))
+                        return error('invalid_authorization_request', 400, request, env, 'Authorization approval is invalid or expired')
+                    const client = await selectOAuthClient(env, approval.clientId)
+                    if (!client || client.revoked_at || !oauthRedirects(client.redirect_uris).includes(approval.redirectUri))
+                        return error('invalid_authorization_request', 400, request, env, 'The authorization request is no longer valid')
+                    if (decision === 'deny') {
+                        await recordAudit(env, request, { userId: session.user_id, action: 'oauth.authorization_denied', resourceType: 'oauth_client', resourceId: approval.clientId, outcome: 'success' })
+                        return new Response(null, { status: 302, headers: {
+                            Location: oauthErrorResponse(approval.redirectUri, 'access_denied', approval.state),
+                            'Cache-Control': 'no-store',
+                            'X-Request-ID': requestId(request)
+                        } })
+                    }
+                    const code = await createAuthorizationCode(env, {
+                        clientId: approval.clientId,
+                        userId: session.user_id,
+                        redirectUri: approval.redirectUri,
+                        scopes: approval.scopes,
+                        codeChallenge: approval.codeChallenge
+                    })
+                    await recordAudit(env, request, { userId: session.user_id, action: 'oauth.authorization_granted', resourceType: 'oauth_client', resourceId: approval.clientId, outcome: 'success' })
+                    return new Response(null, { status: 302, headers: {
+                        Location: oauthRedirectResponse(approval.redirectUri, code, approval.state),
+                        'Cache-Control': 'no-store',
+                        'X-Request-ID': requestId(request)
+                    } })
+                }
                 const clientId = String(value('client_id') || value('clientId') || '').trim()
                 const redirectUri = String(value('redirect_uri') || value('redirectUri') || '').trim()
                 const responseType = String(value('response_type') || 'code')
@@ -5752,9 +5841,8 @@ export default {
                     !oauthCodeChallenge(challenge) || challengeMethod !== 'S256' || !scopes || scopes.length > 20 ||
                     !oauthRedirects(client.redirect_uris).some(item => item === redirectUri) || state.length > 512)
                     return error('invalid_authorization_request', 400, request, env, 'The authorization request is invalid')
-                const code = await createAuthorizationCode(env, { clientId, userId: session.user_id, redirectUri, scopes, codeChallenge: challenge })
-                await recordAudit(env, request, { userId: session.user_id, action: 'oauth.authorization_granted', resourceType: 'oauth_client', resourceId: clientId, outcome: 'success' })
-                return new Response(null, { status: 302, headers: { Location: oauthRedirectResponse(redirectUri, code, state), 'Cache-Control': 'no-store', 'X-Request-ID': requestId(request) } })
+                const approvalToken = await createOAuthApprovalToken(env, session, { clientId, redirectUri, scopes, codeChallenge: challenge, state })
+                return oauthConsentResponse(request, client, scopes, approvalToken, redirectUri)
             }
 
             if ((url.pathname === '/v1/developer/tokens' || url.pathname === '/v1/developer/token') && request.method === 'GET') {

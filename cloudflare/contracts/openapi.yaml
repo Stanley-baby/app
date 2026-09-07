@@ -2625,8 +2625,9 @@ paths:
       security:
         - SessionCookie: []
       responses:
+        '200': {description: Explicit OAuth consent form.}
         '302': {description: Authorization code sent to the exact registered redirect URI.}
-        '400': {description: Invalid OAuth request or PKCE parameters.}
+        '400': {description: Invalid OAuth request, PKCE parameters, or consent token.}
         '401': {description: Login required.}
         '404': {description: Public API access is unavailable in Beta.}
         '500':
@@ -2635,8 +2636,8 @@ paths:
       security:
         - SessionCookie: []
       responses:
-        '302': {description: Authorization code sent to the exact registered redirect URI.}
-        '400': {description: Invalid OAuth request or PKCE parameters.}
+        '302': {description: Authorization response sent to the exact registered redirect URI.}
+        '400': {description: Invalid OAuth request, PKCE parameters, or consent token.}
         '401': {description: Login required.}
         '404': {description: Public API access is unavailable in Beta.}
         '500':

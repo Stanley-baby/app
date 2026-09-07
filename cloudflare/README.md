@@ -125,6 +125,7 @@ Public release identity and API access are exposed through the existing Web path
 are returned only at creation, store only a keyed hash, enforce explicit scopes,
 and expire or revoke independently of Device Sessions. OAuth Clients use
 `/v1/oauth/authorize` and `/v1/oauth/access_token` (also available as
-`/v1/oauth/token`) with exact redirect URI matching and mandatory S256 PKCE;
+`/v1/oauth/token`) with an explicit, session-bound consent step, exact redirect
+URI matching, and mandatory S256 PKCE;
 bearer access is accepted by the scoped `/v1` read/write routes in non-Beta
 environments without changing the Beta cookie-session contract.
