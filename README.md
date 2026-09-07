@@ -39,8 +39,8 @@ Web output is written to `dist/web/selfhosted`; extension ZIPs are written to
 browser developer mode. No app-store account or upstream repository is
 required. Keep `cloudflare/wrangler.private.toml` and all secrets uncommitted.
 
-The stable `master` branch is the release baseline. The
-`docs/add-repository-guidelines` branch is the development branch.
+The stable `master` branch is the release baseline. The `develop` branch is
+the development branch.
 
 ## Build
 Be sure to run `npm i` before calling any commands below

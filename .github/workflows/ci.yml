@@ -4,7 +4,7 @@ on:
   push:
     branches:
     - master
-    - docs/add-repository-guidelines
+    - develop
   pull_request:
 
 jobs:
