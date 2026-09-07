@@ -25,7 +25,16 @@ jobs:
       run: npm run test:contract
 
     - name: Lint
-      run: npx eslint src cloudflare/test build
+      run: >-
+        npx eslint
+        build/common.js build/environments.js build/extension.js build/web.js
+        cloudflare/test/build-config.test.js
+        src/config/csp.js src/config/links.js src/data/constants/app.js
+        src/data/modules/format/favicon.js src/data/modules/format/screenshot.js
+        src/data/modules/format/thumb.js src/co/common/webview/browser.js
+        src/co/collections/sharing/public/footer.js src/routes/account/layout.js
+        src/routes/account/redirect.js src/routes/account/signup/index.js
+        src/routes/my/item/tab/cache.js src/target/extension/manifest/index.js
 
     - name: Build self-hosted Web client
       run: npm run build:selfhosted
