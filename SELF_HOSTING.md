@@ -83,3 +83,14 @@ npm run build:extension:selfhosted
 ```
 
 The MIT license and original attribution remain in `LICENSE.md`.
+
+For the staging acceptance flow, run the email-secret wizard from the repository
+root after the operator has verified a staging sender in Resend:
+
+```sh
+bash scripts/setup-selfhosted-staging-secrets.sh
+```
+
+The wizard ensures `SESSION_SECRET` and `ENCRYPTION_KEY` exist, then stores
+`MAIL_FROM` and `RESEND_API_KEY` in the staging Worker secret store; it does
+not write secret values to the repository or `.env`.
