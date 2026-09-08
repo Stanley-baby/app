@@ -27,7 +27,7 @@ class TaskDatabase {
             updated_at: task.updated_at || 1,
             completed_at: task.completed_at || null
         }] : []
-        this.bookmarks = [{ id: 1, user_id: 1, title: '', description: '', removed_at: null }]
+        this.bookmarks = [{ id: 1, user_id: 1, title: '', description: '', cover: '', removed_at: null }]
         this.alerts = []
         this.nextId = 1
     }
@@ -92,11 +92,12 @@ class TaskDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE bookmarks SET')) {
-                const [title, description, updatedAt, id, userId] = values
+                const [title, description, cover, updatedAt, id, userId] = values
                 const bookmark = this.bookmarks.find(item => item.id === id && item.user_id === userId && !item.removed_at)
                 if (!bookmark) return { meta: { changes: 0 } }
                 if (!bookmark.title) bookmark.title = title
                 if (!bookmark.description) bookmark.description = description
+                if (!bookmark.cover) bookmark.cover = cover
                 bookmark.updated_at = updatedAt
                 return { meta: { changes: 1 } }
             }
@@ -228,7 +229,7 @@ test('queue follows redirects, enriches empty fields, and records success', asyn
     globalThis.fetch = async (url, options) => {
         requested.push([String(url), options.redirect])
         if (requested.length === 1) return new Response(null, { status: 302, headers: { Location: 'https://public.example.test/final' } })
-        return new Response('<html><title>Fetched title</title><meta name="description" content="Fetched description"></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })
+        return new Response('<html><title>Fetched title</title><meta name="description" content="Fetched description"><meta property="og:image" content="https://public.example.test/cover.png"></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })
     }
     t.after(() => { globalThis.fetch = originalFetch })
     const message = { body: { taskId: 'task-success' }, ack: () => {}, retry: () => {} }
@@ -238,6 +239,7 @@ test('queue follows redirects, enriches empty fields, and records success', asyn
     assert.equal(db.tasks[0].progress, 100)
     assert.equal(db.bookmarks[0].title, 'Fetched title')
     assert.equal(db.bookmarks[0].description, 'Fetched description')
+    assert.equal(db.bookmarks[0].cover, 'https://public.example.test/cover.png')
 })
 
 test('claimed tasks retain their persisted source URL after D1 projection', async t => {
