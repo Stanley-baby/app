@@ -385,6 +385,7 @@ function* suggestFields({ obj, ignore }) {
 
 	try{
 		const state = yield select()
+		if (!state.config?.ai_suggestions) return
 		const pro = isPro(state)
 		if (!pro && !independentService) return
 

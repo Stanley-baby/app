@@ -449,7 +449,7 @@ export default function AiPage() {
                         {sources.map(source => <a key={source.raindropId} data-raindrop-id={source.raindropId} href={source.url} onClick={event => openSource(event, source)}>{source.title || source.url} — {source.url}</a>)}
                     </div>
                     {error && <p className={s.error}>{error}</p>}
-                    {config?.quota && <small>AI quota: {config.quota.remaining}/{config.quota.limit} remaining; resets {new Date(config.quota.resetAt).toLocaleString()}.</small>}
+                    {config?.quota?.managedBy === 'cloudflare' ? <small>AI quota is managed by Cloudflare.</small> : config?.quota?.limit !== undefined && <small>AI quota: {config.quota.remaining}/{config.quota.limit} remaining; resets {new Date(config.quota.resetAt).toLocaleString()}.</small>}
                     <form onSubmit={send} className={s.form}>
                         <input value={input} onChange={event => setInput(event.target.value)} disabled={sending || !providerAvailable} placeholder='Ask Raindrop AI' aria-label='Message' />
                         <button type='submit' disabled={sending || !input.trim() || !providerAvailable}>{sending ? 'Sending…' : 'Send'}</button>

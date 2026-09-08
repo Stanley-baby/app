@@ -573,8 +573,6 @@ paths:
           description: Bookmark URL or title is invalid.
         '401':
           description: Login required.
-        '429':
-          description: Daily AI quota exhausted.
         '404':
           description: Resource not found for this User.
         '500':
@@ -2227,7 +2225,7 @@ paths:
   /v2/ai/config:
     get:
       responses:
-        '200': {description: Authenticated Workers AI and redacted Custom AI Provider configuration with per-user daily quota.}
+        '200': {description: Authenticated Workers AI and redacted Custom AI Provider configuration; AI capacity is managed by Cloudflare.}
         '401': {description: Login required.}
   /v2/ai/provider:
     get:
@@ -2276,7 +2274,7 @@ paths:
   /v2/ai/quota:
     get:
       responses:
-        '200': {description: Authenticated user's current AI quota and reset time.}
+        '200': {description: Cloudflare-managed AI capacity metadata; application usage limits are not imposed.}
         '401': {description: Login required.}
   /v2/ai/context:
     get:
@@ -2308,7 +2306,6 @@ paths:
         '401': {description: Login required.}
         '404': {description: Bookmark is not owned by or shared with the User.}
         '409': {description: Custom AI Provider is not configured.}
-        '429': {description: Daily AI quota exhausted.}
         '503': {description: Workers AI is unavailable.}
   /v2/ai/description-draft:
     post:
@@ -2329,7 +2326,6 @@ paths:
         '401': {description: Login required.}
         '404': {description: Bookmark is not owned by or shared with the User.}
         '409': {description: Custom AI Provider is not configured.}
-        '429': {description: Daily AI quota exhausted.}
         '503': {description: Workers AI is unavailable.}
   /v2/ai/tools:
     get:
@@ -2469,7 +2465,6 @@ paths:
         '400': {description: Invalid message.}
         '401': {description: Login required.}
         '404': {description: Chat or Bookmark is not owned by the User.}
-        '429': {description: Daily AI quota exhausted; retryAt and resetAt are returned.}
         '503': {description: Selected AI Provider is unavailable.}
   /v2/ai/history:
     get:
