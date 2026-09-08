@@ -1546,7 +1546,7 @@ const zipArchive = entries => {
             numberBytes(0x02014b50, 4), numberBytes(20, 2), numberBytes(20, 2), numberBytes(0x800, 2),
             numberBytes(0, 2), numberBytes(0, 2), numberBytes(0, 2), numberBytes(checksum, 4),
             numberBytes(body.length, 4), numberBytes(body.length, 4), numberBytes(name.length, 2),
-            numberBytes(0, 2), numberBytes(0, 2), numberBytes(0, 2), numberBytes(0, 2), numberBytes(offset, 4), name
+            numberBytes(0, 2), numberBytes(0, 2), numberBytes(0, 2), numberBytes(0, 2), numberBytes(0, 4), numberBytes(offset, 4), name
         ]))
         offset += header.length + body.length
     }

@@ -248,6 +248,17 @@ const zipEntries = bytes => {
         offset = bodyOffset + size
     }
     assert.equal(view.getUint32(offset, true), 0x02014b50)
+
+    const centralNames = []
+    while (view.getUint32(offset, true) === 0x02014b50) {
+        const nameSize = view.getUint16(offset + 28, true)
+        const extraSize = view.getUint16(offset + 30, true)
+        const commentSize = view.getUint16(offset + 32, true)
+        centralNames.push(decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameSize)))
+        offset += 46 + nameSize + extraSize + commentSize
+    }
+    assert.deepEqual(centralNames, [...entries.keys()])
+
     return entries
 }
 
