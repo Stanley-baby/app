@@ -42,7 +42,7 @@ export default function Import() {
 			<Layout type='grid'>
 				<Helmet><title>{t.s('import')}</title></Helmet>
 
-				{process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' ? <BetaMigration /> : <>
+				{process.env.RAINDROP_BUILD_ENVIRONMENT == 'beta' || process.env.RAINDROP_BUILD_ENVIRONMENT == 'selfhosted' ? <BetaMigration /> : <>
 					<File />
 					{/* <Mode /> */}
 					<Parcel />
