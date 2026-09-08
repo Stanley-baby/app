@@ -2913,6 +2913,40 @@
       }
     },
     {
+      "method": "PUT",
+      "path": "/v1/raindrop/:id/cover",
+      "request": {
+        "method": "PUT",
+        "path": "/v1/raindrop/:id/cover",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {}
+      },
+      "responses": [
+        201,
+        400,
+        401,
+        403,
+        404,
+        413,
+        503,
+        500
+      ],
+      "cases": {
+        "success": 201,
+        "authentication": 401,
+        "permission": {
+          "status": 403,
+          "error": "permission_denied",
+          "mode": "resource"
+        },
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
       "method": "PATCH",
       "path": "/v1/collection/:id/sharing/:userId",
       "request": {

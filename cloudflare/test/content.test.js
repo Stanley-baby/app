@@ -48,10 +48,15 @@ class ContentDatabase {
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE sessions SET last_seen_at')) return { meta: { changes: 1 } }
+            if (sql.includes('UPDATE bookmarks SET cover = ?')) {
+                const bookmark = this.bookmarks.find(item => item.id === Number(values[2]) && item.user_id === Number(values[3]))
+                if (bookmark) bookmark.cover = values[0]
+                return { meta: { changes: bookmark ? 1 : 0 } }
+            }
             if (sql.includes('INSERT INTO bookmarks')) {
                 const upload = sql.includes('VALUES (?, ?, ?, ?, ?, \'[]\'')
                 const item = {
-                    id: this.nextBookmarkId++, user_id: values[0], url: values[1], title: values[2], description: values[3], note: values[4],
+                    id: this.nextBookmarkId++, user_id: values[0], url: values[1], title: values[2], description: values[3], note: values[4], cover: '',
                     highlights: upload ? '[]' : values[5], created_at: upload ? values[5] : values[6], updated_at: upload ? values[6] : values[7], collection_id: upload ? values[7] : values[8], tags: upload ? values[8] : values[9], removed_at: null
                 }
                 this.bookmarks.push(item)
@@ -193,13 +198,15 @@ test('attachments can bypass scanning when the Beta switch is disabled', async (
 
 test('capture tasks are created only by an explicit request and are safety checked', async t => {
     const db = new ContentDatabase()
-    db.bookmarks.push({ id: 1, user_id: 1, url: 'https://public.example.test/page', title: 'Page', description: '', note: '', highlights: '[]', collection_id: -1, tags: '[]', removed_at: null })
+    db.bookmarks.push({ id: 1, user_id: 1, url: 'https://public.example.test/page', title: 'Page', description: '', note: '', cover: '', highlights: '[]', collection_id: -1, tags: '[]', created_at: 1, updated_at: 1, removed_at: null })
     db.nextBookmarkId = 2
     const bucket = new MemoryBucket()
     const queue = { messages: [], send: async message => queue.messages.push(message) }
     let renders = 0
-    const env = { ...envFor(db, bucket, queue), BROWSER_RENDERING: { quickAction: async action => {
+    let screenshotOptions
+    const env = { ...envFor(db, bucket, queue), BROWSER_RENDERING: { quickAction: async (action, options) => {
         renders++
+        if (action === 'screenshot') screenshotOptions = options
         return action === 'screenshot'
             ? new Response(Uint8Array.from([137, 80, 78, 71]), { headers: { 'Content-Type': 'image/png' } })
             : Response.json({ success: true, result: '<html>captured</html>' })
@@ -223,6 +230,7 @@ test('capture tasks are created only by an explicit request and are safety check
     assert.equal(screenshot.status, 202)
     await worker.queue({ messages: [{ body: queue.messages[2], ack: () => {}, retry: () => assert.fail('unexpected retry') }] }, env)
     assert.equal(renders, 2)
+    assert.equal('allowRequestPattern' in screenshotOptions, false)
     const status = await worker.fetch(request('/v1/raindrop/1/capture', { headers: { Cookie: cookie } }), env)
     const captures = (await status.json()).items
     assert.equal(captures.every(item => item.status === 'cleared'), true)
@@ -231,6 +239,50 @@ test('capture tasks are created only by an explicit request and are safety check
     assert.equal(captures.find(item => item.kind === 'screenshot').contentType, 'image/png')
     const storedPng = bucket.objects.get(db.contents.find(item => item.kind === 'screenshot').object_key)
     assert.deepEqual([...storedPng.slice(0, 4)], [137, 80, 78, 71])
+    assert.equal(db.bookmarks[0].cover, 'https://api.example.test/v1/content/' + db.contents.find(item => item.kind === 'screenshot').id + '/download')
+})
+
+test('capture screenshots clear and persist a cover when scanning is disabled', async () => {
+    const db = new ContentDatabase()
+    db.bookmarks.push({ id: 1, user_id: 1, url: 'https://public.example.test/page', title: 'Page', description: '', note: '', cover: '', highlights: '[]', collection_id: -1, tags: '[]', created_at: 1, updated_at: 1, removed_at: null })
+    const bucket = new MemoryBucket()
+    const queue = { messages: [], send: async message => queue.messages.push(message) }
+    const env = {
+        ...envFor(db, bucket, queue, false),
+        ATTACHMENT_SCAN_ENABLED: 'false',
+        BROWSER_RENDERING: { quickAction: async () => new Response(Uint8Array.from([137, 80, 78, 71]), { headers: { 'Content-Type': 'image/png' } }) }
+    }
+    const capture = await worker.fetch(request('/v1/raindrop/1/capture', { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'screenshot' }) }), env)
+    assert.equal(capture.status, 202)
+    const body = await capture.json()
+    await worker.queue({ messages: [{ body: queue.messages[0], ack: () => {}, retry: () => assert.fail('unexpected retry') }] }, env)
+    assert.equal(db.bookmarks[0].cover, 'https://api.example.test/v1/content/' + body.content.id + '/download')
+    const downloaded = await worker.fetch(request('/v1/content/' + body.content.id + '/download', { headers: { Cookie: cookie } }), env)
+    assert.equal(downloaded.status, 200)
+    assert.deepEqual([...new Uint8Array(await downloaded.arrayBuffer())], [137, 80, 78, 71])
+})
+
+test('cover uploads store a screenshot content object and update the Bookmark cover', async t => {
+    const db = new ContentDatabase()
+    db.bookmarks.push({ id: 1, user_id: 1, url: 'https://public.example.test/page', title: 'Page', description: '', note: '', cover: '', highlights: '[]', collection_id: -1, tags: '[]', created_at: 1, updated_at: 1, removed_at: null })
+    db.nextBookmarkId = 2
+    const bucket = new MemoryBucket()
+    const queue = { messages: [], send: async message => queue.messages.push(message) }
+    const env = envFor(db, bucket, queue)
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async url => url === env.SCANNER_URL ? Response.json({ status: 'cleared' }) : originalFetch(url)
+    t.after(() => { globalThis.fetch = originalFetch })
+
+    const form = new FormData()
+    form.append('cover', new Blob([Uint8Array.from([137, 80, 78, 71])], { type: 'image/png' }), 'capture.png')
+    const uploaded = await worker.fetch(request('/v1/raindrop/1/cover', { method: 'PUT', headers: { Cookie: cookie }, body: form }), env)
+    assert.equal(uploaded.status, 201)
+    const body = await uploaded.json()
+    assert.equal(body.content.kind, 'screenshot')
+    assert.equal(queue.messages.length, 1)
+
+    await worker.queue({ messages: [{ body: queue.messages[0], ack: () => {}, retry: () => assert.fail('unexpected retry') }] }, env)
+    assert.equal(db.bookmarks.find(item => item.id === 1).cover, 'https://api.example.test/v1/content/' + body.content.id + '/download')
 })
 
 test('scanner rejection keeps content quarantined and hides it from other users', async t => {

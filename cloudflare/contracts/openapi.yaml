@@ -1760,6 +1760,36 @@ paths:
         '503': {description: Content storage or safety task unavailable.}
         '500':
           $ref: '#/components/responses/InternalError'
+  /v1/raindrop/{id}/cover:
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [bookmarks:write]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: integer}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [cover]
+              properties:
+                cover: {type: string, format: binary}
+      responses:
+        '201': {description: Screenshot cover stored and cleared or quarantined according to the safety switch.}
+        '400': {description: Invalid upload.}
+        '401': {description: Login required.}
+        '403': {description: Editor access required.}
+        '404': {description: Bookmark not found.}
+        '413': {description: Upload exceeds the configured capacity.}
+        '503': {description: Content storage or safety task unavailable.}
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/raindrop/{id}/content:
     get:
       security:

@@ -110,9 +110,9 @@ test('success fixtures execute every v1 route with an authenticated verified set
             if (query.toString()) path += '?' + query
             const headers = new Headers({ Cookie: 'rd_session=fixture-session' })
             let body
-            if (['PUT /v1/raindrop/file', 'POST /v1/content/upload', 'PUT /v1/content/upload', 'POST /v1/raindrop/:id/attachments', 'PUT /v1/raindrop/:id/attachments'].includes(item.method + ' ' + item.path)) {
+            if (['PUT /v1/raindrop/file', 'POST /v1/content/upload', 'PUT /v1/content/upload', 'POST /v1/raindrop/:id/attachments', 'PUT /v1/raindrop/:id/attachments', 'PUT /v1/raindrop/:id/cover'].includes(item.method + ' ' + item.path)) {
                 const form = new FormData()
-                form.set('file', new Blob(['fixture'], { type: 'text/plain' }), 'fixture.txt')
+                form.set(item.path.endsWith('/cover') ? 'cover' : 'file', new Blob(['fixture'], { type: 'text/plain' }), 'fixture.txt')
                 if (!item.path.endsWith('/raindrop/file')) form.set('bookmarkId', '1')
                 body = form
             } else if (!['GET', 'HEAD'].includes(item.method)) {

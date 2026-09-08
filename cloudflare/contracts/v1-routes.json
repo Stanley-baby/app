@@ -620,6 +620,12 @@
             "responses": [201, 400, 401, 403, 404, 413, 503, 500]
         },
         {
+            "method": "PUT",
+            "path": "/v1/raindrop/:id/cover",
+            "authentication": "required",
+            "responses": [201, 400, 401, 403, 404, 413, 503, 500]
+        },
+        {
             "method": "GET",
             "path": "/v1/auth/apple",
             "authentication": "none",
