@@ -1236,14 +1236,15 @@ const processMetadataTask = async (env, taskId) => {
 
     try {
         const metadata = await fetchPageMetadata(claimed.task.source_url, env)
-        const bookmark = await env.DB.prepare('SELECT id, url, title, description FROM bookmarks WHERE id = ? AND user_id = ? AND removed_at IS NULL AND url = ?')
+        const bookmark = await env.DB.prepare('SELECT id, url, title, description, cover FROM bookmarks WHERE id = ? AND user_id = ? AND removed_at IS NULL AND url = ?')
             .bind(claimed.task.bookmark_id, claimed.task.user_id, claimed.task.source_url).first()
-        if (bookmark && (metadata.title && !bookmark.title || metadata.description && !bookmark.description)) {
+        if (bookmark && (metadata.title && !bookmark.title || metadata.description && !bookmark.description || metadata.cover && !bookmark.cover)) {
             await env.DB.prepare(`UPDATE bookmarks SET
                 title = CASE WHEN title = '' THEN ? ELSE title END,
                 description = CASE WHEN description = '' THEN ? ELSE description END,
+                cover = CASE WHEN cover = '' THEN ? ELSE cover END,
                 updated_at = ? WHERE id = ? AND user_id = ? AND removed_at IS NULL`).bind(
-                metadata.title || '', metadata.description || '', Date.now(), claimed.task.bookmark_id, claimed.task.user_id).run()
+                metadata.title || '', metadata.description || '', metadata.cover || '', Date.now(), claimed.task.bookmark_id, claimed.task.user_id).run()
         }
         const now = Date.now()
         await env.DB.prepare(`UPDATE background_tasks SET status = 'succeeded', progress = 100,
