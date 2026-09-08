@@ -131,7 +131,7 @@
             "method": "POST",
             "path": "/v1/raindrop/suggest",
             "authentication": "required",
-            "responses": [200, 400, 401, 404, 429, 500]
+            "responses": [200, 400, 401, 404, 500]
         },
         {
             "method": "GET",

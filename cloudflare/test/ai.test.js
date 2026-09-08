@@ -23,15 +23,12 @@ class AiDatabase {
         this.sessions = []
         this.chats = []
         this.messages = []
-        this.usage = []
-        this.globalUsage = []
         this.bookmarks = []
         this.collections = []
         this.proposals = []
         this.standingApprovals = []
         this.providers = []
         this.alerts = []
-        this.quotaFailure = false
         this.nextMessageId = 1
     }
 
@@ -40,6 +37,7 @@ class AiDatabase {
     }
 
     prepare(sql) {
+        if (sql.includes('ai_usage')) throw new Error('application AI quota must not be queried')
         let values = []
         const first = async () => {
             if (sql.includes('FROM sessions s')) {
@@ -47,9 +45,6 @@ class AiDatabase {
                 const user = this.users.find(item => item.id === session?.user_id)
                 return session && user ? { ...session, session_id: session.id, ...user, federated_only: 0, google_enabled: false } : null
             }
-            if (this.quotaFailure && sql.includes('ai_usage')) throw new Error('quota storage unavailable')
-            if (sql.includes('FROM ai_usage_counters')) return this.usage.find(item => item.user_id === values[0] && item.window_start === values[1]) || null
-            if (sql.includes('FROM ai_global_usage_counters')) return this.globalUsage.find(item => item.window_start === values[0]) || null
             if (sql.includes('FROM ai_action_proposals WHERE id')) return this.proposals.find(item => item.id === values[0] && item.user_id === values[1]) || null
             if (sql.includes('FROM ai_standing_approvals') && sql.includes('id = ?') && sql.includes('user_id = ?') && !sql.includes('tool_name = ?')) return this.standingApprovals.find(item => item.id === values[0] && item.user_id === values[1]) || null
             if (sql.includes('FROM ai_standing_approvals') && sql.includes('user_id = ?') && !sql.includes('WHERE id')) return this.standingApprovals.find(item =>
@@ -76,41 +71,6 @@ class AiDatabase {
             return { results: [] }
         }
         const run = async () => {
-            if (sql.includes('INSERT INTO ai_usage_counters')) {
-                const [userId, windowStart, updatedAt, limit] = values
-                const row = this.usage.find(item => item.user_id === userId && item.window_start === windowStart)
-                if (row) {
-                    if (row.units + 1 > limit) return { meta: { changes: 0 } }
-                    row.units++
-                    row.updated_at = updatedAt
-                } else this.usage.push({ user_id: userId, window_start: windowStart, units: 1, updated_at: updatedAt })
-                return { meta: { changes: 1 } }
-            }
-            if (sql.includes('INSERT INTO ai_global_usage_counters')) {
-                if (this.quotaFailure) throw new Error('quota storage unavailable')
-                const [windowStart, updatedAt, limit] = values
-                const row = this.globalUsage.find(item => item.window_start === windowStart)
-                if (row) {
-                    if (row.units + 1 > limit) return { meta: { changes: 0 } }
-                    row.units++
-                    row.updated_at = updatedAt
-                } else this.globalUsage.push({ window_start: windowStart, units: 1, updated_at: updatedAt })
-                return { meta: { changes: 1 } }
-            }
-            if (sql.includes('UPDATE ai_usage_counters SET units = units - 1')) {
-                const row = this.usage.find(item => item.user_id === values[1] && item.window_start === values[2])
-                if (!row || !row.units) return { meta: { changes: 0 } }
-                row.units--
-                row.updated_at = values[0]
-                return { meta: { changes: 1 } }
-            }
-            if (sql.includes('UPDATE ai_global_usage_counters SET units = units - 1')) {
-                const row = this.globalUsage.find(item => item.window_start === values[1])
-                if (!row || !row.units) return { meta: { changes: 0 } }
-                row.units--
-                row.updated_at = values[0]
-                return { meta: { changes: 1 } }
-            }
             if (sql.includes('INSERT INTO ai_chats')) {
                 this.chats.push({ id: values[0], user_id: values[1], title: values[2], created_at: values[3], updated_at: values[4] })
                 return { meta: { changes: 1 } }
@@ -233,8 +193,6 @@ const environment = async () => {
             APP_ORIGIN: 'https://app.example.test',
             AI_PAGE_ORIGIN: 'https://ai.example.test/ai',
             CORS_ORIGINS: 'https://app.example.test',
-            AI_DAILY_QUOTA: '1',
-            AI_GLOBAL_DAILY_QUOTA: '2',
             AI_MODEL: '@cf/test-model',
             AI: {
                 run: async (...args) => {
@@ -248,12 +206,17 @@ const environment = async () => {
     }
 }
 
-test('AI config, streaming chat, private history, deletion, and quota recovery', async () => {
+test('AI config, streaming chat, private history, and deletion use Cloudflare-managed capacity', async () => {
     const { env, db, calls } = await environment()
+    env.AI_DAILY_QUOTA = '0'
+    env.AI_GLOBAL_DAILY_QUOTA = '0'
     const config = await worker.fetch(request('/v2/ai/config', { headers: { Origin: 'https://ai.example.test' } }), env)
     assert.equal(config.status, 200)
     assert.equal(config.headers.get('Access-Control-Allow-Origin'), 'https://ai.example.test')
-    assert.equal((await config.json()).quota.limit, 1)
+    assert.deepEqual((await config.json()).quota, { managedBy: 'cloudflare' })
+    const quota = await worker.fetch(request('/v2/ai/quota'), env)
+    assert.equal(quota.status, 200)
+    assert.deepEqual((await quota.json()).quota, { managedBy: 'cloudflare' })
 
     const stream = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Hello AI' }) }), env)
     assert.equal(stream.status, 200)
@@ -270,13 +233,10 @@ test('AI config, streaming chat, private history, deletion, and quota recovery',
     assert.equal(chat.messages.length, 2)
     assert.deepEqual(chat.messages.map(item => item.role), ['user', 'assistant'])
 
-    const exhausted = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ chatId: chat.id, message: 'Again' }) }), env)
-    assert.equal(exhausted.status, 429)
-    const exhaustedBody = await exhausted.json()
-    assert.equal(exhaustedBody.error, 'ai_quota_exceeded')
-    assert.ok(exhaustedBody.retryAt)
-    assert.ok(exhaustedBody.resetAt)
-    assert.equal(calls.length, 1)
+    const second = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ chatId: chat.id, message: 'Again' }) }), env)
+    assert.equal(second.status, 200)
+    assert.match(await second.text(), /"done":true/)
+    assert.equal(calls.length, 2)
 
     const otherHistory = await worker.fetch(request('/v2/ai/history', { headers: { Cookie: 'rd_session=two' } }), env)
     assert.deepEqual((await otherHistory.json()).items, [])
@@ -292,45 +252,6 @@ test('AI config, streaming chat, private history, deletion, and quota recovery',
     assert.deepEqual((await afterDelete.json()).items, [])
     assert.equal(db.chats.length, 0)
     assert.equal(db.messages.length, 0)
-})
-
-test('AI quota storage failures fail closed', async () => {
-    const { env } = await environment()
-    env.DB.quotaFailure = true
-    const response = await worker.fetch(request('/v2/ai/config'), env)
-    assert.equal(response.status, 503)
-    assert.equal((await response.json()).error, 'ai_quota_unavailable')
-})
-
-test('AI global quota does not charge denied users', async () => {
-    const { env, db } = await environment()
-    env.AI_GLOBAL_DAILY_QUOTA = '1'
-    const first = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'First' }) }), env)
-    assert.equal(first.status, 200)
-    await first.text()
-    const second = await worker.fetch(request('/v2/ai/chat', {
-        method: 'POST',
-        headers: { Cookie: 'rd_session=two' },
-        body: JSON.stringify({ message: 'Second' })
-    }), env)
-    assert.equal(second.status, 429)
-    assert.equal((await second.json()).quota.scope, 'global')
-    assert.deepEqual(db.usage.map(item => [item.user_id, item.units]), [[1, 1]])
-    assert.equal(db.globalUsage[0].units, 1)
-})
-
-test('AI capacity thresholds emit content-free alerts', async () => {
-    const { env, db } = await environment()
-    const response = await worker.fetch(request('/v2/ai/chat', {
-        method: 'POST',
-        body: JSON.stringify({ message: 'Threshold check' })
-    }), env)
-    assert.equal(response.status, 200)
-    await response.text()
-    const threshold = db.alerts.find(item => item.kind === 'ai_quota_threshold')
-    assert.ok(threshold)
-    assert.match(threshold.metadata, /"scope":"user"/)
-    assert.doesNotMatch(threshold.metadata, /Threshold check|Bookmark|attachment/i)
 })
 
 test('AI grounds natural-language prompts in authorized bookmark search results', async () => {
@@ -411,7 +332,6 @@ test('Custom AI Provider validates public HTTPS endpoints and keeps probes metad
         assert.match(stream, /Custom hello/)
         assert.equal(calls[1].body.model, 'custom-model')
         assert.ok(calls[1].body.tools.every(item => item.type === 'function'))
-        assert.deepEqual(db.usage, [])
 
         globalThis.fetch = async () => { throw new Error('provider down') }
         const failed = await worker.fetch(request('/v2/ai/chat', {
@@ -576,8 +496,6 @@ test('AI context endpoint exposes only authorized Bookmark metadata', async () =
 
 test('legacy Bookmark suggestion endpoints return the client-compatible item shape', async () => {
     const { env, db } = await environment()
-    env.AI_DAILY_QUOTA = '5'
-    env.AI_GLOBAL_DAILY_QUOTA = '5'
     db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/article', title: 'Article', description: '', note: '', highlights: '[]', tags: '[]' })
     const response = await worker.fetch(request('/v1/raindrop/7/suggest'), env)
     assert.equal(response.status, 200)
@@ -615,8 +533,6 @@ test('AI read tools return only authorized context and catalog writes as proposa
 
 test('AI chat tool calls execute authorized reads and create pending write proposals', async () => {
     const { env, db, calls } = await environment()
-    env.AI_DAILY_QUOTA = '5'
-    env.AI_GLOBAL_DAILY_QUOTA = '5'
     db.bookmarks.push({ id: 7, user_id: 1, url: 'https://example.test/tool', title: 'Tool bookmark', description: 'Original', note: '', highlights: '[]', tags: '[]', collection_id: -1, created_at: Date.now(), updated_at: Date.now() })
     env.AI.run = async (...args) => {
         calls.push(args)

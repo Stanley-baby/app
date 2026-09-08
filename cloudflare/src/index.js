@@ -3024,8 +3024,6 @@ const usageLimit = env => integerEnv(env, ['USAGE_QUOTA_DAILY', 'USAGE_QUOTA', '
 const aiDefaultModel = '@cf/meta/llama-3.3-70b-instruct-fp8-fast'
 const aiMessageLimit = 8000
 const aiHistoryLimit = 50
-const aiDailyLimit = env => integerEnv(env, ['AI_DAILY_QUOTA'], 20)
-const aiGlobalDailyLimit = env => integerEnv(env, ['AI_GLOBAL_DAILY_QUOTA'], 10000)
 const aiModel = env => String(env.AI_MODEL || aiDefaultModel)
 const aiProviderModelLimit = 200
 const aiProviderKeyLimit = 4096
@@ -3143,131 +3141,7 @@ const customAiMessages = (messages, tools) => ({
     ...(tools?.length ? { tools: aiProviderTools(tools), tool_choice: 'auto' } : {})
 })
 
-const aiWindow = now => {
-    const windowStart = Math.floor(now / usageWindowMs) * usageWindowMs
-    return { windowStart, resetAt: windowStart + usageWindowMs }
-}
-
-const readAiQuota = async (env, userId) => {
-    const limit = aiDailyLimit(env)
-    const globalLimit = aiGlobalDailyLimit(env)
-    const { windowStart, resetAt } = aiWindow(Date.now())
-    try {
-        const [row, global] = await Promise.all([
-            env.DB.prepare('SELECT units FROM ai_usage_counters WHERE user_id = ? AND window_start = ?').bind(userId, windowStart).first(),
-            env.DB.prepare('SELECT units FROM ai_global_usage_counters WHERE window_start = ?').bind(windowStart).first()
-        ])
-        const used = Number(row?.units || 0)
-        const globalUsed = Number(global?.units || 0)
-        return {
-            used,
-            limit,
-            remaining: Math.max(0, limit - used),
-            resetAt,
-            global: {
-                used: globalUsed,
-                limit: globalLimit,
-                remaining: Math.max(0, globalLimit - globalUsed)
-            }
-        }
-    } catch {
-        return { error: 'ai_quota_unavailable', resetAt }
-    }
-}
-
-const consumeAiQuota = async (env, request, userId) => {
-    const limit = aiDailyLimit(env)
-    const globalLimit = aiGlobalDailyLimit(env)
-    const now = Date.now()
-    const { windowStart, resetAt } = aiWindow(now)
-    try {
-        const [current, globalCurrent] = await Promise.all([
-            env.DB.prepare('SELECT units FROM ai_usage_counters WHERE user_id = ? AND window_start = ?').bind(userId, windowStart).first(),
-            env.DB.prepare('SELECT units FROM ai_global_usage_counters WHERE window_start = ?').bind(windowStart).first()
-        ])
-        const previous = Number(current?.units || 0)
-        const globalPrevious = Number(globalCurrent?.units || 0)
-        const blockedScope = previous >= limit ? 'user' : globalPrevious >= globalLimit ? 'global' : null
-        if (blockedScope) {
-            const retryAfterMs = resetAt - now
-            await recordAudit(env, request, { userId, action: 'ai.quota_exceeded', resourceType: 'ai_quota', outcome: 'blocked' })
-            await recordAlert(env, request, {
-                userId,
-                kind: 'ai_quota_exceeded',
-                severity: 'warning',
-                metadata: { scope: blockedScope, limit: blockedScope === 'user' ? limit : globalLimit, used: blockedScope === 'user' ? previous : globalPrevious, retryAfter: Math.ceil(retryAfterMs / 1000) }
-            })
-            return {
-                allowed: false,
-                scope: blockedScope,
-                used: previous,
-                limit,
-                remaining: 0,
-                resetAt,
-                retryAfterMs,
-                global: { used: globalPrevious, limit: globalLimit, remaining: 0 }
-            }
-        }
-
-        const userStatement = env.DB.prepare(`INSERT INTO ai_usage_counters (user_id, window_start, units, updated_at)
-            VALUES (?, ?, 1, ?)
-            ON CONFLICT(user_id, window_start) DO UPDATE SET units = units + 1, updated_at = excluded.updated_at
-            WHERE ai_usage_counters.units + 1 <= ?`).bind(userId, windowStart, now, limit)
-        const globalStatement = env.DB.prepare(`INSERT INTO ai_global_usage_counters (window_start, units, updated_at)
-            VALUES (?, 1, ?)
-            ON CONFLICT(window_start) DO UPDATE SET units = units + 1, updated_at = excluded.updated_at
-            WHERE ai_global_usage_counters.units + 1 <= ?`).bind(windowStart, now, globalLimit)
-        const results = env.DB.batch
-            ? await env.DB.batch([userStatement, globalStatement])
-            : [await userStatement.run(), await globalStatement.run()]
-        const userChanged = Number(results[0]?.meta?.changes || 0) === 1
-        const globalChanged = Number(results[1]?.meta?.changes || 0) === 1
-        if (!userChanged || !globalChanged) {
-            if (userChanged)
-                await env.DB.prepare(`UPDATE ai_usage_counters SET units = units - 1, updated_at = ?
-                    WHERE user_id = ? AND window_start = ? AND units > 0`).bind(now, userId, windowStart).run()
-            if (globalChanged)
-                await env.DB.prepare(`UPDATE ai_global_usage_counters SET units = units - 1, updated_at = ?
-                    WHERE window_start = ? AND units > 0`).bind(now, windowStart).run()
-            const retryAfterMs = resetAt - now
-            await recordAudit(env, request, { userId, action: 'ai.quota_exceeded', resourceType: 'ai_quota', outcome: 'blocked' })
-            await recordAlert(env, request, {
-                userId,
-                kind: 'ai_quota_exceeded',
-                severity: 'warning',
-                metadata: { scope: !globalChanged ? 'global' : 'user', limit, used: previous, retryAfter: Math.ceil(retryAfterMs / 1000) }
-            })
-            return { allowed: false, scope: !globalChanged ? 'global' : 'user', used: previous, limit, remaining: 0, resetAt, retryAfterMs, global: { used: globalPrevious, limit: globalLimit, remaining: 0 } }
-        }
-
-        const userUsed = previous + 1
-        const globalUsed = globalPrevious + 1
-        const userThreshold = Math.max(1, Math.ceil(limit * 0.8))
-        if (previous < userThreshold && userUsed >= userThreshold)
-            await recordAlert(env, request, {
-                userId,
-                kind: 'ai_quota_threshold',
-                metadata: { scope: 'user', limit, used: userUsed, remaining: Math.max(0, limit - userUsed) }
-            })
-        const globalThreshold = Math.max(1, Math.ceil(globalLimit * 0.8))
-        if (globalPrevious < globalThreshold && globalUsed >= globalThreshold)
-            await recordAlert(env, request, {
-                kind: 'ai_quota_threshold',
-                metadata: { scope: 'global', limit: globalLimit, used: globalUsed, remaining: Math.max(0, globalLimit - globalUsed) }
-            })
-
-        return {
-            allowed: true,
-            used: userUsed,
-            limit,
-            remaining: Math.max(0, limit - userUsed),
-            resetAt,
-            global: { used: globalUsed, limit: globalLimit, remaining: Math.max(0, globalLimit - globalUsed) }
-        }
-    } catch {
-        return { error: 'ai_quota_unavailable', resetAt }
-    }
-}
+const cloudflareAiQuota = () => ({ managedBy: 'cloudflare' })
 
 const aiChatId = () => randomToken(18)
 
@@ -3467,19 +3341,6 @@ const aiFallbackSuggestions = (candidates, bookmark) => {
     return { collections: collections.slice(0, 5), tags, newTags }
 }
 
-const aiQuota = async (request, env, userId) => {
-    const quota = await consumeAiQuota(env, request, userId)
-    if (quota.error)
-        return { response: error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.') }
-    if (!quota.allowed)
-        return { response: retryableError('ai_quota_exceeded', request, env, 'Daily AI quota reached. Retry after the quota resets.', quota.retryAfterMs, {
-            quota: { used: quota.used, limit: quota.limit, remaining: quota.remaining, resetAt: new Date(quota.resetAt).toISOString(), global: quota.global, scope: quota.scope },
-            resetAt: new Date(quota.resetAt).toISOString(),
-            retryAt: new Date(quota.resetAt).toISOString()
-        }) }
-    return { quota }
-}
-
 const aiCollectText = async result => {
     let text = ''
     for await (const event of aiResultChunks(result)) text += event.delta || ''
@@ -3517,11 +3378,7 @@ const aiSuggestions = async (request, env, userId, { legacy = false, bookmarkId 
     if (providerName === 'custom' && !customProvider)
         return error('ai_provider_not_configured', 409, request, env, 'Configure and test a Custom AI Provider before using it')
     let output = ''
-    let quota
     if (providerName === 'custom' || env.AI?.run) {
-        const charged = providerName === 'custom' ? null : await aiQuota(request, env, userId)
-        if (charged?.response) return charged.response
-        quota = charged?.quota
         try {
             const result = await runAiProvider(env, providerName, [
                 { role: 'system', content: `Return JSON only in ${language}. Use only the supplied authorized Bookmark and candidate IDs/tags.` },
@@ -3546,8 +3403,7 @@ const aiSuggestions = async (request, env, userId, { legacy = false, bookmarkId 
         language,
         suggestions,
         ...(legacy ? { item } : {}),
-        sources: context.sources || [],
-        ...(quota ? { quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } } : {})
+        sources: context.sources || []
     }, 200, request, env)
 }
 
@@ -3565,8 +3421,6 @@ const aiDescriptionDraft = async (request, env, userId) => {
         return error('ai_provider_not_configured', 409, request, env, 'Configure and test a Custom AI Provider before using it')
     if (providerName === 'workers_ai' && !env.AI?.run)
         return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
-    const charged = providerName === 'custom' ? null : await aiQuota(request, env, userId)
-    if (charged?.response) return charged.response
     const language = aiLanguage(data.language || data.lang, request)
     try {
         const result = await runAiProvider(env, providerName, [
@@ -3575,8 +3429,7 @@ const aiDescriptionDraft = async (request, env, userId) => {
         ], {}, customProvider)
         const draft = (await aiCollectText(result)).slice(0, 10000).trim()
         if (!draft) return error('ai_provider_unavailable', 503, request, env, providerName === 'custom' ? 'Custom AI Provider returned an empty description' : 'Workers AI returned an empty description')
-        return json({ result: true, language, draft, sources: context.sources,
-            ...(charged ? { quota: { ...charged.quota, resetAt: new Date(charged.quota.resetAt).toISOString() } } : {}) }, 200, request, env)
+        return json({ result: true, language, draft, sources: context.sources }, 200, request, env)
     } catch {
         return error('ai_provider_unavailable', 503, request, env,
             providerName === 'custom' ? 'Custom AI Provider is temporarily unavailable. Choose another provider.' : 'Workers AI is temporarily unavailable. Retry the request.')
@@ -4361,9 +4214,6 @@ const aiRoute = async (request, env, url) => {
     if (providerResponse) return providerResponse
 
     if (url.pathname === '/v2/ai/config' && request.method === 'GET') {
-        const quota = await readAiQuota(env, userId)
-        if (quota.error)
-            return error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.')
         const custom = await selectAiProvider(env, userId)
         return json({
             result: true,
@@ -4373,15 +4223,12 @@ const aiRoute = async (request, env, url) => {
             workersAi: { available: Boolean(env.AI?.run), model: aiModel(env) },
             custom: publicAiProvider(custom),
             aiPageOrigin: env.AI_PAGE_ORIGIN || null,
-            quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() }
+            quota: cloudflareAiQuota()
         }, 200, request, env)
     }
 
     if (url.pathname === '/v2/ai/quota' && request.method === 'GET') {
-        const quota = await readAiQuota(env, userId)
-        if (quota.error)
-            return error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.')
-        return json({ result: true, quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } }, 200, request, env)
+        return json({ result: true, quota: cloudflareAiQuota() }, 200, request, env)
     }
 
     if (url.pathname === '/v2/ai/context' && request.method === 'GET') {
@@ -4481,16 +4328,6 @@ const aiChat = async (request, env, userId) => {
             return error('ai_provider_not_configured', 409, request, env, 'Configure and test a Custom AI Provider before using it')
         if (providerName === 'workers_ai' && (!env.AI || typeof env.AI.run !== 'function'))
             return error('ai_provider_unavailable', 503, request, env, 'Workers AI is temporarily unavailable. Retry the request.')
-        const quota = providerName === 'custom' ? null : await consumeAiQuota(env, request, userId)
-        if (quota?.error)
-            return error(quota.error, 503, request, env, 'AI quota is temporarily unavailable. Retry the request.')
-        if (quota && !quota.allowed)
-            return retryableError('ai_quota_exceeded', request, env, 'Daily AI quota reached. Retry after the quota resets.', quota.retryAfterMs, {
-                quota: { used: quota.used, limit: quota.limit, remaining: quota.remaining, resetAt: new Date(quota.resetAt).toISOString(), global: quota.global, scope: quota.scope },
-                resetAt: new Date(quota.resetAt).toISOString(),
-                retryAt: new Date(quota.resetAt).toISOString()
-            })
-
         if (!chat) {
             chat = { id: aiChatId(), user_id: userId, title: message.slice(0, 120), created_at: now, updated_at: now }
             await env.DB.prepare('INSERT INTO ai_chats (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
@@ -4591,8 +4428,7 @@ const aiChat = async (request, env, userId) => {
                         await env.DB.prepare('UPDATE ai_chats SET updated_at = ? WHERE id = ? AND user_id = ?')
                             .bind(Date.now(), chat.id, userId).run()
                         await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'success' })
-                        enqueue(aiEvent({ chatId: chat.id, done: true, sources: context.sources, citations: context.sources,
-                            ...(quota ? { quota: { ...quota, resetAt: new Date(quota.resetAt).toISOString() } } : {}) }))
+                        enqueue(aiEvent({ chatId: chat.id, done: true, sources: context.sources, citations: context.sources }))
                     } catch {
                         await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'failed' })
                         enqueue(aiEvent({ chatId: chat.id, provider: providerName, error: 'ai_provider_unavailable',
@@ -5367,7 +5203,6 @@ const deleteUserData = async (env, userId) => {
         env.DB.prepare('DELETE FROM ai_messages WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_chats WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_providers WHERE user_id = ?').bind(userId),
-        env.DB.prepare('DELETE FROM ai_usage_counters WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_action_proposals WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM ai_standing_approvals WHERE user_id = ?').bind(userId),
         env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId)
@@ -5390,7 +5225,6 @@ const purgeAccounting = async env => {
     const now = Date.now()
     try {
         await env.DB.prepare('DELETE FROM usage_counters WHERE window_start < ?').bind(now - usageWindowMs * 2).run()
-        await env.DB.prepare('DELETE FROM ai_usage_counters WHERE window_start < ?').bind(now - usageWindowMs * 2).run()
         await env.DB.prepare('DELETE FROM rate_limits WHERE window_start < ?').bind(now - rateWindowMs * 2).run()
         await env.DB.prepare('DELETE FROM audit_records WHERE created_at < ?').bind(now - 365 * usageWindowMs).run()
         await env.DB.prepare('DELETE FROM alerts WHERE created_at < ?').bind(now - 365 * usageWindowMs).run()

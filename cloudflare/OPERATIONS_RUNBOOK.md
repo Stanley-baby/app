@@ -16,8 +16,6 @@ The Worker writes one redacted row to `alerts` for these operational events:
 | `rate_limit_exceeded` | A client or User exceeded a route limit | Use `retryAfter`/`Retry-After`; raise the limit only after checking capacity. |
 | `usage_quota_threshold` | A User crossed 80% of daily storage/work quota | Confirm the configured quota and current demand. |
 | `usage_quota_exceeded` | A User reached the daily quota | The response supplies `retryAt`; no data is discarded. |
-| `ai_quota_threshold` | A User or the service crossed 80% of AI quota | Check AI budget and provider health before increasing limits. |
-| `ai_quota_exceeded` | An AI User or global budget is exhausted | Wait for `resetAt` or adjust the Beta quota. |
 | `metadata_enrichment_failed` | Metadata task reached dead-letter | Inspect the safe task failure and retry explicitly when the URL is healthy. |
 | `capture_failed` | Dynamic Capture task reached dead-letter | Verify the Browser binding and Fetchable URL, then retry the task. |
 | `attachment_scan_failed` | Attachment safety task reached dead-letter | Keep the content quarantined until the scanner is healthy. |
@@ -65,10 +63,9 @@ npx wrangler d1 execute raindrop-db-beta --remote --config cloudflare/wrangler.t
 
    The cookie and task ID are operator placeholders; do not paste real
    sessions into tickets or logs.
-4. For `usage_quota_threshold`, `ai_quota_threshold`, or rate-limit alerts,
-   compare aggregate counts with the configured Beta limits in
-   `cloudflare/wrangler.toml`. Change one limit at a time and re-run the
-   contract suite before a Beta deploy.
+4. For `usage_quota_threshold` or rate-limit alerts, compare aggregate counts
+   with the configured Beta limits in `cloudflare/wrangler.toml`. Change one
+   limit at a time and re-run the contract suite before a Beta deploy.
 5. For scanner, Capture, enrichment, migration, or Backup alerts, preserve the
    failed task state, fix the dependency, and use the explicit retry route.
    Never bypass quarantine or turn an unsafe URL into a trusted one.

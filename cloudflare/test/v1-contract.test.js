@@ -327,7 +327,7 @@ test('the operations runbook covers alert triage without User content', () => {
     const runbook = fs.readFileSync(new URL('../OPERATIONS_RUNBOOK.md', import.meta.url), 'utf8')
     for (const kind of [
         'api_error', 'login_anomaly', 'metadata_enrichment_failed', 'capture_failed',
-        'attachment_scan_failed', 'usage_quota_threshold', 'ai_quota_threshold',
+        'attachment_scan_failed', 'usage_quota_threshold',
         'task_enqueue_failed'
     ]) assert.match(runbook, new RegExp('`' + kind + '`'))
     assert.match(runbook, /request bodies, cookies, passwords, tokens/i)
