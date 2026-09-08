@@ -210,7 +210,7 @@ const validationRequest = item => {
     if (item.path === '/v1/import/:id/review') body = { decisions: { fixture: 'invalid' } }
     if (item.path === '/v1/collection/:id/sharing' && item.method === 'POST') body = { role: 'invalid' }
     if (item.path === '/v1/collection/:id/sharing/:userId' && ['PUT', 'PATCH'].includes(item.method)) body = { role: 'invalid' }
-    if (['/v1/raindrop/file', '/v1/content/upload', '/v1/raindrop/:id/attachments'].includes(item.path)) body = null
+    if (['/v1/raindrop/file', '/v1/content/upload', '/v1/raindrop/:id/attachments', '/v1/raindrop/:id/cover'].includes(item.path)) body = null
     return fixtureRequest(item, {
         body,
         query: item.path === '/v1/raindrops/:collectionId' ? { page: -1, perpage: 101 } : {},

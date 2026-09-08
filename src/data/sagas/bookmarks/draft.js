@@ -1,4 +1,4 @@
-import { call, put, takeEvery, select } from 'redux-saga/effects'
+import { call, put, takeEvery, select, delay } from 'redux-saga/effects'
 import Api from '../../modules/api'
 import _ from 'lodash'
 import { independentService } from '~config/environment'
@@ -127,9 +127,26 @@ function* draftCoverUpload({ _id, cover, ignore=false, onSuccess, onFail }) {
 		const draft = state.bookmarks.getIn(['drafts', _id])
 		if (!draft || !draft.item._id) throw new Error('draft is new, so it should be saved first to upload cover')
 
-		const { item={} } = yield call(Api.upload, `raindrop/${draft.item._id}/cover`, { cover }, { timeout: 0 })
+        const response = yield call(Api.upload, `raindrop/${draft.item._id}/cover`, { cover }, { timeout: 0 })
+        let item = response.item || {}
+        if (independentService && response.taskId) {
+            let task
+            for (let attempt = 0; attempt < 30; attempt++) {
+                yield delay(1000)
+                const result = yield call(Api.get, `tasks/${encodeURIComponent(response.taskId)}`)
+                task = result.task || {}
+                if (task.status === 'succeeded') {
+                    item = (yield call(Api.get, `raindrop/${draft.item._id}`)).item || item
+                    break
+                }
+                if (['dead_letter', 'failed'].includes(task.status))
+                    throw new Error(task.failure?.message || 'Cover upload failed')
+            }
+            if (task?.status !== 'succeeded')
+                throw new Error('Cover upload timed out')
+        }
 
-		yield put({
+        yield put({
 			type: BOOKMARK_UPDATE_SUCCESS,
 			item,
 			onSuccess, onFail

@@ -142,9 +142,9 @@ class MemoryDatabase {
             }
             if (sql.includes('UPDATE bookmarks SET url')) {
                 const modern = sql.includes('description = ?')
-                const bookmark = this.bookmarks.find(item => item.id === values[modern ? 10 : 7] && item.user_id === values[modern ? 11 : 8])
+                const bookmark = this.bookmarks.find(item => item.id === values[modern ? 11 : 7] && item.user_id === values[modern ? 12 : 8])
                 Object.assign(bookmark, modern
-                    ? { url: values[0], title: values[1], description: values[2], note: values[3], collection_id: values[4], tags: values[5], highlights: values[6], removed_at: values[7], removed_batch: values[8], updated_at: values[9], change_version: this.nextChangeVersion }
+                    ? { url: values[0], title: values[1], description: values[2], note: values[3], cover: values[4], collection_id: values[5], tags: values[6], highlights: values[7], removed_at: values[8], removed_batch: values[9], updated_at: values[10], change_version: this.nextChangeVersion }
                     : { url: values[0], title: values[1], collection_id: values[2], tags: values[3], highlights: values[4], removed_at: values[5], updated_at: values[6], change_version: this.nextChangeVersion })
                 this.changes.push({ version: this.nextChangeVersion++, user_id: bookmark.user_id, bookmark_id: bookmark.id, changed_at: bookmark.updated_at })
                 return { meta: { changes: 1 } }

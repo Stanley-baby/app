@@ -9,6 +9,7 @@ import Icon from '~co/common/icon'
 import PickerFile from '~co/picker/file/element'
 import PickerLink from '~co/picker/link'
 import Preloader from '~co/common/preloader'
+import Alert from '~co/common/alert'
 
 export default class PickerImage extends React.Component {
     static defaultProps = {
@@ -24,7 +25,8 @@ export default class PickerImage extends React.Component {
 
     state = {
         addLink: false,
-        screenshot_loading: false
+        screenshot_loading: false,
+        screenshot_error: ''
     }
 
     onAddLinkClick = ()=>
@@ -47,11 +49,15 @@ export default class PickerImage extends React.Component {
         if (this.state.screenshot_loading)
             return
 
-        this.setState({ screenshot_loading: true })
-        await this.props.onScreenshot()
-        this.setState({ screenshot_loading: false })
-
-        this.props.onClose()
+        this.setState({ screenshot_loading: true, screenshot_error: '' })
+        try {
+            await this.props.onScreenshot()
+            this.props.onClose()
+        } catch (error) {
+            this.setState({ screenshot_error: error.message || String(error) })
+        } finally {
+            this.setState({ screenshot_loading: false })
+        }
     }
 
     renderItem = ({ link })=>
@@ -93,6 +99,10 @@ export default class PickerImage extends React.Component {
                 <Content>
                     <div className={s.items}>
                         {items.map(this.renderItem)}
+
+                        {this.state.screenshot_error ? (
+                            <Alert variant='warning'>{this.state.screenshot_error}</Alert>
+                        ) : null}
 
                         {!screenshotExists ? (
                             <Button 

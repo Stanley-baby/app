@@ -872,6 +872,15 @@ const publicContent = content => ({
     clearedAt: taskDate(content.cleared_at)
 })
 
+const contentDownloadUrl = (env, contentId) =>
+    String(env.API_ORIGIN || '').replace(/\/+$/, '') + '/v1/content/' + encodeURIComponent(String(contentId)) + '/download'
+
+const setScreenshotCover = async (env, content, userId) => {
+    if (content?.kind !== 'screenshot') return
+    await env.DB.prepare('UPDATE bookmarks SET cover = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+        .bind(contentDownloadUrl(env, content.id), Date.now(), content.bookmark_id, userId).run()
+}
+
 const selectContent = async (env, contentId, userId = null) => {
     const where = userId === null ? 'id = ?' : 'id = ? AND user_id = ?'
     const values = userId === null ? [contentId] : [contentId, userId]
@@ -1085,14 +1094,18 @@ const captureResponse = async (source, env, kind = 'snapshot') => {
                 throw metadataFailure('capture_renderer_unavailable', 'Dynamic Capture is not configured', true)
             if (renderer?.quickAction) {
                 const host = current.url.host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-                // ponytail: exact-host allowlist blocks cross-host redirects; request interception if broader navigation is required.
-                response = await renderer.quickAction(kind === 'screenshot' ? 'screenshot' : 'content', {
+                const options = {
                     url: current.url.toString(),
-                    allowRequestPattern: ['/^' + current.url.protocol + '\\/\\/' + host + '(?:\\/|$)/'],
-                    gotoOptions: { waitUntil: 'networkidle2', timeout: 30000 }
-                })
+                    gotoOptions: {
+                        waitUntil: kind === 'screenshot' ? 'domcontentloaded' : 'networkidle2',
+                        timeout: kind === 'screenshot' ? 15000 : 30000
+                    }
+                }
+                if (kind !== 'screenshot')
+                    options.allowRequestPattern = ['/^' + current.url.protocol + '\\/\\/' + host + '/']
+                response = await renderer.quickAction(kind === 'screenshot' ? 'screenshot' : 'content', options)
                 if (!response?.ok)
-                    throw metadataFailure('capture_fetch_failed', 'The linked page could not be captured')
+                    throw metadataFailure('capture_fetch_failed', 'The linked page could not be captured', true)
                 if (kind !== 'screenshot') {
                     let rendered
                     try { rendered = await response.json() } catch { rendered = null }
@@ -1106,7 +1119,7 @@ const captureResponse = async (source, env, kind = 'snapshot') => {
             } else response = await renderer.fetch(current.url.toString(), { headers: { Accept: 'text/html,image/*' }, signal: controller.signal, redirect: 'manual' })
         } catch (failure) {
             if (failure?.code) throw failure
-            throw metadataFailure('capture_fetch_failed', 'The linked page could not be captured')
+            throw metadataFailure('capture_fetch_failed', 'The linked page could not be captured', kind === 'screenshot')
         } finally {
             clearTimeout(timer)
         }
@@ -1274,6 +1287,7 @@ const processAttachmentScanTask = async (env, taskId) => {
         const content = await selectContent(env, claimed.task.content_id)
         if (!content) throw metadataFailure('content_missing', 'Protected content is no longer available', true)
         if (!attachmentScanEnabled(env)) {
+            await setScreenshotCover(env, content, claimed.task.user_id)
             const now = Date.now()
             await env.DB.prepare(`UPDATE content_objects SET status = 'cleared', updated_at = ?, cleared_at = ?
                 WHERE id = ? AND status = 'quarantined'`).bind(now, now, content.id).run()
@@ -1284,6 +1298,7 @@ const processAttachmentScanTask = async (env, taskId) => {
             return { action: 'ack' }
         }
         const result = await scanStoredContent(env, content)
+        await setScreenshotCover(env, content, claimed.task.user_id)
         const now = Date.now()
         await env.DB.prepare(`UPDATE background_tasks SET status = 'succeeded', progress = 100,
             result_metadata = ?, error_code = NULL, error_message = NULL, next_retry_at = NULL,
@@ -1311,7 +1326,13 @@ const processCaptureTask = async (env, taskId) => {
         await env.DB.prepare(`UPDATE content_objects SET content_type = ?, size_bytes = ?, updated_at = ?
             WHERE id = ? AND status = 'quarantined'`).bind(captured.contentType, captured.size, now, content.id).run()
         const updated = await selectContent(env, content.id)
-        const scan = await scanStoredContent(env, updated || { ...content, content_type: captured.contentType })
+        let scan = { status: 'cleared', scanned: false }
+        if (attachmentScanEnabled(env))
+            scan = await scanStoredContent(env, updated || { ...content, content_type: captured.contentType })
+        else
+            await env.DB.prepare(`UPDATE content_objects SET status = 'cleared', updated_at = ?, cleared_at = ?
+                WHERE id = ? AND status = 'quarantined'`).bind(now, now, content.id).run()
+        await setScreenshotCover(env, updated || content, claimed.task.user_id)
         await env.DB.prepare(`UPDATE background_tasks SET status = 'succeeded', progress = 100,
             result_metadata = ?, error_code = NULL, error_message = NULL, next_retry_at = NULL,
             updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing'`).bind(
@@ -2364,7 +2385,7 @@ const processMigrationTask = async (env, taskId) => {
             if (!content) throw metadataFailure('content_storage_unavailable', 'Protected Content could not be stored', true)
             await putContentObject(env, content, bytes, asset)
             if (asset.assetType === 'cover') {
-                const cover = String(env.API_ORIGIN || '').replace(/\/+$/, '') + '/v1/content/' + encodeURIComponent(String(content.id)) + '/download'
+                const cover = contentDownloadUrl(env, content.id)
                 await env.DB.prepare('UPDATE bookmarks SET cover = ?, updated_at = ? WHERE id = ? AND user_id = ?')
                     .bind(cover, Date.now(), bookmark.resourceId, task.user_id).run()
             }
@@ -2876,6 +2897,7 @@ const auditRoute = request => {
         [/^\/v1\/tasks\/[^/]+(?:\/(?:status|failure|retry))?$/, '/v1/tasks/:id'],
         [/^\/v1\/content\/[^/]+\/download$/, '/v1/content/:id/download'],
         [/^\/v1\/content\/[^/]+$/, '/v1/content/:id'],
+        [/^\/v1\/raindrop\/\d+\/cover$/, '/v1/raindrop/:id/cover'],
         [/^\/v1\/raindrop\/\d+\/(?:content|capture)(?:\/status)?$/, '/v1/raindrop/:id/content'],
         [/^\/v1\/raindrop\/\d+\/attachments?$/, '/v1/raindrop/:id/attachments'],
         [/^\/v1\/collection\/\d+\/sharing(?:\/\d+)?$/, '/v1/collection/:id/sharing'],
@@ -6527,8 +6549,9 @@ export default {
             }
 
             const attachmentMatch = url.pathname.match(/^\/v1\/raindrop\/(\d+)\/attachments?$/)
+            const coverMatch = url.pathname.match(/^\/v1\/raindrop\/(\d+)\/cover$/)
             const uploadBookmarkFile = url.pathname === '/v1/raindrop/file' && request.method === 'PUT'
-            const uploadContentFile = (url.pathname === '/v1/content/upload' || attachmentMatch) && ['POST', 'PUT'].includes(request.method)
+            const uploadContentFile = (url.pathname === '/v1/content/upload' || attachmentMatch || coverMatch) && ['POST', 'PUT'].includes(request.method)
             if (uploadBookmarkFile || uploadContentFile) {
                 const upload = await readUpload(request, attachmentMaxBytes(env))
                 const scanEnabled = attachmentScanEnabled(env)
@@ -6538,8 +6561,8 @@ export default {
                     return error('validation_failed', 400, request, env, 'Provide one file to upload')
 
                 const fields = upload.fields || {}
-                const suppliedBookmarkId = attachmentMatch
-                    ? Number(attachmentMatch[1])
+                const suppliedBookmarkId = coverMatch || attachmentMatch
+                    ? Number((coverMatch || attachmentMatch)[1])
                     : Number(fields.bookmarkId || fields.raindropId || fields.bookmark_id || 0)
                 let bookmark = null
                 let createdBookmark = false
@@ -6578,7 +6601,7 @@ export default {
                     content = await createContentRecord(env, {
                         userId: session.user_id,
                         bookmarkId: Number(bookmark.id),
-                        kind: 'attachment',
+                        kind: coverMatch ? 'screenshot' : 'attachment',
                         filename: upload.filename,
                         contentType: upload.contentType,
                         size: upload.size,
@@ -6592,6 +6615,11 @@ export default {
                 }
 
                 if (!scanEnabled) {
+                    if (coverMatch) {
+                        await setScreenshotCover(env, content, session.user_id)
+                        bookmark = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?')
+                            .bind(bookmark.id, bookmark.user_id).first() || bookmark
+                    }
                     await recordAudit(env, request, { userId: session.user_id, action: 'content.upload', resourceType: 'content', resourceId: content.id, outcome: 'scan_skipped' })
                     return json({ result: true, item: bookmarkItem(bookmark), content: publicContent(content) }, 201, request, env)
                 }
@@ -6602,7 +6630,7 @@ export default {
                     type: attachmentTaskType,
                     contentId: content.id,
                     sourceUrl: bookmark.url,
-                    payload: { kind: 'attachment' }
+                    payload: { kind: coverMatch ? 'screenshot' : 'attachment' }
                 })
                 if (!task || task.status === 'dead_letter') {
                     await discardContentTask(env, task)
@@ -7137,6 +7165,7 @@ export default {
                         ? existing.description || existing.excerpt || ''
                         : String(data.description ?? data.excerpt).trim()
                     const note = data.note === undefined ? existing.note || '' : String(data.note).trim()
+                    const cover = data.cover === undefined ? existing.cover || '' : String(data.cover).trim()
                     const tags = data.tags === undefined ? bookmarkTags(existing.tags) : bookmarkTags(data.tags)
                     let collectionId = data.collectionId === undefined ? existing.collection_id : parseBookmarkCollectionId(data.collectionId)
                     const removedAt = data.removed === false ? null : existing.removed_at
@@ -7145,7 +7174,7 @@ export default {
                     if (data.collectionId === undefined && data.removed === false && collectionId > 0 && !await collectionOwned(env, session.user_id, collectionId) && !await collectionCanWrite(env, session.user_id, collectionId))
                         collectionId = -1
                     const urlCheck = validateFetchableUrl(link)
-                    if (!urlCheck.ok || title.length > 500 || description.length > 10000 || note.length > 10000)
+                    if (!urlCheck.ok || title.length > 500 || description.length > 10000 || note.length > 10000 || cover.length > 2000)
                         return error(urlCheck.ok ? 'validation_failed' : urlCheck.code, 400, request, env, urlCheck.ok ? 'Enter an HTTP(S) bookmark URL and a title under 500 characters' : urlCheck.message)
                     if (data.tags !== undefined && !validTagList(data.tags))
                         return error('validation_failed', 400, request, env, 'Bookmark tags must be 100 characters or fewer')
@@ -7153,8 +7182,8 @@ export default {
                         return error('collection_not_found', 404, request, env)
                     if (!validHighlightChanges(highlights))
                         return error('validation_failed', 400, request, env, 'Highlight text and note must be valid')
-                    await env.DB.prepare('UPDATE bookmarks SET url = ?, title = ?, description = ?, note = ?, collection_id = ?, tags = ?, highlights = ?, removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-                        .bind(link, title, description, note, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)), removedAt, removedBatch, Date.now(), bookmarkId, existing.user_id).run()
+                    await env.DB.prepare('UPDATE bookmarks SET url = ?, title = ?, description = ?, note = ?, cover = ?, collection_id = ?, tags = ?, highlights = ?, removed_at = ?, removed_batch = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+                        .bind(link, title, description, note, cover, collectionId, JSON.stringify(tags), JSON.stringify(applyHighlightChanges(existing.highlights, highlights)), removedAt, removedBatch, Date.now(), bookmarkId, existing.user_id).run()
                     const item = await env.DB.prepare('SELECT * FROM bookmarks WHERE id = ? AND user_id = ?').bind(bookmarkId, existing.user_id).first()
                     const task = link !== existing.url
                         ? await createMetadataTask(env, request, session.user_id, bookmarkId, link)
