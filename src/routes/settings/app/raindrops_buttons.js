@@ -44,8 +44,6 @@ class SettingsAppRaindropsButtons extends React.Component {
             raindrops_buttons.push(id)
 
         this.props.set('raindrops_buttons', raindrops_buttons)
-
-        e.preventDefault()
     }
 
     render() {
