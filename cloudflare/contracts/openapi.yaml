@@ -1177,6 +1177,39 @@ paths:
           description: Login required.
         '500':
           $ref: '#/components/responses/InternalError'
+    put:
+      security:
+        - SessionCookie: []
+        - BearerToken: []
+      x-bearer-scopes: [profile:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  type: object
+                  additionalProperties: true
+                  properties:
+                    raindrops_buttons:
+                      type: array
+                      maxItems: 5
+                      uniqueItems: true
+                      items:
+                        type: string
+                        enum: [select, current_tab, new_tab, preview, web, copy, ask, important, tags, edit, remove]
+      responses:
+        '200':
+          description: Authenticated User with the merged configuration.
+        '400':
+          description: User configuration is invalid or too large.
+        '401':
+          description: Login required.
+        '500':
+          $ref: '#/components/responses/InternalError'
   /v1/user/tfa:
     get:
       security:

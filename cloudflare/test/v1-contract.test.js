@@ -207,6 +207,7 @@ const validationRequest = item => {
     let body = item.request.body
     if (item.path === '/v1/collection/:id' && item.method === 'PUT') body = { title: 'x'.repeat(201) }
     if (item.path === '/v1/raindrop/:id' && item.method === 'PUT') body = { title: 'x'.repeat(501) }
+    if (item.path === '/v1/user' && item.method === 'PUT') body = { config: { raindrops_buttons: ['invalid'] } }
     if (item.path === '/v1/import/:id/review') body = { decisions: { fixture: 'invalid' } }
     if (item.path === '/v1/collection/:id/sharing' && item.method === 'POST') body = { role: 'invalid' }
     if (item.path === '/v1/collection/:id/sharing/:userId' && ['PUT', 'PATCH'].includes(item.method)) body = { role: 'invalid' }

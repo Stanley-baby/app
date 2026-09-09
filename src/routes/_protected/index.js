@@ -10,7 +10,19 @@ export default function PageProtected({ redirect }) {
 	//auth
 	const dispatch = useDispatch()
 	const authorized = useSelector(state=>userStatus(state).authorized)
-	useEffect(()=>{dispatch(refresh())}, [])
+	useEffect(()=>{
+		const refreshUser = ()=>{
+			if (document.visibilityState === 'visible')
+				dispatch(refresh())
+		}
+		refreshUser()
+		window.addEventListener('focus', refreshUser)
+		document.addEventListener('visibilitychange', refreshUser)
+		return () => {
+			window.removeEventListener('focus', refreshUser)
+			document.removeEventListener('visibilitychange', refreshUser)
+		}
+	}, [dispatch])
 
 	const { pathname, search } = useLocation()
 

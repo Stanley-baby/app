@@ -1494,6 +1494,36 @@
       }
     },
     {
+      "method": "PUT",
+      "path": "/v1/user",
+      "request": {
+        "method": "PUT",
+        "path": "/v1/user",
+        "headers": {
+          "Cookie": "{{session-cookie}}"
+        },
+        "body": {
+          "config": {
+            "raindrops_buttons": ["select", "tags", "edit", "remove"]
+          }
+        }
+      },
+      "responses": [
+        200,
+        400,
+        401,
+        500
+      ],
+      "cases": {
+        "success": 200,
+        "authentication": 401,
+        "permission": null,
+        "validation": 400,
+        "pagination": null,
+        "sync": null
+      }
+    },
+    {
       "method": "GET",
       "path": "/v1/user/quota",
       "request": {
