@@ -30,6 +30,7 @@ const bodyFor = item => {
     if (p === '/v1/raindrops') return { items: [{ link: 'https://example.test', title: 'Fixture' }] }
     if (p === '/v1/tag') return {}
     if (p === '/v1/raindrops/:collectionId') return { ids: [1] }
+    if (p === '/v1/user') return { config: { raindrops_buttons: ['select', 'tags', 'edit', 'remove'] } }
     if (p === '/v1/backup/connections') return { provider: 'webdav', credentials: { url: 'https://example.test', username: 'u', password: 'p' } }
     if (p === '/v1/user/deletion') return {}
     if (p === '/v1/tasks/:id/retry') return {}

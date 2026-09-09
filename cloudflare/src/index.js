@@ -273,15 +273,48 @@ const sessionCookie = token =>
 
 const expiredSessionCookie = 'rd_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=None'
 
-const publicUser = user => ({
-    _id: String(user.id || user.user_id),
-    email: user.email,
-    name: user.name,
-    email_verified: Boolean(user.email_verified_at),
-    ...(user.google_enabled ? { google: { enabled: true } } : {}),
-    ...(user.apple_enabled ? { apple: { enabled: true } } : {}),
-    ...(user.tfa_enabled ? { tfa: { enabled: true } } : {})
-})
+const buttonConfigIds = new Set([
+    'select', 'current_tab', 'new_tab', 'preview', 'web', 'copy', 'ask',
+    'important', 'tags', 'edit', 'remove'
+])
+
+const isConfigObject = value => value && typeof value === 'object' && !Array.isArray(value)
+
+const parseUserConfig = value => {
+    if (isConfigObject(value)) return value
+    try {
+        const parsed = JSON.parse(value || '{}')
+        return isConfigObject(parsed) ? parsed : {}
+    } catch {
+        return {}
+    }
+}
+
+const userConfigPatch = value => {
+    if (!isConfigObject(value)) return null
+    const patch = { ...value }
+    if (Object.prototype.hasOwnProperty.call(patch, 'raindrops_buttons')) {
+        const buttons = patch.raindrops_buttons
+        if (!Array.isArray(buttons) || buttons.length > 5 || buttons.some(button => typeof button !== 'string' || !buttonConfigIds.has(button)))
+            return null
+        patch.raindrops_buttons = [...new Set(buttons)]
+    }
+    return patch
+}
+
+const publicUser = user => {
+    const config = parseUserConfig(user.config)
+    return {
+        _id: String(user.id || user.user_id),
+        email: user.email,
+        name: user.name,
+        email_verified: Boolean(user.email_verified_at),
+        ...(Object.keys(config).length ? { config } : {}),
+        ...(user.google_enabled ? { google: { enabled: true } } : {}),
+        ...(user.apple_enabled ? { apple: { enabled: true } } : {}),
+        ...(user.tfa_enabled ? { tfa: { enabled: true } } : {})
+    }
+}
 
 const arrayValue = value => {
     if (Array.isArray(value)) return value
@@ -2824,7 +2857,7 @@ const getSession = async (request, env) => {
     const cookie = cookieValue(request, 'rd_session')
     if (cookie) {
         const session = await env.DB.prepare(`SELECT s.id AS session_id, s.user_id, s.device_name, s.created_at, s.last_seen_at, s.expires_at,
-        u.id, u.email, u.name, u.email_verified_at,
+        u.id, u.email, u.name, u.email_verified_at, u.config,
         u.federated_only,
         EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'google') AS google_enabled,
         EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'apple') AS apple_enabled,
@@ -2843,7 +2876,7 @@ const getSession = async (request, env) => {
     const tokenHash = await hmac(token, env.SESSION_SECRET)
     try {
         const developer = await env.DB.prepare(`SELECT t.id AS token_id, t.user_id, t.scopes AS token_scopes,
-            u.id, u.email, u.name, u.email_verified_at, u.federated_only,
+            u.id, u.email, u.name, u.email_verified_at, u.config, u.federated_only,
             EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'google') AS google_enabled,
             EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'apple') AS apple_enabled,
             EXISTS(SELECT 1 FROM user_tfa tf WHERE tf.user_id = u.id AND tf.enabled_at IS NOT NULL) AS tfa_enabled
@@ -2856,7 +2889,7 @@ const getSession = async (request, env) => {
         }
 
         const access = await env.DB.prepare(`SELECT t.id AS access_token_id, t.user_id, t.scopes AS token_scopes,
-            u.id, u.email, u.name, u.email_verified_at, u.federated_only,
+            u.id, u.email, u.name, u.email_verified_at, u.config, u.federated_only,
             EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'google') AS google_enabled,
             EXISTS(SELECT 1 FROM connected_identities ci WHERE ci.user_id = u.id AND ci.provider = 'apple') AS apple_enabled,
             EXISTS(SELECT 1 FROM user_tfa tf WHERE tf.user_id = u.id AND tf.enabled_at IS NOT NULL) AS tfa_enabled
@@ -4703,7 +4736,7 @@ const completeTfaLogin = async (request, env, challengeToken, code, redirectPath
     return { ...session, user_id: challenge.user_id, redirectPath: appPath(env, redirectPath || challenge.redirect_path, '/') }
 }
 
-const developerScopes = new Set(['profile:read', 'bookmarks:read', 'bookmarks:write', 'collections:read', 'collections:write', 'read', 'write'])
+const developerScopes = new Set(['profile:read', 'profile:write', 'bookmarks:read', 'bookmarks:write', 'collections:read', 'collections:write', 'read', 'write'])
 
 const requestedScopes = value => {
     const scopes = scopeList(value || 'profile:read bookmarks:read')
@@ -4910,7 +4943,8 @@ const issueOAuthAccessToken = async (env, row) => {
 
 const bearerScope = (pathname, method) => {
     const read = ['GET', 'HEAD'].includes(method)
-    if (pathname === '/v1/user' || pathname === '/v1/user/stats' || pathname === '/v1/user/quota') return 'profile:read'
+    if (pathname === '/v1/user') return read ? 'profile:read' : 'profile:write'
+    if (pathname === '/v1/user/stats' || pathname === '/v1/user/quota') return 'profile:read'
     if (/^\/v1\/(?:raindrop|raindrops|content)\b/.test(pathname)) return read ? 'bookmarks:read' : 'bookmarks:write'
     if (/^\/v1\/(?:collection|collections|tag|tags|filters)\b/.test(pathname)) return read ? 'collections:read' : 'collections:write'
     return null
@@ -5529,7 +5563,7 @@ export default {
             const { data, form } = await readBody(request)
             const email = String(data.email || '').trim().toLowerCase()
             const password = String(data.password || '')
-            const user = await env.DB.prepare('SELECT id, email, name, password_hash, password_salt, email_verified_at FROM users WHERE email = ?').bind(email).first()
+            const user = await env.DB.prepare('SELECT id, email, name, password_hash, password_salt, email_verified_at, config FROM users WHERE email = ?').bind(email).first()
 
             const validPassword = user && equal(await passwordHash(password, base64urlToBytes(user.password_salt)), user.password_hash)
             if (!validPassword) {
@@ -5889,6 +5923,21 @@ export default {
 
             if (url.pathname === '/v1/user' && request.method === 'GET')
                 return json({ result: true, user: publicUser(session) }, 200, request, env)
+
+            if (url.pathname === '/v1/user' && request.method === 'PUT') {
+                const { data } = await readBody(request)
+                const patch = userConfigPatch(data.config)
+                if (!patch)
+                    return error('validation_failed', 400, request, env, 'User config must be an object with valid values')
+
+                const config = { ...parseUserConfig(session.config), ...patch }
+                const serialized = JSON.stringify(config)
+                if (serialized.length > 64 * 1024)
+                    return error('validation_failed', 400, request, env, 'User config is too large')
+
+                await env.DB.prepare('UPDATE users SET config = ? WHERE id = ?').bind(serialized, session.user_id).run()
+                return json({ result: true, user: publicUser({ ...session, config: serialized }) }, 200, request, env)
+            }
 
             if (url.pathname === '/v1/user/tfa' && request.method === 'GET') {
                 const row = await tfaRow(env, session.user_id)

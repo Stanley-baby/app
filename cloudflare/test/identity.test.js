@@ -99,6 +99,7 @@ class MemoryDatabase {
                     password_hash: values[2],
                     password_salt: values[3],
                     email_verified_at: sql.includes('email_verified_at') ? values[4] : null,
+                    config: '{}',
                     federated_only: sql.includes('federated_only') ? 1 : 0
                 }
                 this.users.push(user)
@@ -209,6 +210,11 @@ class MemoryDatabase {
             if (sql.includes('UPDATE users SET email_verified_at')) {
                 const user = this.users.find(item => item.id === values[1])
                 user.email_verified_at = values[0]
+                return { meta: { changes: 1 } }
+            }
+            if (sql.includes('UPDATE users SET config')) {
+                const user = this.users.find(item => item.id === values[1])
+                user.config = values[0]
                 return { meta: { changes: 1 } }
             }
             if (sql.includes('UPDATE email_tokens SET used_at')) {
@@ -536,6 +542,35 @@ test('beta signup verifies Turnstile, keeps credentials private, and creates rev
         result: true,
         user: { _id: '1', email: 'beta.user@enterprise.example', name: 'Beta User', email_verified: false }
     })
+
+    const configUpdate = await worker.fetch(new Request('https://api.example.test/v1/user', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ config: { raindrops_buttons: ['select', 'tags', 'edit', 'remove'] } })
+    }), env(db))
+    assert.equal(configUpdate.status, 200)
+    assert.deepEqual((await configUpdate.json()).user.config.raindrops_buttons, ['select', 'tags', 'edit', 'remove'])
+
+    const persistedConfig = await worker.fetch(request('/v1/user', null, { Cookie: cookie }), env(db))
+    assert.deepEqual((await persistedConfig.json()).user.config.raindrops_buttons, ['select', 'tags', 'edit', 'remove'])
+
+    const mergedConfig = await worker.fetch(new Request('https://api.example.test/v1/user', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ config: { raindrops_click: 'new_tab' } })
+    }), env(db))
+    assert.equal(mergedConfig.status, 200)
+    assert.deepEqual((await mergedConfig.json()).user.config, {
+        raindrops_buttons: ['select', 'tags', 'edit', 'remove'],
+        raindrops_click: 'new_tab'
+    })
+
+    const invalidConfig = await worker.fetch(new Request('https://api.example.test/v1/user', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ config: { raindrops_buttons: ['select', 'current_tab', 'new_tab', 'preview', 'web', 'copy'] } })
+    }), env(db))
+    assert.equal(invalidConfig.status, 400)
 
     const blocked = await worker.fetch(request('/v1/oauth/connections', null, { Cookie: cookie }), env(db))
     assert.equal(blocked.status, 403)
