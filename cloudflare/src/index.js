@@ -3171,7 +3171,7 @@ const publicAiProvider = row => row ? {
 
 const customAiMessages = (messages, tools) => ({
     messages,
-    ...(tools?.length ? { tools: aiProviderTools(tools), tool_choice: 'auto' } : {})
+    ...(Array.isArray(tools) ? { tools: aiProviderTools(tools), ...(tools.length ? { tool_choice: 'auto' } : {}) } : {})
 })
 
 const cloudflareAiQuota = () => ({ managedBy: 'cloudflare' })
@@ -3533,6 +3533,17 @@ const aiModelTools = [
         }
     }
 ]
+
+const aiBookmarkIntentPattern = /\b(?:bookmark|bookmarks|raindrop|collection|collections|tag|tags|note|notes|highlight|highlights|search|find|read|show|list|saved)\b|书签|收藏|标签|集合|笔记|高亮|搜索|查找|查看|哪些|我的|保存/iu
+const aiWriteIntentPattern = /\b(?:update|edit|change|rename|delete|remove|move)\b|更新|修改|更改|编辑|重命名|删除|移除|移动/iu
+
+const aiToolsForChat = (message, context) => {
+    const hasContext = Boolean(context?.items?.length || context?.text)
+    const normalized = String(message || '')
+    if (hasContext)
+        return aiBookmarkIntentPattern.test(normalized) || aiWriteIntentPattern.test(normalized) ? aiModelTools : []
+    return aiBookmarkIntentPattern.test(normalized) ? aiModelTools : []
+}
 
 const aiWriteTools = new Map(aiToolCatalog.filter(tool => tool.kind === 'write').map(tool => [tool.name, tool]))
 
@@ -4109,7 +4120,8 @@ async function* aiResultChunks(result) {
 
 const runWorkersAi = async (env, messages, options = {}) => {
     if (!env.AI || typeof env.AI.run !== 'function') throw new Error('Workers AI binding is unavailable')
-    const result = await env.AI.run(aiModel(env), { messages, stream: true, ...options })
+    const { tools, ...rest } = options
+    const result = await env.AI.run(aiModel(env), { messages, stream: true, ...rest, ...(tools?.length ? { tools } : {}) })
     if (!result || result.ok === false || result.error || result.errors?.length) throw new Error('Workers AI provider failed')
     return result
 }
@@ -4379,10 +4391,12 @@ const aiChat = async (request, env, userId) => {
         }
         const language = aiLanguage(data.language || data.lang, request)
         const prompt = context.text ? message + '\n\n' + context.text : message
-        const messages = [{ role: 'system', content: `You are Raindrop AI. Answer in ${language}. Use only the authorized context provided. When context supports an answer, cite the matching Bookmark as [Title](URL). Read tools are permission-checked. Every write tool call creates an AI Action Proposal and waits for User approval.` }, ...history, { role: 'user', content: prompt }]
+        const tools = aiToolsForChat(message, context)
+        const messages = [{ role: 'system', content: `You are Raindrop AI. Answer in ${language}. Use only the authorized context provided. When context supports an answer, cite the matching Bookmark as [Title](URL). Only call bookmark_read for an explicit Bookmark lookup or search when a Bookmark ID or query is available. Answer greetings and general conversation directly without tools. Every write tool call creates an AI Action Proposal and waits for User approval.` }, ...history, { role: 'user', content: prompt }]
+        const aiOptions = { tools }
         await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
             .bind(chat.id, userId, 'user', message, now).run()
-        let result = await runAiProvider(env, providerName, messages, { tools: aiModelTools }, customProvider)
+        let result = await runAiProvider(env, providerName, messages, aiOptions, customProvider)
         const encoderStream = new TextEncoder()
         const stream = new ReadableStream({
             start(controller) {
@@ -4452,20 +4466,25 @@ const aiChat = async (request, env, userId) => {
                                 )
                             }
                             conversationMessages = [...conversationMessages, ...toolMessages]
-                            pendingResult = await runAiProvider(env, providerName, conversationMessages, { tools: aiModelTools }, customProvider)
+                            pendingResult = await runAiProvider(env, providerName, conversationMessages, aiOptions, customProvider)
                             toolRound++
                         }
-                        if (assistant)
-                            await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
-                                .bind(chat.id, userId, 'assistant', assistant, Date.now()).run()
+                        if (!assistant)
+                            throw aiProviderFailure('ai_provider_empty_response', providerName === 'custom' ? 'Custom AI Provider returned an empty response' : 'Workers AI returned an empty response')
+                        await env.DB.prepare('INSERT INTO ai_messages (chat_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)')
+                            .bind(chat.id, userId, 'assistant', assistant, Date.now()).run()
                         await env.DB.prepare('UPDATE ai_chats SET updated_at = ? WHERE id = ? AND user_id = ?')
                             .bind(Date.now(), chat.id, userId).run()
                         await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'success' })
                         enqueue(aiEvent({ chatId: chat.id, done: true, sources: context.sources, citations: context.sources }))
-                    } catch {
+                    } catch (failure) {
+                        const errorCode = failure?.providerCode || 'ai_provider_unavailable'
+                        const errorMessage = errorCode === 'ai_provider_empty_response'
+                            ? failure.message
+                            : providerName === 'custom' ? 'Custom AI Provider failed. Choose Retry Custom or Use Workers AI.' : 'Workers AI is temporarily unavailable. Choose Retry Workers AI.'
                         await recordAudit(env, request, { userId, action: 'ai.chat', resourceType: 'ai_chat', resourceId: chat.id, outcome: 'failed' })
-                        enqueue(aiEvent({ chatId: chat.id, provider: providerName, error: 'ai_provider_unavailable',
-                            errorMessage: providerName === 'custom' ? 'Custom AI Provider failed. Choose Retry Custom or Use Workers AI.' : 'Workers AI is temporarily unavailable. Choose Retry Workers AI.',
+                        enqueue(aiEvent({ chatId: chat.id, provider: providerName, error: errorCode,
+                            errorMessage,
                             fallbackProviders: providerName === 'custom' ? ['workers_ai'] : [] }))
                     } finally {
                         try { controller.close() } catch {}

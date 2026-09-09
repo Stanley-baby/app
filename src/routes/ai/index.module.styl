@@ -1,193 +1,1127 @@
 .page {
+    --ai-border-color: unquote('color-mix(in srgb, var(--primary-text-color) 14%, transparent)')
+    --ai-soft-border: unquote('color-mix(in srgb, var(--primary-text-color) 8%, transparent)')
+    --ai-surface: unquote('color-mix(in srgb, var(--background-color) 92%, var(--primary-text-color))')
+    --ai-muted-surface: unquote('color-mix(in srgb, var(--background-color) 70%, var(--primary-text-color))')
+    --ai-radius: .4rem
     display: flex
-    flex-direction: column
-    min-height: 100vh
-    padding: 1rem
-    box-sizing: border-box
+    width: 100%
+    height: 100vh
+    min-height: 100dvh
+    overflow: hidden
     color: var(--primary-text-color)
     background: var(--background-color)
 }
-.header {
+
+.sidebar {
     display: flex
-    align-items: center
-    justify-content: space-between
-    gap: 1rem
-    margin-bottom: 1rem
+    flex: 0 0 6.5rem
+    flex-direction: column
+    min-width: 0
+    padding: var(--padding-medium) var(--padding-small) var(--padding-small)
+    border-right: 1px solid var(--ai-border-color)
+    background: var(--sidebar-background-color)
 }
-.header h1 {
-    margin: 0
-    font-size: 1.25rem
-}
-.actions,
+
+.sidebarHeader,
+.header,
+.headerStart,
+.headerActions,
+.brand,
+.providerSelect,
+.providerActions,
+.providerError,
+.inlineActions,
+.toolHeader,
+.toolButtons,
+.sectionHeading,
+.proposalMeta,
+.draftActions,
 .form {
     display: flex
-    gap: .5rem
+    align-items: center
 }
-.body {
-    display: flex
-    flex: 1
-    min-height: 0
-    gap: 1rem
+
+.sidebarHeader {
+    justify-content: space-between
+    gap: var(--padding-small)
+    min-height: var(--header-height)
 }
-.history {
-    display: flex
-    flex-direction: column
-    width: 12rem
-    gap: .25rem
+
+.brand {
+    min-width: 0
+    gap: var(--padding-small)
 }
-.historyItem {
-    display: flex
-    gap: .25rem
+
+.brandIcon,
+.welcomeIcon,
+.messageAvatar,
+.loadingOrb {
+    display: grid
+    flex: 0 0 auto
+    place-items: center
+    color: var(--accent-color)
 }
-.historyItem button:first-child {
-    overflow: hidden
-    flex: 1
-    padding: .5rem
-    border: 0
-    text-align: left
-    white-space: nowrap
-    text-overflow: ellipsis
-    color: inherit
-    background: transparent
-    cursor: pointer
-}
-.historyItem button:last-child {
-    width: 2rem
-    padding: .25rem
-    border: 0
-    color: inherit
-    background: transparent
-    cursor: pointer
-}
-.history .selected {
+
+.brandIcon {
+    width: .75rem
+    height: .75rem
     border-radius: .25rem
+    background: unquote('hsla(var(--accent-hsl), .12)')
+}
+
+.brand > div {
+    display: grid
+    min-width: 0
+    gap: 1px
+}
+
+.brand strong {
+    overflow: hidden
+    font-size: var(--primary-font-size)
+    font-weight: 600
+    text-overflow: ellipsis
+    white-space: nowrap
+}
+
+.brand span:not(.brandIcon) {
+    overflow: hidden
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+    text-overflow: ellipsis
+    white-space: nowrap
+}
+
+.iconButton,
+.menuButton,
+.closeButton,
+.deleteChat,
+.sidebarAction,
+.newChat,
+.sendButton,
+.historyItem button,
+.providerActions button,
+.inlineActions button,
+.toolButtons button,
+.draftActions button,
+.proposal > button {
+    border: 0
+    color: inherit
+    background: transparent
+    cursor: pointer
+    font: inherit
+}
+
+.iconButton,
+.menuButton,
+.closeButton {
+    display: inline-flex
+    align-items: center
+    justify-content: center
+    min-width: var(--button-height)
+    height: var(--button-height)
+    gap: var(--padding-mini)
+    border-radius: var(--border-radius)
+    color: var(--secondary-text-color)
+    transition: color .18s ease, background .18s ease, transform .18s ease
+}
+
+.iconButton:hover,
+.menuButton:hover,
+.closeButton:hover,
+.sidebarAction:hover,
+.deleteChat:hover {
+    color: var(--primary-text-color)
     background: var(--hover-background-color)
 }
-.chat {
+
+.iconButton:active,
+.menuButton:active,
+.closeButton:active,
+.sidebarAction:active,
+.deleteChat:active {
+    transform: scale(.97)
+}
+
+.iconButton:focus-visible,
+.menuButton:focus-visible,
+.closeButton:focus-visible,
+.sidebarAction:focus-visible,
+.deleteChat:focus-visible,
+.newChat:focus-visible,
+.sendButton:focus-visible,
+.historyItem button:focus-visible,
+.providerActions button:focus-visible,
+.inlineActions button:focus-visible,
+.toolButtons button:focus-visible,
+.draftActions button:focus-visible,
+.proposal > button:focus-visible,
+.sourceList a:focus-visible {
+    outline: 2px solid var(--accent-color)
+    outline-offset: 2px
+}
+
+.newChat {
+    display: flex
+    align-items: center
+    justify-content: center
+    gap: var(--padding-small)
+    width: 100%
+    min-height: var(--button-height)
+    margin: var(--padding-medium) 0 var(--padding-large)
+    padding: 0 var(--padding-small)
+    border: 1px solid var(--ai-border-color)
+    border-radius: var(--ai-radius)
+    background: var(--background-color)
+    font-weight: 600
+    transition: border-color .18s ease, background .18s ease, transform .18s ease
+}
+
+.newChat:hover {
+    border-color: var(--accent-color)
+    background: var(--hover-background-color)
+}
+
+.newChat:active {
+    transform: translateY(1px)
+}
+
+.historyLabel {
+    padding: 0 var(--padding-small) var(--padding-small)
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+    letter-spacing: .03em
+    text-transform: uppercase
+}
+
+.history {
+    display: flex
+    flex: 1
+    flex-direction: column
+    min-height: 0
+    gap: var(--padding-micro)
+    overflow-y: auto
+    scrollbar-width: thin
+}
+
+.historyItem {
+    display: flex
+    min-width: 0
+    gap: var(--padding-micro)
+}
+
+.historyItem button:first-child {
+    flex: 1
+    min-width: 0
+    overflow: hidden
+    padding: var(--padding-small)
+    border-radius: var(--border-radius)
+    text-align: left
+    text-overflow: ellipsis
+    white-space: nowrap
+    color: var(--primary-text-color)
+    font-size: var(--secondary-font-size)
+    transition: background .18s ease, color .18s ease
+}
+
+.historyItem button:first-child:hover {
+    background: var(--hover-background-color)
+}
+
+.history .selected {
+    color: var(--accent-color) !important
+    background: unquote('hsla(var(--accent-hsl), .12)') !important
+    font-weight: 600
+}
+
+.deleteChat {
+    flex: 0 0 var(--button-height)
+    width: var(--button-height)
+    height: var(--button-height)
+    border-radius: var(--border-radius)
+    color: var(--secondary-text-color)
+    opacity: 0
+    transition: opacity .18s ease, background .18s ease
+}
+
+.historyItem:hover .deleteChat,
+.deleteChat:focus-visible {
+    opacity: 1
+}
+
+.historyEmpty {
+    margin: var(--padding-small)
+    color: var(--secondary-text-color)
+    font-size: var(--secondary-font-size)
+}
+
+.historyPlaceholder {
+    display: grid
+    gap: var(--padding-small)
+    padding: var(--padding-small)
+}
+
+.historyPlaceholder span {
+    display: block
+    height: var(--padding-small)
+    border-radius: var(--border-radius)
+    background: var(--ai-border-color)
+    animation: ai-pulse 1.5s ease-in-out infinite
+}
+
+.historyPlaceholder span:nth-child(2) {
+    width: 78%
+    animation-delay: .12s
+}
+
+.historyPlaceholder span:nth-child(3) {
+    width: 56%
+    animation-delay: .24s
+}
+
+.sidebarFooter {
+    padding-top: var(--padding-medium)
+    border-top: 1px solid var(--ai-soft-border)
+}
+
+.sidebarAction {
+    display: flex
+    align-items: center
+    width: 100%
+    min-height: var(--button-height)
+    gap: var(--padding-small)
+    padding: 0 var(--padding-small)
+    border-radius: var(--border-radius)
+    color: var(--secondary-text-color)
+    font-size: var(--secondary-font-size)
+    text-align: left
+    transition: color .18s ease, background .18s ease, transform .18s ease
+}
+
+.sidebarAction[disabled] {
+    cursor: default
+    opacity: .45
+}
+
+.workspace {
     display: flex
     flex: 1
     flex-direction: column
     min-width: 0
+    min-height: 0
 }
-.provider {
+
+.header {
+    justify-content: space-between
+    flex: 0 0 auto
+    min-height: var(--header-height)
+    gap: var(--padding-medium)
+    padding: var(--padding-small) clamp(var(--padding-medium), 4vw, var(--padding-large))
+    border-bottom: 1px solid var(--ai-soft-border)
+    background: var(--background-color)
+}
+
+.headerStart,
+.headerActions {
+    min-width: 0
+    gap: var(--padding-small)
+}
+
+.heading {
     display: flex
-    flex-wrap: wrap
-    align-items: center
-    gap: .5rem
-    margin-bottom: .75rem
+    align-items: baseline
+    min-width: 0
+    gap: var(--padding-small)
 }
-.provider label {
+
+.heading h1 {
+    margin: 0
+    color: var(--primary-text-color)
+    font-size: var(--head-font-size)
+    font-weight: 600
+    letter-spacing: -.02em
+    white-space: nowrap
+}
+
+.refreshStatus {
+    display: inline-flex
+    align-items: center
+    gap: var(--padding-micro)
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+    white-space: nowrap
+}
+
+.refreshStatus > span {
+    width: .35rem
+    height: .35rem
+    border-radius: 50%
+    background: var(--accent-color)
+    animation: ai-pulse 1.2s ease-in-out infinite
+}
+
+.contextBadge {
+    padding: var(--padding-micro) var(--padding-small)
+    border-radius: var(--button-height)
+    color: var(--accent-color)
+    background: unquote('hsla(var(--accent-hsl), .1)')
+    font-size: var(--tertiary-font-size)
+    white-space: nowrap
+}
+
+.providerSelect {
+    gap: var(--padding-small)
+    min-width: 0
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+    white-space: nowrap
+}
+
+.providerSelect select {
+    min-width: 0
+    max-width: 11rem
+    padding: var(--padding-small) var(--padding-medium)
+    border: 1px solid var(--ai-border-color)
+    border-radius: var(--border-radius)
+    color: var(--primary-text-color)
+    background: var(--background-color)
+    font-size: var(--secondary-font-size)
+}
+
+.closeButton {
+    padding: 0 var(--padding-small)
+}
+
+.menuButton {
+    display: none
+    padding: 0 var(--padding-small)
+}
+
+.main {
     display: flex
-    align-items: center
-    gap: .35rem
+    flex: 1
+    flex-direction: column
+    min-width: 0
+    min-height: 0
 }
-.provider input,
-.provider select {
-    min-width: 10rem
-    padding: .45rem .55rem
+
+.providerSettings {
+    display: grid
+    grid-template-columns: repeat(3, minmax(0, 1fr)) auto
+    align-items: end
+    width: 100%
+    max-width: 48rem
+    margin: var(--padding-medium) auto 0
+    padding: var(--padding-medium)
+    border: 1px solid var(--ai-border-color)
+    border-radius: var(--ai-radius)
+    background: var(--ai-surface)
 }
+
+.providerField {
+    display: grid
+    gap: var(--padding-micro)
+    min-width: 0
+    padding-right: var(--padding-small)
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+}
+
+.providerField input {
+    width: 100%
+    min-width: 0
+    height: var(--button-height)
+    padding: 0 var(--padding-small)
+    border: 1px solid var(--ai-border-color)
+    border-radius: var(--border-radius)
+    color: var(--primary-text-color)
+    background: var(--background-color)
+    font-size: var(--secondary-font-size)
+}
+
+.providerActions {
+    align-self: end
+    gap: var(--padding-small)
+}
+
+.providerActions button,
+.inlineActions button,
+.draftActions button,
+.proposal > button {
+    min-height: var(--button-height)
+    padding: 0 var(--padding-small)
+    border-radius: var(--border-radius)
+    color: var(--accent-color)
+    background: unquote('hsla(var(--accent-hsl), .1)')
+    font-size: var(--secondary-font-size)
+    font-weight: 600
+    transition: background .18s ease, color .18s ease, transform .18s ease
+}
+
+.providerActions button:hover,
+.inlineActions button:hover,
+.draftActions button:hover,
+.proposal > button:hover {
+    color: unquote('hsl(var(--background-hsl))')
+    background: var(--accent-color)
+}
+
+.providerActions button:active,
+.inlineActions button:active,
+.draftActions button:active,
+.proposal > button:active {
+    transform: translateY(1px)
+}
+
+.scrollArea {
+    display: flex
+    flex: 1
+    flex-direction: column
+    min-height: 0
+    overflow-y: auto
+    padding: clamp(var(--padding-medium), 3vw, var(--padding-large)) clamp(var(--padding-medium), 5vw, var(--padding-large))
+    scrollbar-width: thin
+}
+
+.scrollArea > * {
+    width: 100%
+    max-width: 48rem
+    margin-right: auto
+    margin-left: auto
+}
+
+.loadingState {
+    display: grid
+    flex: 1
+    place-content: center
+    justify-items: center
+    gap: var(--padding-medium)
+    min-height: 12rem
+    color: var(--secondary-text-color)
+}
+
+.loadingOrb,
+.welcomeIcon {
+    width: 1rem
+    height: 1rem
+    border-radius: .35rem
+    background: unquote('hsla(var(--accent-hsl), .12)')
+}
+
+.loadingOrb {
+    animation: ai-pulse 1.5s ease-in-out infinite
+}
+
+.notice,
+.providerError,
+.error {
+    padding: var(--padding-small) var(--padding-medium)
+    border: 1px solid var(--ai-border-color)
+    border-radius: var(--ai-radius)
+    background: var(--ai-surface)
+}
+
+.notice {
+    margin-bottom: var(--padding-medium)
+    color: var(--secondary-text-color)
+}
+
 .providerError {
-    display: flex
-    flex-wrap: wrap
-    align-items: center
-    gap: .5rem
-    margin-bottom: .75rem
+    justify-content: space-between
+    gap: var(--padding-medium)
+    margin-bottom: var(--padding-medium)
+    border-color: unquote('color-mix(in srgb, var(--danger-color) 35%, transparent)')
     color: var(--danger-color)
 }
-.assist {
+
+.inlineActions {
+    flex-wrap: wrap
+    gap: var(--padding-small)
+}
+
+.inlineActions button {
+    color: var(--danger-color)
+    background: unquote('color-mix(in srgb, var(--danger-color) 12%, transparent)')
+}
+
+.assist,
+.proposals,
+.sources {
+    margin-bottom: var(--padding-medium)
+    padding: var(--padding-medium)
+    border: 1px solid var(--ai-border-color)
+    border-radius: var(--ai-radius)
+    background: var(--ai-surface)
+}
+
+.toolHeader,
+.sectionHeading {
+    justify-content: space-between
+    gap: var(--padding-small)
+    margin-bottom: var(--padding-small)
+}
+
+.toolHeader span:first-child,
+.sectionHeading strong {
+    color: var(--primary-text-color)
+    font-size: var(--secondary-font-size)
+    font-weight: 600
+}
+
+.toolHeader span:last-child,
+.sectionHeading span {
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+}
+
+.toolButtons {
+    flex-wrap: wrap
+    gap: var(--padding-small)
+}
+
+.toolButtons button {
+    display: inline-flex
+    align-items: center
+    min-height: var(--button-height)
+    gap: var(--padding-small)
+    padding: 0 var(--padding-small)
+    border: 1px solid var(--ai-border-color)
+    border-radius: var(--border-radius)
+    color: var(--primary-text-color)
+    background: var(--background-color)
+    font-size: var(--secondary-font-size)
+    transition: border-color .18s ease, background .18s ease, transform .18s ease
+}
+
+.toolButtons button:hover {
+    border-color: var(--accent-color)
+    background: unquote('hsla(var(--accent-hsl), .08)')
+}
+
+.toolButtons button:active {
+    transform: translateY(1px)
+}
+
+.suggestions {
     display: flex
     flex-wrap: wrap
     align-items: center
-    gap: .5rem
-    margin-bottom: .75rem
+    gap: var(--padding-small)
+    margin-top: var(--padding-small)
+    padding-top: var(--padding-small)
+    border-top: 1px solid var(--ai-soft-border)
 }
-.suggestions,
-.draft {
-    display: flex
-    flex-wrap: wrap
-    align-items: center
-    gap: .5rem
-    width: 100%
-}
+
+.suggestions button,
 .suggestions span {
-    padding: .25rem .5rem
-    border-radius: .25rem
-    background: var(--hover-background-color)
+    min-height: var(--button-height)
+    padding: 0 var(--padding-small)
+    border: 1px solid var(--ai-border-color)
+    border-radius: var(--button-height)
+    color: var(--accent-color)
+    background: unquote('hsla(var(--accent-hsl), .08)')
+    font-size: var(--secondary-font-size)
+    line-height: var(--button-height)
 }
+
+.suggestions button {
+    cursor: pointer
+    transition: background .18s ease, border-color .18s ease
+}
+
+.suggestions button:hover {
+    border-color: var(--accent-color)
+    background: unquote('hsla(var(--accent-hsl), .16)')
+}
+
 .draft {
-    flex-direction: column
-    align-items: stretch
+    display: grid
+    gap: var(--padding-small)
+    margin-top: var(--padding-medium)
+    padding-top: var(--padding-medium)
+    border-top: 1px solid var(--ai-soft-border)
 }
+
+.draft label {
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+}
+
 .draft textarea {
-    min-height: 6rem
-    padding: .65rem .75rem
+    width: 100%
+    min-height: 5rem
+    padding: var(--padding-small) var(--padding-medium)
+    border: 1px solid var(--ai-border-color)
+    border-radius: var(--border-radius)
+    color: var(--primary-text-color)
+    background: var(--background-color)
+    font: inherit
+    line-height: var(--primary-line-height)
     resize: vertical
 }
+
 .draftActions {
-    display: flex
-    gap: .5rem
-}
-.proposals {
-    display: flex
-    flex-direction: column
-    gap: .5rem
-    margin-bottom: .75rem
-}
-.proposal {
-    display: flex
     flex-wrap: wrap
-    align-items: center
-    gap: .5rem
-    padding: .6rem .75rem
-    border: 1px solid var(--border-color)
-    border-radius: .5rem
+    gap: var(--padding-small)
 }
+
+.proposal {
+    display: grid
+    gap: var(--padding-small)
+    margin-top: var(--padding-small)
+    padding-top: var(--padding-small)
+    border-top: 1px solid var(--ai-soft-border)
+}
+
+.proposal:first-of-type {
+    margin-top: 0
+    padding-top: 0
+    border-top: 0
+}
+
+.proposalMeta {
+    flex-wrap: wrap
+    gap: var(--padding-small)
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+}
+
+.proposalMeta span:first-child {
+    color: var(--primary-text-color)
+    font-weight: 600
+}
+
 .proposal code {
     max-width: 100%
     overflow: auto
+    padding: var(--padding-small)
+    border-radius: var(--border-radius)
+    color: var(--primary-text-color)
+    background: var(--ai-muted-surface)
+    font-size: var(--tertiary-font-size)
     white-space: pre-wrap
+    word-break: break-word
 }
-.messages {
-    display: flex
-    flex: 1
-    flex-direction: column
-    gap: .75rem
-    overflow: auto
-    padding: .5rem 0 1rem
+
+.welcome {
+    display: grid
+    justify-items: center
+    gap: var(--padding-small)
+    margin: auto auto var(--padding-large)
+    padding: var(--padding-large) var(--padding-medium)
+    text-align: center
 }
-.messages p {
-    max-width: 46rem
+
+.welcome h2 {
     margin: 0
-    padding: .6rem .75rem
+    color: var(--primary-text-color)
+    font-size: clamp(var(--head-font-size), 3vw, .75rem)
+    font-weight: 600
+    letter-spacing: -.025em
+}
+
+.welcome p {
+    max-width: 28rem
+    margin: 0
+    color: var(--secondary-text-color)
+    line-height: var(--primary-line-height)
+}
+
+.conversation {
+    display: flex
+    flex-direction: column
+    margin-top: auto
+}
+
+.message {
+    display: flex
+    align-items: flex-start
+    gap: var(--padding-small)
+    padding: var(--padding-medium) 0
+    border-top: 1px solid var(--ai-soft-border)
+}
+
+.message:first-child {
+    border-top: 0
+}
+
+.messageAvatar {
+    width: .7rem
+    height: .7rem
+    margin-top: var(--padding-micro)
+    border-radius: .25rem
+    color: var(--secondary-text-color)
+    background: var(--ai-muted-surface)
+}
+
+.messageBody {
+    min-width: 0
+    max-width: 42rem
+    color: var(--primary-text-color)
+    line-height: 1.65
     white-space: pre-wrap
-    border-radius: .5rem
+    overflow-wrap: anywhere
 }
+
 .user {
-    align-self: flex-end
-    background: var(--hover-background-color)
+    justify-content: flex-end
 }
-.assistant {
-    align-self: flex-start
+
+.user .messageAvatar {
+    order: 2
+    color: var(--accent-color)
+    background: unquote('hsla(var(--accent-hsl), .12)')
 }
-.messages a {
-    font-size: .9rem
+
+.user .messageBody {
+    max-width: 82%
+    padding: var(--padding-small) var(--padding-medium)
+    border: 1px solid var(--ai-soft-border)
+    border-radius: var(--ai-radius) var(--ai-radius) var(--padding-micro) var(--ai-radius)
+    background: var(--ai-muted-surface)
 }
+
+.sources {
+    margin-top: var(--padding-medium)
+}
+
+.sourceList {
+    display: grid
+    gap: var(--padding-small)
+}
+
+.sourceList a {
+    display: grid
+    gap: var(--padding-micro)
+    padding: var(--padding-small) var(--padding-medium)
+    border: 1px solid var(--ai-soft-border)
+    border-radius: var(--border-radius)
+    color: var(--primary-text-color)
+    background: var(--background-color)
+    transition: border-color .18s ease, background .18s ease
+}
+
+.sourceList a:hover {
+    border-color: var(--accent-color)
+    background: unquote('hsla(var(--accent-hsl), .06)')
+}
+
+.sourceList small {
+    overflow: hidden
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+    text-overflow: ellipsis
+    white-space: nowrap
+}
+
 .error {
+    margin-top: var(--padding-medium)
+    border-color: unquote('color-mix(in srgb, var(--danger-color) 35%, transparent)')
     color: var(--danger-color)
 }
-.form {
-    margin-top: 1rem
+
+.composerDock {
+    flex: 0 0 auto
+    padding: 0 clamp(var(--padding-medium), 5vw, var(--padding-large)) var(--padding-medium)
+    background: var(--background-color)
 }
-.form input {
+
+.quota,
+.composerHint {
+    display: block
+    width: 100%
+    max-width: 48rem
+    margin-right: auto
+    margin-left: auto
+    color: var(--secondary-text-color)
+    font-size: var(--tertiary-font-size)
+    text-align: center
+}
+
+.quota {
+    margin-bottom: var(--padding-small)
+}
+
+.form {
+    width: 100%
+    max-width: 48rem
+    margin: 0 auto
+    gap: var(--padding-small)
+    padding: var(--padding-small)
+    border: 1px solid var(--ai-border-color)
+    border-radius: .75rem
+    background: var(--ai-surface)
+    box-shadow: 0 .1rem .5rem unquote('color-mix(in srgb, var(--primary-text-color) 8%, transparent)')
+    transition: border-color .18s ease, box-shadow .18s ease
+}
+
+.form:focus-within {
+    border-color: unquote('color-mix(in srgb, var(--accent-color) 70%, var(--ai-border-color))')
+    box-shadow: 0 0 0 2px unquote('hsla(var(--accent-hsl), .14)')
+}
+
+.form textarea {
     flex: 1
     min-width: 0
-    padding: .65rem .75rem
+    min-height: var(--button-height)
+    max-height: 7rem
+    padding: var(--padding-small) var(--padding-medium)
+    border: 0
+    outline: 0
+    color: var(--primary-text-color)
+    background: transparent
+    font: inherit
+    line-height: var(--primary-line-height)
+    resize: none
 }
-.form button,
-.actions button {
-    padding: .5rem .75rem
+
+.sendButton {
+    display: grid
+    flex: 0 0 var(--button-height)
+    place-items: center
+    width: var(--button-height)
+    height: var(--button-height)
+    align-self: end
+    border-radius: 50%
+    color: unquote('hsl(var(--background-hsl))')
+    background: var(--accent-color)
+    font-size: var(--head-font-size)
+    font-weight: 600
+    line-height: 1
+    transition: filter .18s ease, transform .18s ease, opacity .18s ease
 }
-@media (max-width: 36rem) {
-    .body { flex-direction: column }
-    .history { width: auto; max-height: 8rem; overflow: auto }
+
+.sendButton:hover:not([disabled]) {
+    filter: brightness(1.08)
+}
+
+.sendButton:active:not([disabled]) {
+    transform: translateY(1px) scale(.97)
+}
+
+.sendButton[disabled] {
+    cursor: default
+    opacity: .4
+}
+
+.composerHint {
+    margin-top: var(--padding-small)
+}
+
+.scrim {
+    display: none
+}
+
+@keyframes ai-pulse {
+    0%, 100% { opacity: .38 }
+    50% { opacity: .9 }
+}
+
+@media (max-width: 48rem) {
+    .sidebar {
+        position: absolute
+        z-index: 3
+        top: 0
+        bottom: 0
+        left: 0
+        width: 17rem
+        max-width: 88vw
+        box-shadow: .4rem 0 1.2rem unquote('color-mix(in srgb, var(--primary-text-color) 12%, transparent)')
+        transform: translateX(-105%)
+        transition: transform .22s ease
+    }
+
+    .page[data-sidebar-open='true'] .sidebar {
+        transform: translateX(0)
+    }
+
+    .scrim {
+        position: absolute
+        z-index: 2
+        inset: 0
+        display: block
+        width: 100%
+        border: 0
+        background: rgba(0,0,0,.35)
+        cursor: pointer
+        opacity: 0
+        pointer-events: none
+        transition: opacity .22s ease
+    }
+
+    .page[data-sidebar-open='true'] .scrim {
+        opacity: 1
+        pointer-events: auto
+    }
+
+    .menuButton {
+        display: inline-flex
+    }
+
+    .header {
+        padding-right: var(--padding-medium)
+        padding-left: var(--padding-medium)
+    }
+
+    .providerSelect > span {
+        display: none
+    }
+
+    .providerSelect select {
+        max-width: 8rem
+    }
+
+    .providerSettings {
+        grid-template-columns: 1fr 1fr
+        margin-right: var(--padding-medium)
+        margin-left: var(--padding-medium)
+    }
+
+    .providerActions {
+        grid-column: 1 / -1
+        padding-top: var(--padding-small)
+    }
+
+    .closeButton span {
+        display: none
+    }
+}
+
+@media (max-width: 32rem) {
+    .header {
+        gap: var(--padding-small)
+    }
+
+    .heading h1 {
+        font-size: var(--primary-font-size)
+    }
+
+    .contextBadge {
+        display: none
+    }
+
+    .providerSelect select {
+        max-width: 6rem
+    }
+
+    .scrollArea {
+        padding: var(--padding-medium)
+    }
+
+    .assist,
+    .proposals,
+    .sources {
+        padding: var(--padding-small)
+    }
+
+    .toolHeader,
+    .sectionHeading,
+    .providerError {
+        align-items: flex-start
+        flex-direction: column
+    }
+
+    .messageBody,
+    .user .messageBody {
+        max-width: calc(100% - 1rem)
+    }
+
+    .composerDock {
+        padding-right: var(--padding-small)
+        padding-left: var(--padding-small)
+    }
+}
+
+@media (max-width: 28rem) {
+    .header {
+        gap: var(--padding-micro)
+        padding-right: var(--padding-small)
+        padding-left: var(--padding-small)
+    }
+
+    .menuButton {
+        min-width: var(--button-height)
+        padding-right: 0
+        padding-left: 0
+    }
+
+    .menuButton span,
+    .toolHeader span:last-child {
+        display: none
+    }
+
+    .heading h1 {
+        max-width: 5rem
+        overflow: hidden
+        text-overflow: ellipsis
+    }
+
+    .refreshStatus {
+        max-width: 4rem
+        overflow: hidden
+        text-overflow: ellipsis
+    }
+
+    .headerStart,
+    .headerActions {
+        gap: var(--padding-micro)
+    }
+
+    .providerSelect select {
+        max-width: 3rem
+        padding-right: var(--padding-micro)
+        padding-left: var(--padding-micro)
+    }
+
+    .toolButtons {
+        display: grid
+        grid-template-columns: 1fr
+    }
+
+    .toolButtons button {
+        width: 100%
+        min-width: 0
+        justify-content: flex-start
+    }
+}
+
+@media (max-width: 14rem) {
+    .heading {
+        max-width: 0
+    }
+
+    .heading h1 {
+        max-width: 0
+        font-size: 0
+    }
+
+    .providerSelect select {
+        max-width: 2.25rem
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .sidebar,
+    .scrim,
+    .iconButton,
+    .menuButton,
+    .closeButton,
+    .sidebarAction,
+    .deleteChat,
+    .newChat,
+    .toolButtons button,
+    .suggestions button,
+    .providerActions button,
+    .inlineActions button,
+    .draftActions button,
+    .proposal > button,
+    .sourceList a,
+    .form,
+    .sendButton,
+    .loadingOrb,
+    .historyPlaceholder span,
+    .refreshStatus > span {
+        animation: none
+        transition: none
+    }
 }

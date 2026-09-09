@@ -35,3 +35,6 @@ project.xcworkspace
 cloudflare/.wrangler/
 
 cloudflare/wrangler.private.toml
+
+# Local reference extension files
+/参考插件/

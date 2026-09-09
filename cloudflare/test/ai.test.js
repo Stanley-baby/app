@@ -254,6 +254,34 @@ test('AI config, streaming chat, private history, and deletion use Cloudflare-ma
     assert.equal(db.messages.length, 0)
 })
 
+test('AI greetings do not trigger bookmark tools and still return a response', async () => {
+    const { env, calls } = await environment()
+    env.AI.run = async (...args) => {
+        calls.push(args)
+        return args[1].tools?.length
+            ? new Response('data: {"tool_calls":[{"name":"bookmark_read","arguments":{}}]}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+            : new Response('data: {"response":"你好！"}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+    }
+
+    const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: '你好', language: 'zh-CN' }) }), env)
+    assert.equal(response.status, 200)
+    const body = await response.text()
+    assert.match(body, /"delta":"你好！"/)
+    assert.match(body, /"done":true/)
+    assert.equal(calls[0][1].tools, undefined)
+})
+
+test('AI chat reports an empty provider response instead of silently completing', async () => {
+    const { env } = await environment()
+    env.AI.run = async () => new Response('data: {"response":""}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })
+
+    const response = await worker.fetch(request('/v2/ai/chat', { method: 'POST', body: JSON.stringify({ message: 'Return nothing' }) }), env)
+    assert.equal(response.status, 200)
+    const body = await response.text()
+    assert.match(body, /"error":"ai_provider_empty_response"/)
+    assert.doesNotMatch(body, /"done":true/)
+})
+
 test('AI grounds natural-language prompts in authorized bookmark search results', async () => {
     const { env, db, calls } = await environment()
     db.bookmarks.push({
